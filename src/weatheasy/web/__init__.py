@@ -1,0 +1,44 @@
+import importlib.metadata
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+
+import weatheasy
+from . import controller as ctr, models as mls
+from weatheasy.error import BaseValueError
+
+
+async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResponse:
+    return JSONResponse({'detail': str(err)}, 422)
+
+
+app = FastAPI(
+    title='WeathEasy',
+    version=importlib.metadata.metadata(__package__.split('.', 1)[0]).get('version', 'dev'),
+    exception_handlers={
+        BaseValueError: handle_value_error,
+    },
+)
+
+
+@app.get('/variables', response_model=mls.Variables)
+def get_variables() -> mls.Variables:
+    return ctr.get_variables()
+
+
+@app.get(
+    path='/cfs2',
+    response_model=list[mls.CFS2DataItem],
+    response_model_exclude_unset=True,
+)
+async def get_cfs2_data(query: mls.SFS2Query) -> StreamingResponse:
+    return await ctr.get_data(weatheasy.get_cfs2_data, query)
+
+
+@app.get(
+    path='/cmip6',
+    response_model=list[mls.CMIP6DataItem],
+    response_model_exclude_unset=True,
+)
+async def get_cmip6_data(query: mls.CMIP6Query) -> StreamingResponse:
+    return await ctr.get_data(weatheasy.get_cmip6_data, query)

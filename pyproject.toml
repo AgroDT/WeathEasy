@@ -1,0 +1,93 @@
+[project]
+name = "weatheasy"
+description = "A service for easy weather data acquiring"
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["version"]
+authors = [
+    { "name" = "Margarita Usacheva", email = "usa4eva.m@mail.ru" },
+    { "name" = "Petr Tsymbarovich", email = "petr@tsymbarovich.ru" },
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
+
+dependencies = [
+    "netcdf4~=1.7",
+    "rasterio~=1.3",
+    "requests~=2.32",
+    "zarr~=2.18",
+]
+
+[project.optional-dependencies]
+s3 = [
+    "s3fs~=2024.6",
+]
+web = [
+    "fastapi-slim~=0.111",
+    "pydantic-settings~=2.3",
+    "uvicorn~=0.30",
+]
+
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "setuptools-git-versioning>=2.0,<3",
+]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools-git-versioning]
+enabled = true
+
+[tool.rye]
+managed = true
+universal = true
+generate-hashes = true
+dev-dependencies = [
+    "mypy~=1.11",
+    "types-requests~=2.32",
+]
+
+[tool.mypy]
+plugins = [
+    "pydantic.mypy",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "netCDF4.*",
+    "rasterio.*",
+    "s3fs.*",
+    "zarr.*",
+]
+ignore_missing_imports = true
+
+[tool.ruff]
+# Update when mypy supports PEP 695
+target-version = "py311"
+line-length = 100
+show-fixes = true
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN002", "ANN003", "ANN101", "ANN102", "ANN202", "ANN401",
+    "BLE001",
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D202", "D203", "D213", "D400",
+    "N813",
+    "PLR0913", "PLR2004",
+    "RUF001", "RUF002", "RUF003",
+    "TID252",
+    "COM812", "ISC001", "Q000", "Q003",  # Handled by ruff format
+]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+combine-as-imports = true
+known-local-folder = ["weatheasy"]
+
+[tool.ruff.lint.flake8-quotes]
+multiline-quotes = "double"
