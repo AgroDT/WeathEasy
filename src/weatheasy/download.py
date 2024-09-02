@@ -4,7 +4,6 @@ import logging
 import math
 import sys
 import time
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from contextlib import ExitStack, contextmanager
 from datetime import date, timedelta
 from itertools import product
@@ -22,7 +21,7 @@ from requests import Session
 from requests.adapters import HTTPAdapter
 
 from weatheasy import const
-from weatheasy.util import get_storage, utc_now
+from weatheasy.util import get_storage, init_parser, utc_now
 
 
 if TYPE_CHECKING:
@@ -35,7 +34,7 @@ def main(*, configure_logging: bool = True) -> None:
             format='%(asctime)s %(name)s [%(levelname)s] %(message)s',
             level=logging.INFO,
         )
-    parser = ArgumentParser(_MODULE_NAME, formatter_class=ArgumentDefaultsHelpFormatter)
+    parser = init_parser(_MODULE_NAME)
     parser.add_argument(
         '-d',
         '--data',

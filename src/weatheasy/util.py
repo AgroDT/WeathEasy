@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
+frofrom datetime import UTC, datetime
 
 import zarr
 
 from weatheasy.error import S3ImportError
+from weatheasy.version import __version__
 
 
 def utc_now() -> datetime:
@@ -35,3 +37,11 @@ def get_storage(root: str) -> zarr.Group:
         store = root
 
     return zarr.group(store)
+
+
+def init_parser(module: str = __package__) -> ArgumentParser:
+    version = __version__ or 'unknown version'
+    parser = ArgumentParser(module, formatter_class=ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-v', '--version', action='version', version=version)
+
+    return parser

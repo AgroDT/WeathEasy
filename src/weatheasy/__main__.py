@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace, _SubParsersAction
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -9,10 +8,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from weatheasy import Coords, const, get_cfs2_data, get_cmip6_data
-from weatheasy.util import get_storage
+from weatheasy.util import get_storage, init_parser
 
 
 if TYPE_CHECKING:
+    from argparse import ArgumentParser, Namespace, _SubParsersAction
     from collections.abc import Iterable
 
 
@@ -31,7 +31,7 @@ def main(*, configure_logging: bool = True) -> None:
 
 
 def _parse_args():
-    parser = ArgumentParser(__package__, formatter_class=ArgumentDefaultsHelpFormatter)
+    parser = init_parser()
     subparsers = parser.add_subparsers(dest='action', required=True)
     subparsers.add_parser('list-vars', help='list available variables')
     _add_data_subparser(subparsers, 'cmip6', const.CMIP6_VARS)

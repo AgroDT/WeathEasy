@@ -1,11 +1,10 @@
-import importlib.metadata
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import weatheasy
 from . import controller as ctr, models as mls
 from weatheasy.error import BaseValueError
+from weatheasy.version import __version__
 
 
 async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResponse:
@@ -14,7 +13,7 @@ async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResp
 
 app = FastAPI(
     title='WeathEasy',
-    version=importlib.metadata.metadata(__package__.split('.', 1)[0]).get('version', 'dev'),
+    version=__version__,
     exception_handlers={
         BaseValueError: handle_value_error,
     },
