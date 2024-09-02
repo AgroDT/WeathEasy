@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -67,9 +68,9 @@ def _add_data_subparser(
     parser.add_argument(
         '-o',
         '--output',
-        type=Path,
         metavar='PATH',
         help='output file',
+        default='stdout',
     )
     return parser
 
@@ -95,14 +96,14 @@ def _run(args: Namespace):
         variables=variables,
     )
 
-    output: Path | None = args.output
-    if output is None:
-        lat = _format_deg(coords.latitude, 'S', 'N')
-        lon = _format_deg(coords.longitude, 'W', 'E')
-        output = Path.cwd() / f'{lat}{lon}_{begin:%Y%m%d}-{end:%Y%m%d}.csv'
+    if args.output == 'stdout':
+        output = sys.stdout
     else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open('w') as f:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        output = path.open('w')
+
+    with output as f:
         f.write('DATE')
         for cell in variables:
             f.write(',')
@@ -125,15 +126,6 @@ def _print_vars(header: str, variables: Iterable[tuple[str, const.VarInfo]]) -> 
         if ru := info.ru:
             print(f'                  {ru}')  # noqa: T201
     print()  # noqa: T201
-
-
-def _format_deg(deg: float, lower: str, upper: str) -> str:
-    if deg >= 0:
-        hem = upper
-    else:
-        deg *= -1
-        hem = lower
-    return f'{hem}{deg * 100000:0>8.0f}'
 
 
 if __name__ == '__main__':
