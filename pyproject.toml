@@ -29,6 +29,11 @@ web = [
     "uvicorn~=0.30",
 ]
 
+[project.urls]
+Homepage = "https://github.com/AgroDT/WeathEasy"
+Repository = "https://github.com/AgroDT/WeathEasy.git"
+Issues = "https://github.com/AgroDT/WeathEasy/issues"
+
 [build-system]
 requires = [
     "setuptools>=61.0",
