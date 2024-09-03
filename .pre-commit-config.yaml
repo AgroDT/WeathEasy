@@ -1,0 +1,32 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix, lf]
+      - id: trailing-whitespace
+  - repo: local
+    hooks:
+      - id: lint
+        name: lint
+        language: system
+        entry: rye
+        args: [lint, src]
+        pass_filenames: false
+      - id: format
+        name: format
+        language: system
+        entry: rye
+        args: [fmt, src]
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        language: system
+        entry: rye
+        args: [run, check]
+        files: ^src/
+        types: [file, python]

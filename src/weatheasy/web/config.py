@@ -18,12 +18,12 @@ class Settings(BaseSettings):
     data_root: str
     precision: PositiveInt = 6
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @cached_property
     def storage(self) -> zarr.Group:
         return get_storage(self.data_root)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @cached_property
     def format_float(self) -> FormatFloat:
         return float_formatter_factory('null', self.precision)

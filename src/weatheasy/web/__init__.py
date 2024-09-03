@@ -13,7 +13,7 @@ async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResp
 
 app = FastAPI(
     title='WeathEasy',
-    version=__version__,
+    version=__version__ or 'unknown',
     exception_handlers={
         BaseValueError: handle_value_error,
     },
