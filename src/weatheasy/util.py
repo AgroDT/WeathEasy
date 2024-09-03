@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-frofrom datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 
+import numpy as np
 import zarr
 
 from weatheasy.error import S3ImportError
 from weatheasy.version import __version__
+
+
+type FormatFloat = Callable[[np.floating], str]
 
 
 def utc_now() -> datetime:
@@ -45,3 +50,17 @@ def init_parser(module: str = __package__) -> ArgumentParser:
     parser.add_argument('-v', '--version', action='version', version=version)
 
     return parser
+
+
+def float_formatter_factory(nan: str, precision: int) -> FormatFloat:
+    precision = int(precision)
+    if not 0 < precision <= 6:
+        msg = f'precision must be a positive integer, got "{precision}"'
+        raise ValueError(msg)
+
+    def impl(value: np.floating) -> str:
+        if np.isnan(value):
+            return nan
+        return np.format_float_positional(value, precision, trim='-')
+
+    return impl

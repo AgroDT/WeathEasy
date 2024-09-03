@@ -1,7 +1,10 @@
-from functools import cache
+from functools import cache, cached_property
 
-from pydantic import PositiveInt
+import zarr
+from pydantic import PositiveInt, computed_field
 from pydantic_settings import BaseSettings
+
+from weatheasy.util import FormatFloat, float_formatter_factory, get_storage
 
 
 class Settings(BaseSettings):
@@ -13,7 +16,17 @@ class Settings(BaseSettings):
     }
 
     data_root: str
-    decimal_places: PositiveInt = 6
+    precision: PositiveInt = 6
+
+    @computed_field
+    @cached_property
+    def storage(self) -> zarr.Group:
+        return get_storage(self.data_root)
+
+    @computed_field
+    @cached_property
+    def format_float(self) -> FormatFloat:
+        return float_formatter_factory('null', self.precision)
 
 
 @cache

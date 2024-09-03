@@ -3,23 +3,25 @@ from __future__ import annotations
 from io import StringIO
 from typing import TYPE_CHECKING
 
-import numpy as np
 from anyio import to_thread
 from fastapi.responses import StreamingResponse
 
 from .config import get_config
 from .models import DataQuery, Variables, VarInfo
 from weatheasy.const import CFS2_BANDS, CMIP6_VARS, ONE_DAY
-from weatheasy.util import get_storage
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import date
 
+    import numpy as np
+    import zarr
     from numpy.typing import NDArray
 
-    Getter = Callable[..., NDArray[np.float32]]
+    from weatheasy.util import FormatFloat
+
+    type Getter = Callable[..., NDArray[np.float32]]
 
 
 def get_variables() -> Variables:
@@ -31,19 +33,19 @@ def get_variables() -> Variables:
 
 async def get_data(getter: Getter, query: DataQuery) -> StreamingResponse:
     cfg = get_config()
-    data = await to_thread.run_sync(_exec_getter, getter, query, cfg.data_root)
-    content = _stream_data(data, query, cfg.decimal_places)
+    data = await to_thread.run_sync(_exec_getter, getter, query, cfg.storage)
+    content = _stream_data(data, query, cfg.format_float)
     return StreamingResponse(content, media_type='application/json')
 
 
-def _exec_getter(getter: Getter, query: DataQuery, data_root: str):
-    data = getter(**query, root=get_storage(data_root))
+def _exec_getter(getter: Getter, query: DataQuery, root: zarr.Group):
+    data = getter(**query, root=root)
     return data.transpose()
 
 
-def _stream_data(data: NDArray[np.float32], query: DataQuery, precision: int):
+def _stream_data(data: NDArray[np.float32], query: DataQuery, format_float: FormatFloat):
     sio = StringIO()
-    format_row = _row_formatter_factory(sio, query['variables'], precision)
+    format_row = _row_formatter_factory(sio, query['variables'], format_float)
     date_ = query['begin']
     buf_size = 10240
     sio.write('[')
@@ -60,14 +62,12 @@ def _stream_data(data: NDArray[np.float32], query: DataQuery, precision: int):
     yield sio.getvalue()[: sio.tell()]
 
 
-def _row_formatter_factory(sio: StringIO, variables: Sequence[str], precision: int):
+def _row_formatter_factory(sio: StringIO, variables: Sequence[str], format_float: FormatFloat):
     def format_row(date_: date, row: NDArray[np.float32]):
         sio.write('{')
         for var, val in zip(variables, row, strict=False):
             sio.write(f'"{var}":')
-            sio.write(
-                'null' if np.isnan(val) else np.format_float_positional(val, precision, trim='-')
-            )
+            sio.write(format_float(val))
             sio.write(',')
         sio.write(f'"date":"{date_}"}}')
 

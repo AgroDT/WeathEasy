@@ -6,10 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from weatheasy import Coords, const, get_cfs2_data, get_cmip6_data
-from weatheasy.util import get_storage, init_parser
+from weatheasy.util import float_formatter_factory, get_storage, init_parser
 
 
 if TYPE_CHECKING:
@@ -72,6 +70,13 @@ def _add_data_subparser(
         help='output file',
         default='stdout',
     )
+    parser.add_argument(
+        '-p',
+        '--precision',
+        metavar='INT',
+        help='Number of decimal places for rounding results in responses',
+        default=6,
+    )
     return parser
 
 
@@ -83,6 +88,7 @@ def _run(args: Namespace):
     else:
         raise RuntimeError
 
+    format_float = float_formatter_factory('NA', args.precision)
     root = get_storage(args.data)
     begin: date = args.begin
     end: date = args.end
@@ -115,7 +121,7 @@ def _run(args: Namespace):
             date_ += const.ONE_DAY
             for cell in row:
                 f.write(',')
-                f.write('NA' if np.isnan(cell) else f'{cell:.6f}')
+                f.write(format_float(cell))
             f.write('\n')
 
 
