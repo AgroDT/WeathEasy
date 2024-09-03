@@ -19,7 +19,7 @@ def main(*, configure_logging: bool = True) -> None:
     if configure_logging:
         logging.basicConfig(
             format='%(asctime)s %(name)s [%(levelname)s] %(message)s',
-            level=logging.INFO,
+            level=logging.WARNING,
         )
     args = _parse_args()
     if args.action == 'list-vars':
