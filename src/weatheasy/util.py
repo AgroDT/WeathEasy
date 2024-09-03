@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
 import zarr
@@ -48,6 +49,13 @@ def init_parser(module: str = __package__) -> ArgumentParser:
     version = __version__ or 'unknown version'
     parser = ArgumentParser(module, formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument('-v', '--version', action='version', version=version)
+    parser.add_argument(
+        '-d',
+        '--data',
+        default=Path.cwd().joinpath('weatheasy', 'zarr').as_posix(),
+        metavar='STORE',
+        help='Zarr store for downloaded data',
+    )
 
     return parser
 

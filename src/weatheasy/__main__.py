@@ -31,6 +31,20 @@ def main(*, configure_logging: bool = True) -> None:
 
 def _parse_args():
     parser = init_parser()
+    parser.add_argument(
+        '-o',
+        '--output',
+        metavar='PATH',
+        help='output file',
+        default='stdout',
+    )
+    parser.add_argument(
+        '-p',
+        '--precision',
+        metavar='INT',
+        help='Number of decimal places for rounding results in responses',
+        default=6,
+    )
     subparsers = parser.add_subparsers(dest='action', required=True)
     subparsers.add_parser('list-vars', help='list available variables')
     _add_data_subparser(subparsers, 'cmip6', const.CMIP6_VARS)
@@ -56,27 +70,7 @@ def _add_data_subparser(
         nargs='+',
         metavar='var',
     )
-    parser.add_argument(
-        '-d',
-        '--data',
-        default=Path.cwd().as_posix(),
-        metavar='STORE',
-        help='Zarr store for downloaded data',
-    )
-    parser.add_argument(
-        '-o',
-        '--output',
-        metavar='PATH',
-        help='output file',
-        default='stdout',
-    )
-    parser.add_argument(
-        '-p',
-        '--precision',
-        metavar='INT',
-        help='Number of decimal places for rounding results in responses',
-        default=6,
-    )
+
     return parser
 
 

@@ -36,13 +36,6 @@ def main(*, configure_logging: bool = True) -> None:
         )
     parser = init_parser(_MODULE_NAME)
     parser.add_argument(
-        '-d',
-        '--data',
-        default=Path.cwd().as_posix(),
-        metavar='STORE',
-        help='Zarr store for downloaded data',
-    )
-    parser.add_argument(
         '--download-dir',
         type=Path,
         metavar='PATH',
