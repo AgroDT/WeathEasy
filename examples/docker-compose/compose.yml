@@ -1,0 +1,43 @@
+volumes:
+  # Create a named volume for downloaded data. This might be useful to restart
+  # downloads on failures. Alternatively you can delete this line and all
+  # associated mounts to use temporary files.
+  weatheasy-data: {}
+
+# These variables are used by all services.
+# Don't forget to set it up before running the stack.
+x-common-environment: &common-environment
+  WEATHEASY__DATA_ROOT: ${WEATHEASY__DATA_ROOT}
+  WEATHEASY__DECIMAL_PLACES: ${WEATHEASY__DECIMAL_PLACES:-}
+  AWS_ENDPOINT_URL_S3: ${AWS_ENDPOINT_URL_S3:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+
+services:
+  # Web API service. After start is available at http://127.0.0.1:8000.
+  api:
+    image: ghcr.io/agrodt/weatheasy:${WEATHEASY_TAG:-latest}
+    restart: always
+    environment: *common-environment
+    ports:
+      - "8000:8000"
+
+  # Downloads and updates CFSv2 data on a schedule.
+  downloader-cfs2:
+    build:
+      context: .
+      # Custom Dockerfile with cron installed.
+      dockerfile: cfs2-updater.dockerfile
+    restart: on-failure
+    environment: *common-environment
+    volumes:
+      - weatheasy-data:/data
+
+  # Downloads CMIP6 data (runs once).
+  downloader-cmip6:
+    image: ghcr.io/agrodt/weatheasy:${WEATHEASY_TAG:-latest}
+    restart: on-failure
+    entrypoint: ["python", "-m", "weatheasy.download", "-d", "$WEATHEASY__DATA_ROOT", "--download-dir", "/data", "cmip6"]
+    environment: *common-environment
+    volumes:
+      - weatheasy-data:/data
