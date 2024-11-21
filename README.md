@@ -194,18 +194,18 @@ Find an example for Docker Compose at [examples/docker-compose](examples/docker-
 
 ## Development
 
-WeathEasy is written in Python and managed by [Rye](https://rye.astral.sh/).
+WeathEasy is written in Python and managed by [uv](https://docs.astral.sh/uv).
 After cloning this repository, initialize the development environment with:
 
 ```sh
-rye sync --all-features
+uv sync --all-extras --frozen
 ```
 
 We also recommend to install and use pre-commit:
 
 ```sh
-rye tools install pre-commit
-pre-commit install
+uv tool install pre-commit
+uv tool run pre-commit install
 ```
 
 You can develop WeathEasy with locally running S3-compatible object storage
