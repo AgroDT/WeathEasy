@@ -11,22 +11,29 @@ repos:
       - id: trailing-whitespace
   - repo: local
     hooks:
+      - id: uv-lock
+        name: uv lock
+        language: system
+        entry: python
+        args: [scripts/lock.py]
+        files: (pyproject.toml|uv.lock)
+        pass_filenames: false
       - id: lint
         name: lint
         language: system
-        entry: rye
-        args: [lint, src]
+        entry: uv
+        args: [run, --frozen, ruff, check, src]
         pass_filenames: false
       - id: format
         name: format
         language: system
-        entry: rye
-        args: [fmt, src]
+        entry: uv
+        args: [run, --frozen, ruff, format, src]
         pass_filenames: false
       - id: mypy
         name: mypy
         language: system
-        entry: rye
-        args: [run, check]
+        entry: uv
+        args: [run, --frozen, mypy]
         files: ^src/
         types: [file, python]

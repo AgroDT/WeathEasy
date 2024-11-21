@@ -19,6 +19,13 @@ dependencies = [
     "zarr~=2.18",
 ]
 
+[dependency-groups]
+dev = [
+    "mypy~=1.11",
+    "ruff~=0.7",
+    "types-requests~=2.32",
+]
+
 [project.optional-dependencies]
 s3 = [
     "s3fs~=2024.6",
@@ -35,26 +42,8 @@ Repository = "https://github.com/AgroDT/WeathEasy.git"
 Issues = "https://github.com/AgroDT/WeathEasy/issues"
 
 [build-system]
-requires = [
-    "setuptools>=61.0",
-    "setuptools-git-versioning>=2.0,<3",
-]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools-git-versioning]
-enabled = true
-
-[tool.rye]
-managed = true
-universal = true
-generate-hashes = true
-dev-dependencies = [
-    "mypy~=1.11",
-    "types-requests~=2.32",
-]
-
-[tool.rye.scripts]
-check = "mypy --enable-incomplete-feature=NewGenericSyntax"
 
 [tool.mypy]
 plugins = [
