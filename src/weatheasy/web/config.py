@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     data_root: str
     precision: PositiveInt = 6
+    enable_cors: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @cached_property

@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import weatheasy
 from . import controller as ctr, models as mls
+from .config import get_config
 from weatheasy.error import BaseValueError
 from weatheasy.version import __version__
 
@@ -18,6 +20,14 @@ app = FastAPI(
         BaseValueError: handle_value_error,
     },
 )
+
+
+if get_config().enable_cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_methods='*',
+        allow_origin_regex='.*',
+    )
 
 
 @app.get('/variables', response_model=mls.Variables)
