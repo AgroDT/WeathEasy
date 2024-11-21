@@ -60,8 +60,7 @@ module = [
 ignore_missing_imports = true
 
 [tool.ruff]
-# Update when mypy supports PEP 695
-target-version = "py311"
+target-version = "py312"
 line-length = 100
 show-fixes = true
 
