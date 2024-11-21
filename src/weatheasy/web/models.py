@@ -1,6 +1,6 @@
 from datetime import date
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, TypeAlias, TypedDict
+from typing import Annotated, TypedDict
 
 from fastapi import Depends, Query
 from pydantic import BaseModel, Field, create_model
@@ -8,12 +8,8 @@ from pydantic import BaseModel, Field, create_model
 from weatheasy import Coords, const
 
 
-if TYPE_CHECKING:
-    CFS2Var: TypeAlias = Enum
-    CMIP6Var: TypeAlias = Enum
-else:
-    CFS2Var = Enum('CFS2Var', {k: k for k in const.CFS2_BANDS})
-    CMIP6Var = Enum('CMIP6Var', {k: k for k in const.CMIP6_VARS})
+CFS2Var = Enum('CFS2Var', {k: k for k in const.CFS2_BANDS})  # type: ignore[misc]
+CMIP6Var = Enum('CMIP6Var', {k: k for k in const.CMIP6_VARS})  # type: ignore[misc]
 
 
 class VarInfo(BaseModel):
