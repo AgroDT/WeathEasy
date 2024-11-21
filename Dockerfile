@@ -13,13 +13,15 @@ WORKDIR /usr/src/weatheasy
 COPY pyproject.toml uv.lock ./
 RUN --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --all-extras --no-dev \
+    uv sync --frozen --all-extras --no-install-project --no-dev \
         --no-binary-package rasterio \
         --no-binary-package netcdf4
 COPY . .
+ARG SETUPTOOLS_SCM_PRETEND_VERSION='0.0.0'
 RUN --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uv,target=/bin/uv \
+    --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uvx,target=/bin/uvx \
     . "$VENV_DIR/bin/activate" \
-    && uv pip install --no-cache --no-deps .
+    && SETUPTOOLS_SCM_PRETEND_VERSION=$SETUPTOOLS_SCM_PRETEND_VERSION uv pip install --no-cache --no-deps .
 
 FROM python:${PYVERSION}-slim-bookworm
 ARG VENV_DIR
