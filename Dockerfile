@@ -17,11 +17,11 @@ RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
         --no-binary-package rasterio \
         --no-binary-package netcdf4
 COPY . .
-ARG SETUPTOOLS_SCM_PRETEND_VERSION='0.0.0'
+ARG UV_DYNAMIC_VERSIONING_BYPASS='0.0.0'
 RUN --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uv,target=/bin/uv \
     --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uvx,target=/bin/uvx \
     . "$VENV_DIR/bin/activate" \
-    && SETUPTOOLS_SCM_PRETEND_VERSION=$SETUPTOOLS_SCM_PRETEND_VERSION uv pip install --no-cache --no-deps .
+    && UV_DYNAMIC_VERSIONING_BYPASS=$UV_DYNAMIC_VERSIONING_BYPASS uv pip install --no-cache --no-deps .
 
 FROM python:${PYVERSION}-slim-bookworm
 ARG VENV_DIR

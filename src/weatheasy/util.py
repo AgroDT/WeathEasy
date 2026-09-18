@@ -9,7 +9,12 @@ import numpy as np
 import zarr
 
 from weatheasy.error import S3ImportError
-from weatheasy.version import __version__
+
+
+try:
+    from weatheasy._version import version as _version
+except ImportError:
+    _version = 'unknown version'
 
 
 type FormatFloat = Callable[[np.floating], str]
@@ -46,9 +51,8 @@ def get_storage(root: str) -> zarr.Group:
 
 
 def init_parser(module: str = __package__) -> ArgumentParser:
-    version = __version__ or 'unknown version'
     parser = ArgumentParser(module, formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-v', '--version', action='version', version=version)
+    parser.add_argument('-v', '--version', action='version', version=_version)
     parser.add_argument(
         '-d',
         '--data',

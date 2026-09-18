@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling>=1.32.3,<2", "uv-dynamic-versioning>=0.14.1,<1"]
+build-backend = "hatchling.build"
+
 [project]
 name = "weatheasy"
 description = "A service for easy weather data acquiring"
@@ -41,16 +45,17 @@ Homepage = "https://github.com/AgroDT/WeathEasy"
 Repository = "https://github.com/AgroDT/WeathEasy.git"
 Issues = "https://github.com/AgroDT/WeathEasy/issues"
 
-[build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
-build-backend = "setuptools.build_meta"
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
 
-[tool.setuptools_scm]
+[tool.hatch.build.targets.sdist]
+only-include = ["src/weatheasy"]
 
-[tool.mypy]
-plugins = [
-    "pydantic.mypy",
-]
+[tool.hatch.build.hooks.version]
+path = "src/weatheasy/_version.py"
+template = '''
+version = "{version}"
+'''
 
 [[tool.mypy.overrides]]
 module = [

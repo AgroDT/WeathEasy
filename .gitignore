@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+src/weatheasy/_version.py
 
 # venv
 .venv

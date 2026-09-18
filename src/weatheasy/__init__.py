@@ -11,6 +11,14 @@ from weatheasy.error import CFS2Error, CMIP6DateRangeError, CoordsError, DateRan
 from weatheasy.util import utc_now
 
 
+try:
+    from weatheasy._version import version
+
+    __version__: str | None = version
+except ImportError:
+    __version__ = None
+
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
