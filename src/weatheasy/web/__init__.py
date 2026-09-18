@@ -6,7 +6,6 @@ import weatheasy
 from . import controller as ctr, models as mls
 from .config import get_config
 from weatheasy.error import BaseValueError
-from weatheasy.version import __version__
 
 
 async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResponse:
@@ -15,7 +14,7 @@ async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResp
 
 app = FastAPI(
     title='WeathEasy',
-    version=__version__ or 'unknown',
+    version=weatheasy.__version__ or 'unknown',
     exception_handlers={
         BaseValueError: handle_value_error,
     },
