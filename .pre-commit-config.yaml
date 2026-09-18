@@ -14,8 +14,8 @@ repos:
       - id: uv-lock
         name: uv lock
         language: system
-        entry: python
-        args: [scripts/lock.py]
+        entry: uv
+        args: [lock]
         files: (pyproject.toml|uv.lock)
         pass_filenames: false
       - id: lint

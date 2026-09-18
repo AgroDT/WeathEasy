@@ -11,7 +11,7 @@ RUN echo 'deb http://httpredir.debian.org/debian sid main' > /etc/apt/sources.li
     && apt-get install -y -qq --no-install-recommends libgdal-dev
 WORKDIR /usr/src/weatheasy
 COPY pyproject.toml uv.lock ./
-RUN --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uv,target=/bin/uv \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --all-extras --no-install-project --no-dev \
         --no-binary-package rasterio \
