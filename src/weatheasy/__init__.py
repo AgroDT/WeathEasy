@@ -94,6 +94,26 @@ def get_cmip6_data(
     )
 
 
+def get_era5_data(
+    *,
+    root: zarr.Group,
+    begin: date,
+    end: date,
+    coords: Coords,
+    variables: Sequence[str],
+) -> NDArray[np.float32]:
+    """Read completed ERA5 months, including the current incomplete year."""
+    from weatheasy.era5 import available_period
+    from weatheasy.error import ERA5DateRangeError
+
+    _check_date_range(begin, end)
+    first, last = available_period(root)
+    for value in (begin, end):
+        if not first <= value <= last:
+            raise ERA5DateRangeError(value, first, last)
+    return _read_point(root, 'era5/daily', begin, end, coords, variables)
+
+
 def _read_point(
     root: zarr.Group, group: str, begin: date, end: date, coords: Coords, variables: Sequence[str]
 ):

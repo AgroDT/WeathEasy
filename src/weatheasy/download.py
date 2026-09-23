@@ -16,6 +16,7 @@ from requests import Session
 from requests.adapters import HTTPAdapter
 
 from weatheasy import const
+from weatheasy.era5 import download_era5_data
 from weatheasy.sources import read_cfs2, read_netcdf
 from weatheasy.storage import last_date, prepare_dataset, write_batch
 from weatheasy.util import get_storage, init_parser, utc_now
@@ -40,9 +41,23 @@ def main(*, configure_logging: bool = True) -> None:
     )
     parser.add_argument(
         'kind',
-        choices=('cfs2', 'cmip6'),
+        choices=('cfs2', 'cmip6', 'era5'),
+    )
+    parser.add_argument(
+        '--area',
+        type=float,
+        nargs=4,
+        metavar=('NORTH', 'WEST', 'SOUTH', 'EAST'),
+        help='ERA5-Land geographic area',
     )
     args = parser.parse_args()
+    if args.kind == 'era5':
+        download_era5_data(
+            get_storage(args.data), args.download_dir, area=tuple(args.area) if args.area else None
+        )
+        return
+    if args.area is not None:
+        parser.error('--area is only available for era5')
     match args.kind:
         case 'cfs2':
             download = download_cfs2_data
@@ -188,6 +203,7 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
             msg = 'CFS2 valid timestamps do not match the requested day'
             raise ValueError(msg)
         bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
+        _check_pevpr_times(times, date_, bands)
         data = {}
         for name, info in bands.items():
             values = combined[name].to_numpy()
@@ -213,6 +229,14 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
         daily = daily.isel(time=0, drop=True)
     daily = daily.expand_dims(time=[np.datetime64(date_)])
     return prepare_dataset(daily, crs=crs)
+
+
+def _check_pevpr_times(times: np.ndarray, day: date, bands: dict) -> None:
+    if 'PEVPR' in bands:
+        expected = np.datetime64(day, 'h') + np.array([0, 6, 12, 18], dtype='timedelta64[h]')
+        if not np.isin(times, expected).all():
+            msg = 'PEVPR requires instantaneous 00/06/12/18 UTC samples'
+            raise ValueError(msg)
 
 
 def _download_cfs2_forecast(

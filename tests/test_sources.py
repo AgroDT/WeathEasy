@@ -117,3 +117,37 @@ def test_netcdf_cmip6_actual_ascending_latitude(tmp_path):
     result = open_dataset(store, 'cmip6/ACCESS-CM2/historical/r1i1p1f1')
     assert select_point(result, latitude=55.125, longitude=0.375).tas.item() == 7
     np.testing.assert_array_equal(result.tas, original.tas)
+
+
+def test_pevpr_selects_instant_and_converts_units(tmp_path, monkeypatch):
+    from weatheasy import const
+    from weatheasy.sources import read_cfs2
+
+    ec = pytest.importorskip('eccodes')
+    path = tmp_path / 'pevpr.grb2'
+    grib_fixture(path, gaussian=False, spacing=1)
+    with path.open('rb') as stream:
+        template = ec.codes_grib_new_from_file(stream)
+    with path.open('wb') as stream:
+        for statistic, value in [('avg', 900), ('instant', 100)]:
+            handle = ec.codes_clone(template)
+            for key, val in {
+                'centre': 'kwbc',
+                'discipline': 0,
+                'parameterCategory': 1,
+                'parameterNumber': 200,
+                'typeOfLevel': 'surface',
+                'level': 0,
+                'stepType': statistic,
+                'startStep': 0,
+                'endStep': 0,
+            }.items():
+                ec.codes_set(handle, key, val)
+            ec.codes_set_values(handle, np.full(12, value))
+            ec.codes_write(handle, stream)
+            ec.codes_release(handle)
+    ec.codes_release(template)
+    monkeypatch.setattr(const, 'CFS2_FLX_BANDS', {'PEVPR': const.CFS2_FLX_BANDS['PEVPR']})
+    result = read_cfs2(path, kind='flx')
+    np.testing.assert_allclose(result.PEVPR, 3.526530612, rtol=1e-6)
+    assert result.PEVPR.attrs['units'] == 'mm/day'

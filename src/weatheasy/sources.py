@@ -87,6 +87,7 @@ def read_netcdf(
 # NCEP GRIB2 discipline/category/number and fixed surfaces, independently of
 # message ordering. Verified against CDAS pgrbh00 and CFS FLX/PGB inventories.
 _CFS_FIELDS = {
+    'PEVPR': (0, 1, 200, 'surface', 0, 'instant'),
     'DLWRF': (0, 5, 192, 'surface', 0, None),
     'DSWRF': (0, 4, 192, 'surface', 0, None),
     'GFLUX': (2, 0, 193, 'surface', 0, 'instant'),
@@ -169,7 +170,17 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
             units = 'degC'
         # Preserve the existing numeric pressure contract (GDAL returns Pa),
         # without silently adopting the old catalogue's incorrect hPa label.
+        if name == 'PEVPR':
+            # NCEP local parameter 0/1/200 is W/m² even when ecCodes reports unknown.
+            # Four instantaneous samples yield an approximate daily evaporation.
+            values = values * (86400 / 2.45e6)
+            units = 'mm/day'
         values.attrs = {'units': units}
+        if name == 'PEVPR':
+            values.attrs['comment'] = (
+                'Approximate daily evaporation from the mean of instantaneous '
+                '00/06/12/18 UTC samples; not an exact daily accumulation.'
+            )
         field[name] = values
         fields.append(field)
     return merge_fields(*fields)

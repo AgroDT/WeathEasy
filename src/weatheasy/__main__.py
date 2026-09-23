@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from weatheasy import Coords, const, get_cfs2_data, get_cmip6_data
+from weatheasy import Coords, const, get_cfs2_data, get_cmip6_data, get_era5_data
 from weatheasy.util import float_formatter_factory, get_storage, init_parser
 
 
@@ -23,6 +23,7 @@ def main(*, configure_logging: bool = True) -> None:
         )
     args = _parse_args()
     if args.action == 'list-vars':
+        _print_vars('ERA5-Land variables:', const.ERA5_ALL_VARS.items())
         _print_vars('CMIP6 variables:', const.CMIP6_VARS.items())
         _print_vars('CFS2 variables:', ((k, v.info) for k, v in const.CFS2_BANDS.items()))
     else:
@@ -47,6 +48,7 @@ def _parse_args():
     )
     subparsers = parser.add_subparsers(dest='action', required=True)
     subparsers.add_parser('list-vars', help='list available variables')
+    _add_data_subparser(subparsers, 'era5', const.ERA5_ALL_VARS)
     _add_data_subparser(subparsers, 'cmip6', const.CMIP6_VARS)
     _add_data_subparser(subparsers, 'cfs2', const.CFS2_BANDS)
 
@@ -77,6 +79,8 @@ def _add_data_subparser(
 def _run(args: Namespace):
     if args.action == 'cfs2':
         func = get_cfs2_data
+    elif args.action == 'era5':
+        func = get_era5_data
     elif args.action == 'cmip6':
         func = get_cmip6_data
     else:
