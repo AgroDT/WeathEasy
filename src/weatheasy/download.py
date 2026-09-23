@@ -1,31 +1,28 @@
 from __future__ import annotations
 
 import logging
-import math
 import sys
 import time
 from contextlib import ExitStack, contextmanager
-from datetime import date, timedelta
+from datetime import date
 from itertools import product
 from pathlib import Path
-from queue import Queue
 from tempfile import TemporaryDirectory
-from threading import Thread
 from typing import TYPE_CHECKING, ClassVar
 
-import netCDF4 as nc
 import numpy as np
-import rasterio
-import zarr
+import xarray as xr
 from requests import Session
 from requests.adapters import HTTPAdapter
 
 from weatheasy import const
+from weatheasy.sources import read_cfs2, read_netcdf
+from weatheasy.storage import last_date, prepare_dataset, write_batch
 from weatheasy.util import get_storage, init_parser, utc_now
 
 
 if TYPE_CHECKING:
-    from rasterio.coords import BoundingBox
+    import zarr
 
 
 def main(*, configure_logging: bool = True) -> None:
@@ -62,7 +59,7 @@ def download_cfs2_data(root: zarr.Group, download_dir: Path | None = None) -> No
     today = utc_now().date()
 
     if updated := group.attrs.get(const.CFS2_KEY_UPDATED):
-        time_since_updated = today - date.fromisoformat(updated)
+        time_since_updated = today - date.fromisoformat(str(updated))
         if time_since_updated < const.ONE_DAY:
             _LOG.info('No forecast update required')
             return
@@ -86,62 +83,37 @@ def download_cfs2_data(root: zarr.Group, download_dir: Path | None = None) -> No
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast_dir)
         _merge_cfs2_forecast(root, forecast_begin, forecast_end, forecast_dir)
 
-    group.attrs[const.CFS2_KEY_UPDATED] = today.isoformat()
-
 
 def download_cmip6_data(root: zarr.Group, download_dir: Path | None = None) -> None:
-    years_key = 'years'
-
-    height, width = _get_size(const.CMIP6_RESOLUTION, const.CMIP6_BBOX)
-    height += 1
-    width += 1
-
-    total_days = (date(const.CMIP6_LAST_YEAR, 12, 31) - date(const.CMIP6_FIRST_YEAR, 1, 1)).days
-    arr_shape = total_days, height, width
-    arr_chunks = _FOUR_YEAR_DAYS, 100, 100
-
-    group, download_dir = _process_args(const.CMIP6_DIR, root, download_dir)
-    buffer = np.full((_FOUR_YEAR_DAYS, height, width), np.nan, np.float32)
-
-    with _session() as session:
+    _, download_dir = _process_args(const.CMIP6_DIR, root, download_dir)
+    with _session() as session, _temp_dir() as temporary:
         for var in const.CMIP6_VARS:
-            array = group.require_dataset(
-                name=var,
-                shape=arr_shape,
-                dtype=np.float32,
-                chunks=arr_chunks,
-                fill_value=np.nan,
-            )
-            first_year: int = array.attrs.get(years_key, (None, const.CMIP6_FIRST_YEAR - 1))[1] + 1
-            total_day_offset = (date(first_year, 1, 1) - date(const.CMIP6_FIRST_YEAR, 1, 1)).days
-            for year in range(first_year, const.CMIP6_LAST_YEAR + 1, 4):
-                buffer[:] = 0
-                day_offset = 0
-                for next_year in range(year, min(year + 4, const.CMIP6_LAST_YEAR + 1)):
-                    filename, nc_bytes = _load_cmip6_dataset(download_dir, var, next_year, session)
-                    with nc.Dataset(filename, memory=nc_bytes, filling=False) as ds:
-                        resolution = float(ds.resolution_id.split(' ', 1)[0])
-                        lon = ds.variables['lon']
-                        lat = ds.variables['lat']
-                        bbox = float(lon[0]), float(lat[0]), float(lon[-1]), float(lat[-1])
-                        if resolution != const.CMIP6_RESOLUTION or bbox != const.CMIP6_BBOX:
-                            _LOG.critical('Unexpected shape or geo referencing %s', filename)
-                            sys.exit(1)
-                        data = ds.variables[var]
-                        day_count = data.shape[0]
-                        buffer[day_offset:day_offset + day_count] = (
-                            data[:].filled(fill_value=np.nan))  # fmt: skip
-                        day_offset += day_count
-                _LOG.info('Saving %s[%d:%d]', array.path, year, next_year)
-                if day_offset != _FOUR_YEAR_DAYS:
-                    day_offset -= 1
-                array[total_day_offset : total_day_offset + _FOUR_YEAR_DAYS] = buffer[:day_offset]
-                array.attrs[years_key] = const.CMIP6_FIRST_YEAR, next_year
-                total_day_offset += _FOUR_YEAR_DAYS
+            path = f'{root.path + "/" if root.path else ""}cmip6/{var}'
+            previous = last_date(root.store, path)
+            first_year = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
+            for year in range(first_year, const.CMIP6_LAST_YEAR + 1):
+                filename, content = _load_cmip6_dataset(download_dir, var, year, session)
+                source = temporary / filename
+                source.write_bytes(content)
+                dataset = read_netcdf(source, variables=[var], crs='EPSG:4326')
+                expected = np.arange(
+                    np.datetime64(f'{year}-01-01'), np.datetime64(f'{year + 1}-01-01')
+                )
+                if not np.array_equal(dataset.time.to_numpy().astype('datetime64[D]'), expected):
+                    msg = f'Incomplete or unexpected CMIP6 dates in {filename}'
+                    raise ValueError(msg)
+                # Daily CMIP6 timestamps may label the interval at noon. Store
+                # calendar days, matching the public date-based query contract.
+                dataset = dataset.assign_coords(
+                    time=xr.DataArray(
+                        expected.astype('datetime64[ns]'), dims='time', attrs=dataset.time.attrs
+                    )
+                )
+                _LOG.info('Saving %s/%s', path, year)
+                write_batch(root.store, path, dataset)
 
 
 _MODULE_NAME = __package__ + '.download'
-_FOUR_YEAR_DAYS = 1461
 _LAST = 'last'
 _LOG = logging.getLogger(_MODULE_NAME)
 _CFS2_DOWNLOADED_FILENAME_TEMPLATE = '{}{}{}.grb2'
@@ -167,81 +139,80 @@ def _temp_dir():
         yield Path(tmp_dir)
 
 
-def _download_cfs2_reanalysis(  # noqa: PLR0915
-    root: zarr.Group,
-    end: date,
-    session: Session,
-    download_dir: Path,
-):
-    group = root.require_group(const.CFS2_REANALYSIS_DIR)
-    if last := group.attrs.get(_LAST):
-        date_ = date.fromisoformat(last) + const.ONE_DAY
-    else:
-        date_ = const.CFS2_REANALYSIS_FIRST_DATE
-
-    height, width = _get_size(const.CFS2_REANALYSIS_RESOLUTION[0], const.CFS2_REANALYSIS_BBOX)
-
-    day_dimension = (
-        end.replace(month=12, day=31)
-        - const.CFS2_REANALYSIS_FIRST_DATE.replace(month=1, day=1)
-    ).days + 1  # fmt: skip
-    array_shape = day_dimension, height, width
-    arrays = list(_get_cfs2_arrays(group, array_shape, (_FOUR_YEAR_DAYS, 100, 100)))
-
-    tmp_group = group.require_group('_tmp')
-    tmp_arrays = list(_get_cfs2_arrays(tmp_group, array_shape, (1, height, width)))
-
+def _download_cfs2_reanalysis(root: zarr.Group, end: date, session: Session, download_dir: Path):
     download = _Cfs2ReanalysisDownloader(session, download_dir)
-
-    first_day = (date_ - const.CFS2_REANALYSIS_FIRST_DATE).days
-    total_days = (end - const.CFS2_REANALYSIS_FIRST_DATE).days
-
-    day0 = first_day % _FOUR_YEAR_DAYS
-    # day0_ is used to continue interrupted downloads
-    day0_ = tmp_group.attrs.get(_LAST)
-    if isinstance(day0_, int):
-        day0_ += 1
-        date_ += timedelta(days=day0_ - day0)
-    else:
-        day0_ = day0
-
-    day1 = min(_FOUR_YEAR_DAYS, day0_ + total_days - first_day)
-    day_buffer_shape = len(const.CFS2_HHS), height, width
-    last_success: date | None = None
-
+    groups = {
+        kind: root.require_group(f'{const.CFS2_REANALYSIS_DIR}/{kind}') for kind in ('flx', 'pgb')
+    }
+    previous = {kind: last_date(root.store, group.path) for kind, group in groups.items()}
+    date_ = min(
+        (value + const.ONE_DAY if value else const.CFS2_REANALYSIS_FIRST_DATE)
+        for value in previous.values()
+    )
     while date_ < end:
-        day_uploader = _Cfs2ReanalysisDayUploader(day_buffer_shape, tmp_group, tmp_arrays)
-        day_uploader.start()
-        for day in range(day0_, day1):
-            try:
-                paths = download(date_)
-            except Exception as err:
-                _LOG.critical(err)
-                day_uploader.join()
-                sys.exit(1)
-            if paths:
-                last_success = date_
-                day_uploader.enqueue(day, paths)
-            else:
-                _LOG.warning('%s was not found on the server', date_)
-            date_ += const.ONE_DAY
-        day_uploader.join()
-        last_day = first_day + day1 - day0
-        if last_success is None:
-            _LOG.warning('Failed to download any reanalysis data')
-            return
-        for (_, array), (_, tmp_array) in zip(arrays, tmp_arrays, strict=True):
-            _LOG.info('Saving %s[%d:%d]', array.path, first_day, last_day)
-            array[first_day:last_day] = tmp_array[day0:day1]
-            tmp_array[:] = 0.0
-        first_day = last_day
-        day0 = 0
-        day0_ = 0
-        day1 = min(_FOUR_YEAR_DAYS, total_days - first_day)
-        tmp_group.attrs.pop(_LAST, None)
-        group.attrs[_LAST] = last_success.isoformat()
+        paths = download(date_)
+        if paths:
+            for kind, group in groups.items():
+                last = previous[kind]
+                if last is not None and date_ <= last:
+                    continue
+                daily = _daily_cfs2(paths, kind, date_)
+                write_batch(root.store, group.path, daily)
+        else:
+            _LOG.warning('%s was not found on the server', date_)
+        date_ += const.ONE_DAY
 
-    tmp_group.clear()
+
+def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset | None = None):
+    fields = [read_cfs2(path, kind=kind) for path in paths]
+    if not fields:
+        if template is None:
+            msg = 'Cannot determine the grid without any source files'
+            raise ValueError(msg)
+        daily = xr.full_like(template, np.nan)
+        crs = template.spatial_ref.attrs['crs_wkt']
+    else:
+        sample = fields[0]
+        crs = sample.spatial_ref.attrs['crs_wkt']
+        # Exact spatial alignment; only the sample time axis may differ.
+        for other in fields[1:]:
+            for axis in ('latitude', 'longitude'):
+                if not np.array_equal(sample[axis], other[axis]):
+                    msg = 'CFS2 source grids differ within a day'
+                    raise ValueError(msg)
+        combined = xr.concat(fields, dim='time', join='exact')
+        times = combined.time.to_numpy()
+        if len(np.unique(times)) != len(times) or np.any(
+            times.astype('datetime64[D]') != np.datetime64(date_)
+        ):
+            msg = 'CFS2 valid timestamps do not match the requested day'
+            raise ValueError(msg)
+        bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
+        data = {}
+        for name, info in bands.items():
+            values = combined[name].to_numpy()
+            if len(paths) < len(const.CFS2_HHS):
+                values = np.concatenate(
+                    (
+                        values,
+                        np.full(
+                            (len(const.CFS2_HHS) - len(paths), *values.shape[1:]),
+                            np.nan,
+                            np.float32,
+                        ),
+                    )
+                )
+            data[name] = xr.DataArray(
+                info.daily_stat(values, axis=0),
+                dims=('latitude', 'longitude'),
+                attrs={**sample[name].attrs, 'cell_methods': f'time: {info.daily_stat.__name__}'},
+            )
+        daily = xr.Dataset(data, coords={axis: sample[axis] for axis in ('latitude', 'longitude')})
+    daily = daily.drop_vars('spatial_ref', errors='ignore')
+    if 'time' in daily.dims:
+        daily = daily.isel(time=0, drop=True)
+    daily = daily.expand_dims(time=[np.datetime64(date_)])
+    return prepare_dataset(daily, crs=crs)
 
 
 def _download_cfs2_forecast(
@@ -256,16 +227,35 @@ def _download_cfs2_forecast(
     download('pgb', f'pgbf{{}}{{}}.01.{begin:%Y%m%d}00.grb2', const.CFS2_PGB_PARAMS)
 
 
-def _merge_cfs2_forecast(
-    root: zarr.Group,
-    begin: date,
-    end: date,
-    download_dir: Path,
-):
-    group = root.require_group(const.CFS2_FORECAST_DIR)
-    merge = _Cfs2ForecastMerger(group, download_dir, begin, end)
-    merge('flx', const.CFS2_FLX_BANDS, const.CFS2_FLX_RESOLUTION, const.CFS2_FLX_BBOX)
-    merge('pgb', const.CFS2_PGB_BANDS, const.CFS2_PGB_RESOLUTION, const.CFS2_PGB_BBOX)
+def _merge_cfs2_forecast(root: zarr.Group, begin: date, end: date, download_dir: Path):
+    # In-place replacement deliberately makes forecast data unavailable. Clear
+    # readiness before deleting any chunks, then publish only after both grids.
+    parent = root[const.CFS2_DIR]
+    parent.attrs.pop(const.CFS2_KEY_UPDATED, None)
+    if const.CFS2_FORECAST_DIR in root:
+        del root[const.CFS2_FORECAST_DIR]
+    for kind in ('flx', 'pgb'):
+        group = root.require_group(f'{const.CFS2_FORECAST_DIR}/{kind}')
+        template = None
+        paths_by_day = []
+        date_ = begin
+        while date_ < end:
+            paths = [
+                download_dir
+                / _CFS2_DOWNLOADED_FILENAME_TEMPLATE.format(kind, date_.strftime('%Y%m%d'), hour)
+                for hour in const.CFS2_HHS
+            ]
+            paths = [path for path in paths if path.is_file()]
+            paths_by_day.append((date_, paths))
+            if template is None and paths:
+                template = read_cfs2(paths[0], kind=kind)
+            date_ += const.ONE_DAY
+        if template is None:
+            msg = f'No forecast files for {kind}; forecast remains unavailable'
+            raise ValueError(msg)
+        for date_, paths in paths_by_day:
+            write_batch(root.store, group.path, _daily_cfs2(paths, kind, date_, template))
+    parent.attrs[const.CFS2_KEY_UPDATED] = utc_now().date().isoformat()
 
 
 class _Cfs2ReanalysisDownloader:
@@ -298,53 +288,6 @@ class _Cfs2ReanalysisDownloader:
                     path.write_bytes(response.content)
             paths.append(path)
         return paths
-
-
-class _Cfs2ReanalysisDayUploader(Thread):
-    def __init__(
-        self,
-        buffer_shape: tuple[int, int, int],
-        group: zarr.Group,
-        arrays: list[tuple[str, zarr.Array]],
-    ) -> None:
-        super().__init__()
-        self._queue: Queue[tuple[int, list[Path]] | None] = Queue()
-        self._buffer = np.full(buffer_shape, np.nan, np.float32)
-        self._group = group
-        self._arrays = arrays
-
-    def enqueue(self, day: int, paths: list[Path]) -> None:
-        self._queue.put((day, paths))
-
-    def join(self, timeout: float | None = None) -> None:
-        self._queue.put(None)
-        super().join(timeout)
-
-    def run(self) -> None:
-        while task := self._queue.get():
-            self._upload_day(*task)
-
-    def _upload_day(self, day: int, paths: list[Path]):
-        buffer = self._buffer
-        with ExitStack() as stack:
-            dss: list[rasterio.DatasetReader] = []
-            for path in paths:
-                ds = stack.enter_context(rasterio.open(path, sharing=True))
-                if (
-                    ds.res != const.CFS2_REANALYSIS_RESOLUTION
-                    or ds.bounds != const.CFS2_REANALYSIS_BBOX
-                ):
-                    err = f'Unexpected shape or geo referencing {path}'
-                    raise ValueError(err)
-                dss.append(ds)
-            for var, array in self._arrays:
-                buffer[:] = np.nan
-                var_bands = const.CFS2_BANDS[var]
-                for i, ds in enumerate(dss):
-                    ds.read(var_bands.reanalysis, out=buffer[i])
-                _LOG.info('Saving %s[%d]', array.path, day)
-                array[day] = var_bands.daily_stat(buffer, axis=0)
-        self._group.attrs[_LAST] = day
 
 
 class _Cfs2ForecastDownloader:
@@ -388,93 +331,10 @@ class _Cfs2ForecastDownloader:
                     _LOG.critical('Failed to download %s', response.url)
 
 
-class _Cfs2ForecastMerger:
-    def __init__(
-        self,
-        group: zarr.Group,
-        download_dir: Path,
-        begin: date,
-        end: date,
-    ) -> None:
-        self._group = group
-        self._download_dir = download_dir
-        self._begin = begin
-        self._end = end
-
-    def __call__(
-        self,
-        kind: str,
-        bands: dict[str, const.Cfs2Band],
-        resolution: tuple[float, float],
-        bbox: BoundingBox,
-    ) -> None:
-        with ExitStack() as stack:
-            day_dss = []
-            for date_str in _cfs2_forecast_dates(self._begin, self._end):
-                hhs_dss = []
-                for hhs in const.CFS2_HHS:
-                    path = self._download_dir / _CFS2_DOWNLOADED_FILENAME_TEMPLATE.format(
-                        kind, date_str, hhs
-                    )
-                    if path.is_file():
-                        ds = stack.enter_context(rasterio.open(path))
-                        if ds.res != resolution or ds.bounds != bbox:
-                            _LOG.critical('Unexpected shape or geo referencing %s', path)
-                            sys.exit(1)
-                        hhs_dss.append(ds)
-                day_dss.append(hhs_dss)
-
-            height, width = _get_size(resolution[0], bbox)
-            day_buffer_shape = len(const.CFS2_HHS), height, width
-            day_buffer = np.full(day_buffer_shape, np.nan, np.float32)
-            var_buffer_shape = (self._end - self._begin).days, height, width
-            var_buffer = np.full(var_buffer_shape, np.nan, np.float32)
-
-            for var, var_bands in bands.items():
-                var_buffer[:] = np.nan
-                for day, hhs_dss in enumerate(day_dss):
-                    day_buffer[:] = np.nan
-                    for i, ds in enumerate(hhs_dss):
-                        ds.read(var_bands.forecast, out=day_buffer[i])
-                    var_buffer[day] = var_bands.daily_stat(day_buffer, axis=0)
-                array = self._group.array(
-                    name=var,
-                    data=var_buffer,
-                    chunks=(None, 100, 100),
-                    overwrite=True,
-                    fill_value=np.nan,
-                )
-                _LOG.info('Saved %s', array.path)
-
-
-def _get_cfs2_arrays(group: zarr.Group, shape: tuple[int, int, int], chunks: tuple[int, int, int]):
-    for var in const.CFS2_BANDS:
-        array = group.get(var)
-        if isinstance(array, zarr.Array):
-            if array.shape != shape:
-                array.resize(*shape)
-        else:
-            array = group.require_dataset(
-                name=var,
-                shape=shape,
-                dtype=np.float32,
-                chunks=chunks,
-                fill_value=np.nan,
-            )
-        yield var, array
-
-
 def _cfs2_forecast_dates(date_: date, end: date):
     while date_ < end:
         yield date_.strftime('%Y%m%d')
         date_ += const.ONE_DAY
-
-
-def _get_size(resolution: float, bbox: BoundingBox) -> tuple[int, int]:
-    return (
-        math.ceil((bbox.top - bbox.bottom) / resolution),
-        math.ceil((bbox.right - bbox.left) / resolution),
-    )
 
 
 def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Session):

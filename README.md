@@ -192,6 +192,49 @@ docker run --rm -it \
 
 Find an example for Docker Compose at [examples/docker-compose](examples/docker-compose).
 
+## Forecast storage and updates
+
+Prepared data uses Zarr v3. Before writing, rioxarray adds CF CRS and coordinate
+metadata, including the source sphere/ellipsoid parameters and WKT in
+`spatial_ref`. GRIB decoding remains with cfgrib/ecCodes: Gaussian latitude
+coordinates are preserved without resampling or an invented affine GeoTransform.
+Open with `decode_coords="all"` to restore the grid mapping and use `.rio.crs`
+after importing rioxarray.
+
+Weather arrays use NaN for both the Zarr fill value and CF `_FillValue`.
+Empty chunks are not written during either creation or append; missing chunks
+therefore remain NaN when read. NetCDF preparation is still eager; Dask is not
+required.
+
+CFS2 forecast grids have permanent group paths
+`cfs2/forecast/flx` and `cfs2/forecast/pgb`, including when the root store is an
+S3 prefix such as `s3://weatheasy/zarr`. For example, direct xarray consumers can
+open the FLX grid with:
+
+```python
+import xarray as xr
+
+forecast = xr.open_zarr(
+    "s3://weatheasy/zarr",
+    group="cfs2/forecast/flx",
+    consolidated=False,
+    chunks=None,
+    decode_coords="all",
+)
+```
+
+Updates replace the forecast in place. Before writing, the downloader clears
+`cfs2`'s `updated` readiness attribute and deletes the existing `cfs2/forecast`
+subtree. It restores `updated` only after both grids finish successfully.
+Reanalysis and CMIP6 are not deleted by forecast replacement.
+
+**CFS2 data can be unavailable during replacement.** If preparation fails,
+readiness remains unset until a subsequent download command completes successfully.
+There are no forecast generations or reader snapshots: requests and already-open
+xarray datasets are not protected against concurrent replacement. Coordinate
+external jobs and direct readers to avoid this window; publication is not an
+atomic multi-object transaction on S3.
+
 ## Development
 
 WeathEasy is written in Python and managed by [uv](https://docs.astral.sh/uv).

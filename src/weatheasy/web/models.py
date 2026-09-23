@@ -30,8 +30,8 @@ class DataQuery(TypedDict):
 
 
 def _query_base(
-    lat: Annotated[float, Query(description='EPSG:4326', ge=-180, le=180, example=55.75222)],
-    lon: Annotated[float, Query(description='EPSG:4326', ge=-90, le=90, example=37.61556)],
+    lat: Annotated[float, Query(description='EPSG:4326', ge=-90, le=90, examples=[55.75222])],
+    lon: Annotated[float, Query(description='EPSG:4326', ge=-180, le=180, examples=[37.61556])],
     begin: Annotated[date, Query()],
     end: Annotated[date, Query()],
 ):

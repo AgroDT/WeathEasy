@@ -37,17 +37,18 @@ def get_storage(root: str) -> zarr.Group:
     - etc.
     """
 
+    store: str | zarr.storage.FsspecStore
     if root.startswith('s3://'):
         try:
             import s3fs
         except ImportError as exc:
             raise S3ImportError from exc
         else:
-            store = s3fs.S3Map(root[5:], s3fs.S3FileSystem())
+            store = zarr.storage.FsspecStore(s3fs.S3FileSystem(asynchronous=True), path=root[5:])
     else:
         store = root
 
-    return zarr.group(store)
+    return zarr.open_group(store, mode='a', zarr_format=3)
 
 
 def init_parser(module: str = __package__) -> ArgumentParser:

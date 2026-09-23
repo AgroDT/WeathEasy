@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     precision: PositiveInt = 6
     enable_cors: bool = False
 
-    @computed_field  # type: ignore[prop-decorator]
     @cached_property
     def storage(self) -> zarr.Group:
         return get_storage(self.data_root)
@@ -32,4 +31,4 @@ class Settings(BaseSettings):
 
 @cache
 def get_config() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]  # Loaded from environment by BaseSettings.
