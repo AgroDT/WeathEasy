@@ -235,6 +235,44 @@ xarray datasets are not protected against concurrent replacement. Coordinate
 external jobs and direct readers to avoid this window; publication is not an
 atomic multi-object transaction on S3.
 
+## AquaCrop weather
+
+Read prepared ERA5-Land data and calculate daily reference evapotranspiration:
+
+```python
+from datetime import date
+
+import zarr
+
+from weatheasy.aquacrop_adapter import get_weather_data
+
+weather = get_weather_data(
+    root=zarr.open_group("./data", mode="r"),
+    latitude=55.75,
+    longitude=37.62,
+    altitude=156,  # metres above sea level
+    start=date(2020, 6, 1),
+    end=date(2020, 6, 30),  # inclusive
+    use_corrected=True,
+)
+```
+
+The result is a NumPy record array with `tmin`, `tmax` (°C), `pr` and `et0`
+(mm/day). The adapter reads existing data and computes ET0 in memory. It requires
+no training dependencies. Corrected mean temperature and precipitation are selected
+independently when their arrays exist; otherwise the raw variable is used.
+Missing values within an existing corrected array remain missing. Set
+`use_corrected=False` to select both raw variables.
+
+ET0 uses the daily [FAO-56 equations](https://www.fao.org/4/x0490e/x0490e08.htm),
+with the selected `TMP_corr`/`TMP` as its mean temperature instead of the standard
+`(Tmin + Tmax)/2`. Tmin/Tmax remain raw for output and radiation calculations.
+The stored daily `WIND` is converted from 10 m to 2 m; elevation only determines
+clear-sky radiation. The agreed cloud factor is limited to 0.05–1, including a
+small denominator when clear-sky radiation is zero. Polar-night results are an
+approximation. Precipitation below 1 mm/day becomes zero while NaN is preserved;
+nonpositive ET0 becomes NaN, preserving the donor adapter's output policy.
+
 ## Development
 
 WeathEasy is written in Python and managed by [uv](https://docs.astral.sh/uv).
