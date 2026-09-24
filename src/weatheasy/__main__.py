@@ -15,6 +15,18 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 
+_CORRECTION_INFO = {
+    'TMP_corr': const.VarInfo(
+        en='Bias-corrected daily temperature, °C',
+        ru='Скорректированная температура, °C',
+    ),
+    'PRATE_corr': const.VarInfo(
+        en='Bias-corrected daily precipitation, mm/day',
+        ru='Скорректированные осадки, мм/сутки',
+    ),
+}
+
+
 def main(*, configure_logging: bool = True) -> None:
     if configure_logging:
         logging.basicConfig(
@@ -24,6 +36,7 @@ def main(*, configure_logging: bool = True) -> None:
     args = _parse_args()
     if args.action == 'list-vars':
         _print_vars('ERA5-Land variables:', const.ERA5_ALL_VARS.items())
+        _print_vars('Corrected ERA5 variables:', _CORRECTION_INFO.items())
         _print_vars('CMIP6 variables:', const.CMIP6_VARS.items())
         _print_vars('CFS2 variables:', ((k, v.info) for k, v in const.CFS2_BANDS.items()))
     else:
@@ -48,9 +61,9 @@ def _parse_args():
     )
     subparsers = parser.add_subparsers(dest='action', required=True)
     subparsers.add_parser('list-vars', help='list available variables')
-    _add_data_subparser(subparsers, 'era5', const.ERA5_ALL_VARS)
+    _add_data_subparser(subparsers, 'era5', (*const.ERA5_ALL_VARS, *_CORRECTION_INFO))
     _add_data_subparser(subparsers, 'cmip6', const.CMIP6_VARS)
-    _add_data_subparser(subparsers, 'cfs2', const.CFS2_BANDS)
+    _add_data_subparser(subparsers, 'cfs2', (*const.CFS2_BANDS, *_CORRECTION_INFO))
 
     return parser.parse_args()
 

@@ -1,0 +1,138 @@
+"""Temperature bias corrector (inference).
+
+Port of the production ``BiasCorrector`` adapted to read a daily grid from the Zarr
+store via :class:`~weatheasy.correction.sources.Source` instead of a NetCDF file.
+A single XGBoost regressor predicts the ERA5/CFS2 bias from terrain + seasonal-bias
+features; the prediction is suppressed where the seasonal bias is small.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import joblib
+import numpy as np
+import pandas as pd
+
+from . import features
+
+
+if TYPE_CHECKING:
+    from datetime import date
+
+    import zarr
+    from numpy.typing import NDArray
+
+    from .sources import Source
+
+
+_LOG = logging.getLogger(__name__)
+
+FEATURE_COLS = [
+    'lat',
+    'lon',
+    'elevation',
+    'slope_we',
+    'slope_sn',
+    'era5_seasonal_bias',
+    'month',
+    'doy_sin',
+    'doy_cos',
+    'era5_value',
+    'era5_anomaly',
+]
+CORRECTION_THRESHOLD = 0.3  # deg C; below this seasonal bias we leave the value untouched
+
+
+class TemperatureCorrector:
+    """Load per-source artifacts and bias-correct a daily temperature grid."""
+
+    def __init__(self, source: Source, artifacts_dir: Path, dem_path: Path) -> None:
+        self.source = source
+        self.dir = Path(artifacts_dir) / source.name / 'temp'
+        self.dem_path = Path(dem_path)
+        self.model: Any = None
+        self.seasonal_bias: dict[int, NDArray[np.float32]] | None = None
+        self.grid_lats: NDArray[np.float32] | None = None
+        self.grid_lons: NDArray[np.float32] | None = None
+        self._dem_cache: dict[tuple[int, int], features.Dem | None] = {}
+
+    def load_artifacts(self) -> TemperatureCorrector:
+        self.model = joblib.load(self.dir / 'model.joblib')
+        data = np.load(self.dir / 'seasonal_bias_grid.npz')
+        self.seasonal_bias = {m: data[f'month_{m}'] for m in range(1, 13)}
+        self.grid_lats = np.load(self.dir / 'lats.npy')
+        self.grid_lons = np.load(self.dir / 'lons.npy')
+        _LOG.info('Loaded %s temperature artifacts from %s', self.source.name, self.dir)
+        return self
+
+    def correct(self, root: zarr.Group, day: date) -> dict[str, NDArray[np.float32]]:
+        if (
+            self.model is None
+            or self.seasonal_bias is None
+            or self.grid_lats is None
+            or self.grid_lons is None
+        ):
+            msg = 'Artifacts not loaded; call load_artifacts() first'
+            raise RuntimeError(msg)
+
+        grid, lats, lons = self.source.read_day(root, self.source.temp_var, day)
+        n_lat, n_lon = grid.shape
+        anomaly = (grid - np.nanmean(grid)).astype(np.float32)
+        elev, slope_we, slope_sn = self._dem_arrays(lats, lons)
+        seasonal = features.seasonal_field(
+            self.seasonal_bias,
+            self.grid_lats,
+            self.grid_lons,
+            day.month,
+            lats,
+            lons,
+        )
+        lat_grid, lon_grid = np.meshgrid(lats, lons, indexing='ij')
+        doy = day.timetuple().tm_yday
+        feat = pd.DataFrame(
+            {
+                'lat': lat_grid.ravel(),
+                'lon': lon_grid.ravel(),
+                'elevation': elev,
+                'slope_we': slope_we,
+                'slope_sn': slope_sn,
+                'era5_seasonal_bias': seasonal.ravel(),
+                'month': np.int8(day.month),
+                'doy_sin': np.float32(np.sin(2 * np.pi * doy / 365)),
+                'doy_cos': np.float32(np.cos(2 * np.pi * doy / 365)),
+                'era5_value': grid.ravel(),
+                'era5_anomaly': anomaly.ravel(),
+            }
+        )
+        bias = (
+            self.model.predict(
+                feat[FEATURE_COLS].fillna(0).astype(np.float32).to_numpy(),
+            )
+            .reshape(n_lat, n_lon)
+            .astype(np.float32)
+        )
+        bias[np.abs(seasonal) < CORRECTION_THRESHOLD] = 0.0
+        corrected = (grid - bias).astype(np.float32)
+        _LOG.info(
+            '%s %s: mean %.2f -> %.2f degC (corrected %.0f%% of cells)',
+            self.source.name,
+            day,
+            float(grid.mean()),
+            float(corrected.mean()),
+            float((bias != 0).mean() * 100),
+        )
+        return {'original': grid, 'corrected': corrected, 'bias': bias, 'lats': lats, 'lons': lons}
+
+    def _dem_arrays(
+        self,
+        lats: NDArray,
+        lons: NDArray,
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
+        key = (len(lats), len(lons))
+        if key not in self._dem_cache:
+            dem = features.load_dem(self.dem_path)
+            self._dem_cache[key] = features.resample_dem(dem, lats, lons)
+        return features.flat_dem(self._dem_cache[key], len(lats) * len(lons))

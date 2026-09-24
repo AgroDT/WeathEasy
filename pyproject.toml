@@ -28,9 +28,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "joblib-stubs>=1.5.3.1.20260117",
     "mypy~=1.11",
+    "pandas-stubs>=3.0.5.260914",
     "pytest>=8.3,<9",
     "ruff~=0.7",
+    "scipy-stubs>=1.18.1.1",
     "types-requests~=2.32",
 ]
 
@@ -48,6 +51,12 @@ prepare = [
     "cfgrib>=0.9.15,<0.10",
     "eccodes>=2.43,<3",
     "eccodeslib>=2.43 ; sys_platform != 'win32'",
+]
+correction = [
+    "joblib>=1.4,<2",
+    "pandas>=2.2,<3",
+    "scikit-learn>=1.5,<2",
+    "xgboost>=2,<4",
 ]
 
 [project.urls]

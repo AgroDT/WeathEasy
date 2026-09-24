@@ -31,7 +31,7 @@ class Coords(NamedTuple):
     longitude: float
 
 
-def get_cfs2_data(
+def get_cfs2_data(  # noqa: C901
     *,
     root: zarr.Group,
     begin: date,
@@ -69,6 +69,22 @@ def get_cfs2_data(
             offset = (first - begin).days
             for index, variable in enumerate(selected):
                 result[variables.index(variable), offset : offset + values.shape[1]] = values[index]
+        if kind == 'reanalysis':
+            corrected = [var for var in variables if var in ('TMP_corr', 'PRATE_corr')]
+            if corrected:
+                values = _read_point(
+                    root,
+                    'cfs2/reanalysis/correction',
+                    first,
+                    last,
+                    coords,
+                    corrected,
+                )
+                offset = (first - begin).days
+                for index, variable in enumerate(corrected):
+                    result[variables.index(variable), offset : offset + values.shape[1]] = values[
+                        index
+                    ]
     return result
 
 
@@ -111,7 +127,15 @@ def get_era5_data(
     for value in (begin, end):
         if not first <= value <= last:
             raise ERA5DateRangeError(value, first, last)
-    return _read_point(root, 'era5/daily', begin, end, coords, variables)
+    raw = [var for var in variables if var not in ('TMP_corr', 'PRATE_corr')]
+    corrected = [var for var in variables if var in ('TMP_corr', 'PRATE_corr')]
+    result = np.full((len(variables), (end - begin).days + 1), np.nan, np.float32)
+    for group, selected in (('era5/daily', raw), ('era5/correction', corrected)):
+        if selected:
+            values = _read_point(root, group, begin, end, coords, selected)
+            for index, variable in enumerate(selected):
+                result[variables.index(variable)] = values[index]
+    return result
 
 
 def _read_point(
