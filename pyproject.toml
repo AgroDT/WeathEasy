@@ -58,6 +58,10 @@ correction = [
     "scikit-learn>=1.5,<2",
     "xgboost>=2,<4",
 ]
+emdna = [
+    "pandas>=2.2,<3",
+    "scipy>=1.14,<2",
+]
 
 [project.urls]
 Homepage = "https://github.com/AgroDT/WeathEasy"

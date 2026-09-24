@@ -303,3 +303,45 @@ export AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
 ```
+
+
+### EMDNA station interpolation
+
+Install `weatheasy[emdna]` and run either processor independently:
+
+```sh
+python -m weatheasy.emdna temperature stations.csv -o temperature-results
+python -m weatheasy.emdna precipitation stations.csv -o precipitation-results
+```
+
+Optional positional `BEGIN END` dates (ISO format) limit the period. Without them,
+the command processes new observation dates after the latest completed output.
+The CSV requires `station_id`, `lat`, `lon`, `year`, `month`, `day`, and either
+`temperature` (°C) or `precipitation` (mm/day). Optional elevation and slope columns
+retain the donor's name matching. The output grid covers 19–180° E, 41–82° N at
+0.1° resolution; observations outside this region are excluded.
+
+`--era5 DIR` accepts the existing daily NetCDF contract: files matching
+`*YYYYMM*daily.nc`, coordinate `date`, spatial coordinates `latitude`/`longitude`,
+and `t2m_mean` (°C), `tp` (m/day), or `precipitation` (mm/day). These files are a
+separate input from the hourly download cache and the application's Zarr store.
+Only an exact date is used. Missing dates produce a warning and station-only
+results; missing ERA5 cells preserve the station estimate and precipitation
+probability. Available cells retain the donor's station/ERA5 blend.
+
+Each completed day's NPZ contains the donor output fields plus each ensemble
+member's random-field state and the random-generator state. A temporary local
+file is replaced after writing finishes; restart state and results are published
+together. Repeating the command skips completed dates and resumes with their
+state. A failed write or insufficient station count stops the sequence, so the
+unfinished day remains retryable. Old donor NPZ files without restart state
+cannot resume a new sequence; use a fresh output directory. Use a single writer
+per output directory and keep its grid and ensemble size unchanged.
+
+The climatology is rebuilt from the provided CSV on each invocation; existing
+outputs are not recalculated when observations change. Temporal state follows
+successive processed dates, including gaps in observation dates. Target elevation
+and slopes remain zero pending DEM integration. The donor precipitation
+cross-correlation formula is preserved (including its reuse of prior state when
+`trange_scrf` is supplied); the CLI does not supply that optional field. Processing
+the full grid and ensemble holds arrays in memory; no Dask execution is provided.
