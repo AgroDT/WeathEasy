@@ -59,7 +59,7 @@ class TemperatureCorrector:
         self.seasonal_bias: dict[int, NDArray[np.float32]] | None = None
         self.grid_lats: NDArray[np.float32] | None = None
         self.grid_lons: NDArray[np.float32] | None = None
-        self._dem_cache: dict[tuple[int, int], features.Dem | None] = {}
+        self._dem_cache: dict[tuple[int, int], features.Dem] = {}
 
     def load_artifacts(self) -> TemperatureCorrector:
         verify_manifest(self.dir, TEMP_FILES)
@@ -152,4 +152,4 @@ class TemperatureCorrector:
         if key not in self._dem_cache:
             dem = features.load_dem(self.dem_path)
             self._dem_cache[key] = features.resample_dem(dem, lats, lons)
-        return features.flat_dem(self._dem_cache[key], len(lats) * len(lons))
+        return features.flat_dem(self._dem_cache[key])

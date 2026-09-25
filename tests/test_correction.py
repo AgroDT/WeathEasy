@@ -47,6 +47,19 @@ class RecordWet(AlwaysWet):
         return super().predict_proba(x)
 
 
+def dem_file(path: Path, lats: np.ndarray, lons: np.ndarray) -> Path:
+    shape = (len(lats), len(lons))
+    xr.Dataset(
+        {
+            'elevation': (('latitude', 'longitude'), np.full(shape, 150, np.float32)),
+            'slope_we': (('latitude', 'longitude'), np.zeros(shape, np.float32)),
+            'slope_sn': (('latitude', 'longitude'), np.zeros(shape, np.float32)),
+        },
+        coords={'latitude': lats, 'longitude': lons},
+    ).to_netcdf(path)
+    return path
+
+
 def raw_store(
     tmp_path: Path,
     source: Source = ERA5,
@@ -126,6 +139,9 @@ def heterogeneous_store(tmp_path: Path, source: Source):
             'date': [pd.Timestamp('2020-01-02')],
             'temperature': [12.0],
             'precipitation': [7.0],
+            'elevation': [150.0],
+            'slope_we': [0.0],
+            'slope_sn': [0.0],
         }
     )
     return root, station, (0, 0)
@@ -250,11 +266,11 @@ def test_correction_rejects_skipping_prepared_day(tmp_path: Path, monkeypatch: p
 
 def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path)
-    corrector = PrecipCorrector(ERA5, tmp_path, tmp_path / 'missing.nc')
+    lats, lons = ERA5.grid(root)
+    corrector = PrecipCorrector(ERA5, tmp_path, dem_file(tmp_path / 'dem.nc', lats, lons))
     corrector.clf = corrector.fallback_clf = AlwaysWet()
     corrector.reg = corrector.fallback_reg = Constant(np.log1p(8))
     corrector.train_coords = np.array([[55.5, 37.5]], np.float32)
-    lats, lons = ERA5.grid(root)
     corrector.grid_lats, corrector.grid_lons = lats, lons
     corrector.climatology = build_climatology(
         ERA5, root, ERA5.precip_var, ERA5.precip_to_mm, wet_threshold=1.0
@@ -281,7 +297,7 @@ def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest
 def test_temperature_corrector_applies_and_suppresses_small_bias(tmp_path: Path):
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
-    corrector = TemperatureCorrector(ERA5, tmp_path, tmp_path / 'missing.nc')
+    corrector = TemperatureCorrector(ERA5, tmp_path, dem_file(tmp_path / 'dem.nc', lats, lons))
     corrector.model = Constant(1.5)
     corrector.grid_lats, corrector.grid_lons = lats, lons
     corrector.climatology = build_climatology(ERA5, root, ERA5.temp_var, 1.0)
@@ -319,7 +335,9 @@ def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path: Path, 
     assert precip_rows.era5_wet_fraction.iloc[0] == pytest.approx(0.5)
 
     temp_model = RecordTemperature()
-    temp = TemperatureCorrector(source, tmp_path, tmp_path / 'missing.nc')
+    lats, lons = source.grid(root)
+    dem_path = dem_file(tmp_path / 'dem.nc', lats, lons)
+    temp = TemperatureCorrector(source, tmp_path, dem_path)
     temp.model = temp_model
     temp.climatology = temp_climate
     temp.grid_lats, temp.grid_lons = source.grid(root)
@@ -329,7 +347,7 @@ def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path: Path, 
     assert temp_model.captured[0, index] == pytest.approx(temp_rows.era5_anomaly.iloc[0])
 
     wet_model = RecordWet()
-    precip = PrecipCorrector(source, tmp_path, tmp_path / 'missing.nc')
+    precip = PrecipCorrector(source, tmp_path, dem_path)
     precip.clf = precip.fallback_clf = wet_model
     precip.reg = precip.fallback_reg = Constant(np.log1p(8))
     precip.climatology = precip_climate
@@ -461,6 +479,20 @@ def test_station_terrain_enrichment_and_source_units(tmp_path: Path):
     assert raw[5, 5] * ERA5.precip_to_mm == pytest.approx(10)
 
 
+def test_dem_missing_cell_cannot_become_zero_terrain():
+    lats = np.array([55.0, 55.1], np.float32)
+    lons = np.array([37.0, 37.1], np.float32)
+    dem: features.Dem = {
+        'lats': lats,
+        'lons': lons,
+        'elevation': np.array([[150, np.nan], [150, 150]], np.float32),
+        'slope_we': np.zeros((2, 2), np.float32),
+        'slope_sn': np.zeros((2, 2), np.float32),
+    }
+    with pytest.raises(ValueError, match='DEM field elevation contains missing values'):
+        features.resample_dem(dem, lats, lons)
+
+
 def test_longitude_scale_changes_hybrid_distance_and_idw_weights():
     target = np.array([[60.0, 0.0]])
     refs = np.array([[60.0, 2.0], [61.0, 0.0], [62.0, 0.0]])
@@ -491,6 +523,7 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
     from weatheasy.correction.__main__ import main
 
     root, first = raw_store(tmp_path)
+    dem_path = dem_file(tmp_path / 'dem.nc', *ERA5.grid(root))
     stations = tmp_path / 'stations.csv'
     rows = [
         (
@@ -514,7 +547,7 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
         '--store',
         str(tmp_path / 'data'),
         '--dem',
-        str(tmp_path / 'missing.nc'),
+        str(dem_path),
         '--artifacts',
         str(tmp_path / 'artifacts'),
     ]

@@ -55,7 +55,9 @@ class FakeCDSClient:
 
     def __init__(self) -> None:
         self.calls = []
-        self.transform: Callable[[xr.Dataset, Mapping, int], xr.Dataset] | None = None
+        self.transform: Callable[[xr.Dataset, Mapping, int], xr.Dataset] = (
+            lambda ds, _request, _call: ds
+        )
 
     def retrieve(self, _dataset: xr.Dataset, request: Mapping):
         assert len(request['variable']) <= 8
@@ -63,7 +65,6 @@ class FakeCDSClient:
         self.calls.append(request)
         month = date(int(request['year']), int(request['month']), 1)
         ds = requested_source(month, request)
-        assert self.transform is not None
         ds = self.transform(ds, request, len(self.calls))
         return SimpleNamespace(download=ds.to_netcdf)
 
@@ -332,7 +333,7 @@ def test_partial_request_missing_variable_never_publishes(
     broken = True
 
     def drop_variable(ds: xr.Dataset, _request: Mapping, call: int) -> xr.Dataset:
-        return ds.drop_vars(next(iter(ds.data_vars))) if broken and call == 2 else ds
+        return ds.drop_vars([next(iter(ds.data_vars))]) if broken and call == 2 else ds
 
     cds_client.transform = drop_variable
     root = get_storage(str(tmp_path / 'store'))

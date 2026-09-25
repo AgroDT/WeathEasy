@@ -130,7 +130,8 @@ class TemperatureProcessor(EMDNABase):
         if self.era5_dir is None:
             return None
         try:
-            # ERA5 loading is optional; failures fall back to station data.
+            # Missing ERA5 days intentionally use stations. This broad handler also
+            # treats broken NetCDF files as missing; narrow it when that policy changes.
             import xarray as xr  # noqa: PLC0415
 
             files = sorted(self.era5_dir.glob(f'*{date_str[:7].replace("-", "")}*daily.nc'))

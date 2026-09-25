@@ -88,20 +88,14 @@ def load_stations(csv_path: Path, value_cols: Sequence[str]) -> pd.DataFrame:
     return stations
 
 
-def enrich_stations(stations: pd.DataFrame, dem: features.Dem | None) -> pd.DataFrame:
+def enrich_stations(stations: pd.DataFrame, dem: features.Dem) -> pd.DataFrame:
     """Attach elevation / slope_we / slope_sn from the DEM at each station location."""
-    if dem is None:
-        return stations
     lats = dem['lats']
     lons = dem['lons']
-    if lats is None or lons is None:
-        return stations
     stations = stations.drop(columns=[c for c in _TERRAIN_COLS if c in stations.columns])
     pos = stations[['lat', 'lon']].drop_duplicates().copy()
     for col in _TERRAIN_COLS:
-        data = dem.get(col)
-        if data is None:
-            continue
+        data = dem[col]
         li = np.argmin(np.abs(lats[:, None] - pos['lat'].to_numpy()[None, :]), axis=0)
         lo = np.argmin(np.abs(lons[:, None] - pos['lon'].to_numpy()[None, :]), axis=0)
         pos[col] = data[li, lo].astype(np.float32)
@@ -250,9 +244,6 @@ def _temp_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
     dataset['era5_anomaly'] = (dataset['reanalysis'].to_numpy() - clim).astype(np.float32)
     seasonal_bias = dataset.groupby(['station_id', 'month'])['bias'].transform('mean')
     dataset['era5_seasonal_bias'] = seasonal_bias.astype(np.float32)
-    for col in _TERRAIN_COLS:
-        if col not in dataset.columns:
-            dataset[col] = np.float32(0.0)
     return dataset
 
 
@@ -385,11 +376,7 @@ def _precip_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFram
     dataset['log_dist_coast'] = np.log1p(
         features.dist_to_coast(dataset['lat'].to_numpy(), dataset['lon'].to_numpy()),
     ).astype(np.float32)
-    dataset = dataset.drop(columns=['_log_ratio', '_wet_diff'])
-    for col in _TERRAIN_COLS:
-        if col not in dataset.columns:
-            dataset[col] = np.float32(0.0)
-    return dataset
+    return dataset.drop(columns=['_log_ratio', '_wet_diff'])
 
 
 def _train_two_stage(dataset: pd.DataFrame) -> tuple[Any, Any]:

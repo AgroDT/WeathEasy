@@ -8,14 +8,10 @@ enrichment and inference-time grid resampling read identical terrain features.
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import numpy as np
 import xarray as xr
-
-
-_LOG = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -23,7 +19,13 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-    Dem = dict[str, NDArray[np.float32] | None]
+
+class Dem(TypedDict):
+    lats: NDArray[np.float32]
+    lons: NDArray[np.float32]
+    elevation: NDArray[np.float32]
+    slope_we: NDArray[np.float32]
+    slope_sn: NDArray[np.float32]
 
 
 # Reference points along Russia's sea coasts for a cheap distance-to-coast feature.
@@ -112,28 +114,27 @@ def point_distances_km(target: NDArray, reference: NDArray) -> NDArray[np.float6
     )
 
 
-def load_dem(path: Path) -> Dem | None:
-    """Load the Copernicus DEM terrain file (elevation + slopes). None if missing."""
-    if not path.is_file():
-        return None
+def load_dem(path: Path) -> Dem:
+    """Load the required Copernicus DEM terrain file (elevation + slopes)."""
     with xr.open_dataset(path) as ds:
-        return {
+        dem: Dem = {
             'lats': ds['latitude'].to_numpy().astype(np.float32),
             'lons': ds['longitude'].to_numpy().astype(np.float32),
             'elevation': ds['elevation'].to_numpy().astype(np.float32),
-            'slope_we': ds['slope_we'].to_numpy().astype(np.float32) if 'slope_we' in ds else None,
-            'slope_sn': ds['slope_sn'].to_numpy().astype(np.float32) if 'slope_sn' in ds else None,
+            'slope_we': ds['slope_we'].to_numpy().astype(np.float32),
+            'slope_sn': ds['slope_sn'].to_numpy().astype(np.float32),
         }
+    return resample_dem(dem, dem['lats'], dem['lons'])
 
 
-def resample_dem(dem: Dem | None, lats: NDArray, lons: NDArray) -> Dem | None:
+def resample_dem(dem: Dem, lats: NDArray, lons: NDArray) -> Dem:
     """Linearly interpolate the DEM onto a target grid (no-op if grids already match)."""
-    if dem is None:
-        return None
     src_lats = dem['lats']
     src_lons = dem['lons']
-    if src_lats is None or src_lons is None:
-        return None
+    for key in ('elevation', 'slope_we', 'slope_sn'):
+        if not np.isfinite(dem[key]).all():
+            msg = f'DEM field {key} contains missing values'
+            raise ValueError(msg)
 
     # Use absolute tolerance only: rtol would scale with coordinate magnitude
     # (e.g. 50° * 1e-5 ≈ 0.0005° ≈ 50 m), which is too loose for grid matching.
@@ -149,49 +150,34 @@ def resample_dem(dem: Dem | None, lats: NDArray, lons: NDArray) -> Dem | None:
         # Return with canonical target coords so the caller always gets what it asked for.
         return {**dem, 'lats': tgt_lats, 'lons': tgt_lons}
 
-    out: Dem = {'lats': tgt_lats, 'lons': tgt_lons}
-    for key in ('elevation', 'slope_we', 'slope_sn'):
-        data = dem.get(key)
-        if data is None:
-            out[key] = None
-            continue
+    def resample(data: NDArray[np.float32], key: str) -> NDArray[np.float32]:
         da = xr.DataArray(
             data,
             coords={'latitude': src_lats, 'longitude': src_lons},
             dims=['latitude', 'longitude'],
         )
         resampled = da.interp(latitude=tgt_lats, longitude=tgt_lons, method='linear').to_numpy()
-        n_nan = int(np.isnan(resampled).sum())
-        if n_nan:
-            _LOG.warning(
-                'DEM field "%s": %d NaN cells after resampling '
-                '(missing source cells or target grid extends beyond DEM coverage) '
-                '— filling with 0',
-                key,
-                n_nan,
-            )
-        out[key] = np.nan_to_num(resampled.astype(np.float32), nan=0.0)
-    return out
+        if not np.isfinite(resampled).all():
+            msg = f'DEM field {key} is missing on the correction grid'
+            raise ValueError(msg)
+        return resampled.astype(np.float32)
+
+    return {
+        'lats': tgt_lats,
+        'lons': tgt_lons,
+        'elevation': resample(dem['elevation'], 'elevation'),
+        'slope_we': resample(dem['slope_we'], 'slope_we'),
+        'slope_sn': resample(dem['slope_sn'], 'slope_sn'),
+    }
 
 
-def flat_dem(
-    dem: Dem | None,
-    n_pts: int,
-) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
-    """Flattened elevation / slope_we / slope_sn for a (resampled) DEM; zeros if absent."""
-    if dem is None:
-        return np.zeros(n_pts, np.float32), np.zeros(n_pts, np.float32), np.zeros(n_pts, np.float32)
+def flat_dem(dem: Dem) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
+    """Flattened elevation / slope_we / slope_sn for a resampled DEM."""
     return (
-        _ravel_or_zero(dem.get('elevation'), n_pts),
-        _ravel_or_zero(dem.get('slope_we'), n_pts),
-        _ravel_or_zero(dem.get('slope_sn'), n_pts),
+        dem['elevation'].ravel(),
+        dem['slope_we'].ravel(),
+        dem['slope_sn'].ravel(),
     )
-
-
-def _ravel_or_zero(data: NDArray | None, n_pts: int) -> NDArray[np.float32]:
-    if data is None:
-        return np.zeros(n_pts, np.float32)
-    return data.ravel().astype(np.float32)
 
 
 def seasonal_field(  # noqa: PLR0917
