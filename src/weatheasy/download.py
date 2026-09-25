@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import xarray as xr
-from requests import Session
-from requests.adapters import HTTPAdapter
+from httpx2 import Client, HTTPTransport
 
 from weatheasy import const
 from weatheasy.era5 import download_era5_data
@@ -142,10 +141,8 @@ def _process_args(group_name: str, root: zarr.Group, download_dir: Path | None):
     return group, download_dir
 
 
-def _session():
-    s = Session()
-    s.mount('https://', HTTPAdapter(max_retries=3))
-    return s
+def _session() -> Client:
+    return Client(transport=HTTPTransport(retries=3), follow_redirects=True)
 
 
 @contextmanager
@@ -154,7 +151,7 @@ def _temp_dir():
         yield Path(tmp_dir)
 
 
-def _download_cfs2_reanalysis(root: zarr.Group, end: date, session: Session, download_dir: Path):
+def _download_cfs2_reanalysis(root: zarr.Group, end: date, session: Client, download_dir: Path):
     download = _Cfs2ReanalysisDownloader(session, download_dir)
     groups = {
         kind: root.require_group(f'{const.CFS2_REANALYSIS_DIR}/{kind}') for kind in ('flx', 'pgb')
@@ -242,7 +239,7 @@ def _check_pevpr_times(times: np.ndarray, day: date, bands: dict) -> None:
 def _download_cfs2_forecast(
     begin: date,
     end: date,
-    session: Session,
+    session: Client,
     download_dir: Path,
 ):
     download_dir.mkdir(parents=True, exist_ok=True)
@@ -283,7 +280,7 @@ def _merge_cfs2_forecast(root: zarr.Group, begin: date, end: date, download_dir:
 
 
 class _Cfs2ReanalysisDownloader:
-    def __init__(self, session: Session, download_dir: Path) -> None:
+    def __init__(self, session: Client, download_dir: Path) -> None:
         self._session = session
         self._download_dir = download_dir
 
@@ -302,14 +299,14 @@ class _Cfs2ReanalysisDownloader:
             if not path.is_file():
                 url = url_template.format(hhs)
                 _LOG.info('Downloading %s', url)
-                with self._session.get(url, timeout=180) as response:
-                    if response.status_code == 404:
-                        return None
-                    if not response.ok:
-                        msg = f'Failed to download {url}'
-                        raise RuntimeError(msg)
-                    _LOG.info('Writing %s', path)
-                    path.write_bytes(response.content)
+                response = self._session.get(url, timeout=180)
+                if response.status_code == 404:
+                    return None
+                if not response.is_success:
+                    msg = f'Failed to download {url}'
+                    raise RuntimeError(msg)
+                _LOG.info('Writing %s', path)
+                path.write_bytes(response.content)
             paths.append(path)
         return paths
 
@@ -318,7 +315,7 @@ class _Cfs2ForecastDownloader:
     _base_url: ClassVar = 'https://nomads.ncep.noaa.gov/cgi-bin/'
     _min_interval: ClassVar = 1.0 / 3.0
 
-    def __init__(self, session: Session, download_dir: Path, begin: date, end: date) -> None:
+    def __init__(self, session: Client, download_dir: Path, begin: date, end: date) -> None:
         self._session = session
         self._download_dir = download_dir
         self._begin = begin
@@ -344,15 +341,15 @@ class _Cfs2ForecastDownloader:
             self._last_call = time.time()
             _LOG.info('Downloading %s', file)
             params['file'] = file
-            with self._session.get(url, params=params, timeout=180) as response:
-                if response.ok:
-                    if response.content.startswith(b'<!doctype html>'):
-                        _LOG.critical('Exceeded overrate limit for nomads.ncep.noaa.gov')
-                        sys.exit(1)
-                    _LOG.info('Writing %s', path)
-                    path.write_bytes(response.content)
-                else:
-                    _LOG.critical('Failed to download %s', response.url)
+            response = self._session.get(url, params=params, timeout=180)
+            if response.is_success:
+                if response.content.startswith(b'<!doctype html>'):
+                    _LOG.critical('Exceeded overrate limit for nomads.ncep.noaa.gov')
+                    sys.exit(1)
+                _LOG.info('Writing %s', path)
+                path.write_bytes(response.content)
+            else:
+                _LOG.critical('Failed to download %s', response.url)
 
 
 def _cfs2_forecast_dates(date_: date, end: date):
@@ -361,7 +358,7 @@ def _cfs2_forecast_dates(date_: date, end: date):
         date_ += const.ONE_DAY
 
 
-def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Session):
+def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Client):
     filename = f'{var}_{year}.nc'
     if path:
         path /= filename
@@ -376,13 +373,13 @@ def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Session
         f'{kind}/r1i1p1f1/{var}/{var}_day_ACCESS-CM2_{kind}_r1i1p1f1_gn_{year}.nc'
     )
     _LOG.info('Downloading %s', url)
-    with session.get(url, timeout=180) as response:
-        if not response.ok:
-            _LOG.critical('Failed to download %s', url)
-            sys.exit(1)
-        if path:
-            _LOG.info('Writing %s', path)
-            path.write_bytes(response.content)
+    response = session.get(url, timeout=180)
+    if not response.is_success:
+        _LOG.critical('Failed to download %s', url)
+        sys.exit(1)
+    if path:
+        _LOG.info('Writing %s', path)
+        path.write_bytes(response.content)
 
     return filename, response.content
 

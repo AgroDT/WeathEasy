@@ -26,9 +26,8 @@ from pathlib import Path
 import netCDF4 as nc
 import numpy as np
 import rasterio
+from httpx2 import Client, HTTPTransport
 from rasterio.enums import Resampling
-from requests import Session
-from requests.adapters import HTTPAdapter
 
 
 _LOG = logging.getLogger('build_copdem')
@@ -38,10 +37,8 @@ _RES_CODE = 30  # 10 = GLO-30, 30 = GLO-90
 _M_PER_DEGREE = 111_320.0  # metres per degree of latitude (approx.)
 
 
-def _session() -> Session:
-    s = Session()
-    s.mount('https://', HTTPAdapter(max_retries=3))
-    return s
+def _session() -> Client:
+    return Client(transport=HTTPTransport(retries=3), follow_redirects=True)
 
 
 def _tile_name(tlat: int, tlon: int) -> str:
@@ -54,7 +51,7 @@ def _fetch_tile(
     tlat: int,
     tlon: int,
     cache_dir: Path,
-    session: Session,
+    session: Client,
 ) -> Path | None:
     """Download one 1°x1° DEM tile to the cache. Returns None for missing (ocean) tiles."""
     name = _tile_name(tlat, tlon)
@@ -63,14 +60,14 @@ def _fetch_tile(
         return path
     url = f'https://{_HOST}/{name}/{name}.tif'
     _LOG.info('Downloading %s', url)
-    with session.get(url, timeout=180) as response:
-        if response.status_code == 404:
-            _LOG.info('  no tile (ocean / out of coverage): %s', name)
-            return None
-        if not response.ok:
-            msg = f'Failed to download {url}: HTTP {response.status_code}'
-            raise RuntimeError(msg)
-        path.write_bytes(response.content)
+    response = session.get(url, timeout=180)
+    if response.status_code == 404:
+        _LOG.info('  no tile (ocean / out of coverage): %s', name)
+        return None
+    if not response.is_success:
+        msg = f'Failed to download {url}: HTTP {response.status_code}'
+        raise RuntimeError(msg)
+    path.write_bytes(response.content)
     return path
 
 
@@ -118,23 +115,23 @@ def build_copdem(
     lons = (west + (np.arange(n_lon) + 0.5) * resolution).astype(np.float32)
     elev = np.full((n_lat, n_lon), np.nan, dtype=np.float32)
 
-    session = _session()
     tiles = list(product(range(south, north), range(west, east)))
     n_tiles = len(tiles)
     found = 0
-    for done, (tlat, tlon) in enumerate(tiles, start=1):
-        if done % 50 == 0 or done == n_tiles:
-            _LOG.info('Tiles: %d/%d (found %d)', done, n_tiles, found)
+    with _session() as session:
+        for done, (tlat, tlon) in enumerate(tiles, start=1):
+            if done % 50 == 0 or done == n_tiles:
+                _LOG.info('Tiles: %d/%d (found %d)', done, n_tiles, found)
 
-        path = _fetch_tile(tlat, tlon, cache_dir, session)
-        if path is None:
-            continue
+            path = _fetch_tile(tlat, tlon, cache_dir, session)
+            if path is None:
+                continue
 
-        block = _read_tile_block(path, cells_per_degree)
-        r0 = (tlat - south) * cells_per_degree
-        c0 = (tlon - west) * cells_per_degree
-        elev[r0 : r0 + cells_per_degree, c0 : c0 + cells_per_degree] = block
-        found += 1
+            block = _read_tile_block(path, cells_per_degree)
+            r0 = (tlat - south) * cells_per_degree
+            c0 = (tlon - west) * cells_per_degree
+            elev[r0 : r0 + cells_per_degree, c0 : c0 + cells_per_degree] = block
+            found += 1
 
     if found == 0:
         msg = 'No tiles downloaded — check --area covers land within Copernicus DEM coverage'
