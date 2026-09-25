@@ -3,6 +3,7 @@ import io
 import json
 import sys
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 BEGIN, END = date(2020, 2, 28), date(2020, 3, 1)
 
 
-def weather_store(tmp_path, source):
+def weather_store(tmp_path: Path, source: str):
     root = get_storage(str(tmp_path / source))
     name = 'pr' if source == 'cmip6' else 'PRATE'
     scale = 21600 if source == 'cfs2' else 86400
@@ -56,7 +57,7 @@ def weather_store(tmp_path, source):
 
 
 @pytest.mark.parametrize('source', ['cfs2', 'era5', 'cmip6'])
-def test_daily_getter_and_csv_units(tmp_path, monkeypatch, source):
+def test_daily_getter_and_csv_units(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str):
     from weatheasy.__main__ import main
 
     root, name, _ = weather_store(tmp_path, source)
@@ -94,7 +95,11 @@ def test_daily_getter_and_csv_units(tmp_path, monkeypatch, source):
 
 
 @pytest.mark.parametrize('source', ['cmip6', 'cfs2'])
-def test_http_precipitation_units_and_response_shape(tmp_path, monkeypatch, source):
+def test_http_precipitation_units_and_response_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+):
     pytest.importorskip('fastapi')
     from weatheasy.web import controller
 
@@ -124,7 +129,7 @@ def test_http_precipitation_units_and_response_shape(tmp_path, monkeypatch, sour
 
 
 @pytest.mark.parametrize('source', ['cfs2', 'era5'])
-def test_raw_and_corrected_precipitation_have_same_units(tmp_path, source):
+def test_raw_and_corrected_precipitation_have_same_units(tmp_path: Path, source: str):
     root, _, path = weather_store(tmp_path, source)
     with open_dataset(root.store, path) as raw:
         corrected = raw.rename({'PRATE': 'PRATE_corr'}).load()

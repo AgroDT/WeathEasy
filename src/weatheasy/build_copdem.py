@@ -173,7 +173,7 @@ def _slopes(
     return np.nan_to_num(slope_we), np.nan_to_num(slope_sn)
 
 
-def _write_netcdf(
+def _write_netcdf(  # noqa: PLR0917
     output: Path,
     lats: np.ndarray,
     lons: np.ndarray,

@@ -1,4 +1,6 @@
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,7 +12,7 @@ from weatheasy.storage import StorageError, open_dataset
 from weatheasy.util import get_storage
 
 
-def source(month, *, boundary=False):
+def source(month: date, *, boundary: bool = False):
     first = np.datetime64(month, 'h')
     times = (
         [first]
@@ -48,7 +50,7 @@ def source(month, *, boundary=False):
 
 
 @pytest.mark.parametrize('month', [date(2000, 2, 1), date(2000, 12, 1)])
-def test_daily_units_midnight_wind_and_coordinates(month):
+def test_daily_units_midnight_wind_and_coordinates(month: date):
     main = source(month)
     boundary = source(era5.next_month(month), boundary=True)
     # 23 UTC is deliberately wrong; only the NEXT midnight carries full accumulation.
@@ -110,7 +112,7 @@ REQUIRED_INPUTS = (
 
 
 @pytest.mark.parametrize('name', REQUIRED_INPUTS)
-def test_all_inputs_required(name):
+def test_all_inputs_required(name: str):
     month = date(2000, 1, 1)
     main = source(month)
     assert name in main
@@ -133,7 +135,10 @@ def test_boundary_and_timestamp_validation():
         era5.process_month(main, boundary.assign_coords(longitude=[38.1, 38.2, 38.3]), month)
 
 
-def test_public_monthly_download_resume_getter_and_cli(tmp_path, monkeypatch):
+def test_public_monthly_download_resume_getter_and_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     import sys
 
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
@@ -141,7 +146,7 @@ def test_public_monthly_download_resume_getter_and_cli(tmp_path, monkeypatch):
     calls = []
 
     class Client:
-        def retrieve(self, _dataset, request):
+        def retrieve(self, _dataset, request):  # noqa: ANN001
             assert len(request['variable']) <= 8
             assert (
                 len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
@@ -202,7 +207,7 @@ def test_public_monthly_download_resume_getter_and_cli(tmp_path, monkeypatch):
     assert output.read_text() == 'DATE,WIND\n2000-01-31,5\n'
 
 
-def test_failed_month_and_append_recover(tmp_path, monkeypatch):
+def test_failed_month_and_append_recover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import sys
 
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
@@ -210,11 +215,11 @@ def test_failed_month_and_append_recover(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=lambda: None))
     broken = True
 
-    def retrieve(_client, _cache, month, _area, *, boundary):
+    def retrieve(_self, month, *, boundary):  # noqa: ANN001
         ds = source(month, boundary=boundary)
         return ds.isel(time=slice(0, 0)) if broken and month.month == 3 else ds
 
-    monkeypatch.setattr(era5, '_retrieve', retrieve)
+    monkeypatch.setattr(era5._Downloader, 'retrieve', retrieve)
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='timestamps'):
@@ -224,7 +229,7 @@ def test_failed_month_and_append_recover(tmp_path, monkeypatch):
     broken = False
     original = xr.Dataset.to_zarr
 
-    def fail_write(self, *args, **kwargs):
+    def fail_write(self, *args, **kwargs):  # noqa: ANN001
         original(self, *args, **kwargs)
         msg = 'interrupted after appending arrays'
         raise OSError(msg)
@@ -239,11 +244,11 @@ def test_failed_month_and_append_recover(tmp_path, monkeypatch):
     assert root['era5/daily'].attrs['committed_length'] == 60
 
 
-def test_cache_includes_area(tmp_path):
+def test_cache_includes_area(tmp_path: Path):
     calls = []
 
     class Client:
-        def retrieve(self, _dataset, request):
+        def retrieve(self, _dataset, request):  # noqa: ANN001
             assert len(request['variable']) <= 8
             assert (
                 len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
@@ -254,17 +259,17 @@ def test_cache_includes_area(tmp_path):
             )
 
     for area in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
-        era5._retrieve(Client(), tmp_path, date(2000, 1, 1), area, boundary=False)  # noqa: SLF001
+        era5._Downloader(Client(), tmp_path, area).retrieve(date(2000, 1, 1), boundary=False)
     assert len(calls) == 6
     assert len(list(tmp_path.glob('*.nc'))) == 6
 
 
 def test_actual_axes_reject_different_region():
     with pytest.raises(StorageError, match='longitude'):
-        era5._validate_area(source(date(2000, 1, 1)), (55.3, 38.1, 55.2, 38.3))  # noqa: SLF001
+        era5._validate_area(source(date(2000, 1, 1)), (55.3, 38.1, 55.2, 38.3))
 
 
-def test_split_netcdf_response_preserves_explicit_crs(tmp_path):
+def test_split_netcdf_response_preserves_explicit_crs(tmp_path: Path):
     import zipfile
 
     month = date(2000, 1, 1)
@@ -277,13 +282,13 @@ def test_split_netcdf_response_preserves_explicit_crs(tmp_path):
     with zipfile.ZipFile(archive_path, 'w') as archive:
         for file in files:
             archive.write(file, file.name)
-    restored = era5._read_response(archive_path)  # noqa: SLF001
+    restored = era5._read_response(archive_path)
     boundary = source(era5.next_month(month), boundary=True).rio.write_crs('EPSG:4326')
     result = era5.process_month(restored, boundary, month)
     assert result.rio.crs.to_epsg() == 4326
 
 
-def test_download_cli_dispatch(monkeypatch, tmp_path):
+def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import sys
 
     from weatheasy import download
@@ -311,7 +316,7 @@ def test_download_cli_dispatch(monkeypatch, tmp_path):
     assert calls[0][1]['area'] == (55.3, 37.1, 55.2, 37.3)
 
 
-def requested_source(month, request):
+def requested_source(month: date, request: Mapping):
     names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
     names.update({cds: nc for nc, cds in era5.EXTRA.items()})
     return source(month, boundary=len(request['time']) == 1)[
@@ -319,7 +324,10 @@ def requested_source(month, request):
     ]
 
 
-def test_partial_request_missing_variable_never_publishes(tmp_path, monkeypatch):
+def test_partial_request_missing_variable_never_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     import sys
 
     import zarr
@@ -330,14 +338,14 @@ def test_partial_request_missing_variable_never_publishes(tmp_path, monkeypatch)
     calls = []
 
     class Client:
-        def retrieve(self, _dataset, request):
+        def retrieve(self, _dataset, request):  # noqa: ANN001
             assert len(request['variable']) <= 8
             calls.append(request)
             month = date(int(request['year']), int(request['month']), 1)
             ds = requested_source(month, request)
             if broken and len(calls) == 2:
                 ds = ds.drop_vars(next(iter(ds.data_vars)))
-            return SimpleNamespace(download=lambda path: ds.to_netcdf(path))
+            return SimpleNamespace(download=ds.to_netcdf)
 
     monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=Client))
     root = get_storage(str(tmp_path / 'store'))

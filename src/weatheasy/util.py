@@ -41,7 +41,8 @@ def get_storage(root: str) -> zarr.Group:
     store: str | FsspecStore
     if root.startswith('s3://'):
         try:
-            import s3fs
+            # Local stores must work without the optional S3 extra.
+            import s3fs  # noqa: PLC0415
         except ImportError as exc:
             raise S3ImportError from exc
         else:

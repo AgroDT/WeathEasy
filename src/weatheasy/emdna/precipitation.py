@@ -199,7 +199,8 @@ class PrecipitationProcessor(EMDNABase):
         if self.era5_dir is None:
             return None, None
         try:
-            import xarray as xr
+            # ERA5 loading is optional; failures fall back to station data.
+            import xarray as xr  # noqa: PLC0415
 
             files = sorted(self.era5_dir.glob(f'*{date_str[:7].replace("-", "")}*daily.nc'))
             if not files:

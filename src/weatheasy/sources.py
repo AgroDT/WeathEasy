@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 import xarray as xr
 from rasterio import CRS
 
-from weatheasy.storage import StorageError, prepare_dataset
+from weatheasy import const
+from weatheasy.storage import StorageError, merge_fields, prepare_dataset
 
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ def read_grib(
     """
     # The optional decoder must never be imported by prepared-data readers.
     try:
-        from cfgrib.xarray_plugin import CfGribBackend
+        from cfgrib.xarray_plugin import CfGribBackend  # noqa: PLC0415
     except ImportError as err:
         msg = 'GRIB preparation requires weatheasy[prepare]'
         raise ImportError(msg) from err
@@ -130,9 +131,6 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
     with missing statistical-processing metadata; no six-hour interval is inferred.
     Daily reduction is performed by the loader using the existing statistics.
     """
-    from weatheasy import const
-    from weatheasy.storage import merge_fields
-
     bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
     fields = []
     for name in bands:

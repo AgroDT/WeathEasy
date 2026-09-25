@@ -1,6 +1,7 @@
 """FAO published examples and prepared Zarr -> AquaCrop integration."""
 
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -80,7 +81,7 @@ def test_cloud_factor_and_polar_radiation():
     assert np.isfinite(_et0_fao56_for_uccle(rs0=1e-15))
 
 
-def weather_store(tmp_path, correction=()):
+def weather_store(tmp_path: Path, correction: tuple[str, ...] = ()):
     root = get_storage(str(tmp_path / 'weather'))
     # Includes leap day and a month boundary; only WIND is provided, no U/V.
     dates = np.arange('2020-02-28', '2020-03-03', dtype='datetime64[D]')
@@ -109,7 +110,7 @@ def weather_store(tmp_path, correction=()):
         'PRATE_corr': 'mm day-1',
     }
 
-    def dataset(fields):
+    def dataset(fields: dict):
         return prepare_dataset(
             xr.Dataset(
                 {
@@ -136,7 +137,7 @@ def weather_store(tmp_path, correction=()):
     return root
 
 
-def read_weather(root, **kwargs):
+def read_weather(root: zarr.Group, **kwargs):
     return get_weather_data(
         root=root,
         latitude=50.8,
@@ -151,7 +152,10 @@ def read_weather(root, **kwargs):
 @pytest.mark.parametrize(
     'correction', [(), ('TMP_corr',), ('PRATE_corr',), ('TMP_corr', 'PRATE_corr')]
 )
-def test_adapter_units_independent_fallback_and_readonly(tmp_path, correction):
+def test_adapter_units_independent_fallback_and_readonly(
+    tmp_path: Path,
+    correction: tuple[str, ...],
+):
     root = weather_store(tmp_path, correction)
     root = zarr.open_group(root.store, mode='r')
     raw = read_weather(root, use_corrected=False)
@@ -177,7 +181,7 @@ def test_adapter_units_independent_fallback_and_readonly(tmp_path, correction):
     np.testing.assert_allclose(raw.et0, np.where(expected > 0, expected, np.nan), rtol=1e-6)
 
 
-def test_corrected_precip_missing_day_and_nonpositive_et0(tmp_path):
+def test_corrected_precip_missing_day_and_nonpositive_et0(tmp_path: Path):
     root = weather_store(tmp_path, ('PRATE_corr',))
     root['era5/correction/PRATE_corr'][3] = np.nan
     # Zero radiation and saturated air give negative net radiation and ET0.

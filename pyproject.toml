@@ -31,7 +31,7 @@ dev = [
     "joblib-stubs>=1.5.3.1.20260117",
     "pandas-stubs>=3.0.5.260914",
     "pytest>=8.3,<9",
-    "ruff~=0.7",
+    "ruff>=0.16,<1",
     "scipy-stubs>=1.18.1.1",
     "ty>=0.0.84,<1",
 ]
@@ -90,8 +90,9 @@ quote-style = "single"
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "ANN002", "ANN003", "ANN101", "ANN102", "ANN202", "ANN401",
+    "ANN002", "ANN003", "ANN202", "ANN401",
     "BLE001",
+    "CPY001",
     "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D202", "D203", "D213", "D400",
     "N813",
     "PLR0913", "PLR2004",
@@ -110,6 +111,3 @@ multiline-quotes = "double"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ANN001", "ANN201", "S101", "INP001"]

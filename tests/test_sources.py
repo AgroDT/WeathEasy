@@ -9,7 +9,12 @@ from weatheasy.sources import read_grib, read_netcdf
 from weatheasy.storage import open_dataset, select_point, write_batch
 
 
-def grib_fixture(path, *, gaussian=False, spacing=1):
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def grib_fixture(path: Path, *, gaussian: bool = False, spacing: int = 1):
     ec = pytest.importorskip('eccodes')
     if gaussian:
         handle = ec.codes_grib_new_from_samples('regular_gg_sfc_grib2')
@@ -62,7 +67,13 @@ def grib_fixture(path, *, gaussian=False, spacing=1):
         ('cfs2/reanalysis/pgb', False, 0.5),
     ],
 )
-def test_grib_source_to_zarr_preserves_grid_and_units(tmp_path, group, gaussian, spacing):
+def test_grib_source_to_zarr_preserves_grid_and_units(
+    tmp_path: Path,
+    *,
+    group: str,
+    gaussian: bool,
+    spacing: int,
+):
     path = tmp_path / 'source.grb2'
     latitudes, values = grib_fixture(path, gaussian=gaussian, spacing=spacing)
     ds = read_grib(path, name='TMP', filter_by_keys={'shortName': '2t'})
@@ -94,7 +105,7 @@ def test_grib_source_to_zarr_preserves_grid_and_units(tmp_path, group, gaussian,
         assert np.ptp(np.diff(ds.latitude.to_numpy())) > 0.001
 
 
-def test_netcdf_cmip6_actual_ascending_latitude(tmp_path):
+def test_netcdf_cmip6_actual_ascending_latitude(tmp_path: Path):
     path = tmp_path / 'cmip6.nc'
     original = xr.Dataset(
         {
@@ -119,7 +130,7 @@ def test_netcdf_cmip6_actual_ascending_latitude(tmp_path):
     np.testing.assert_array_equal(result.tas, original.tas)
 
 
-def test_pevpr_selects_instant_and_converts_units(tmp_path, monkeypatch):
+def test_pevpr_selects_instant_and_converts_units(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from weatheasy import const
     from weatheasy.sources import read_cfs2
 

@@ -50,14 +50,14 @@ def test_missing_days_and_negative_evaporation():
             'PRATE': np.array([0, 0, np.nan, 0, 0, 0, 1]),
         }
     )
-    assert calculator.actual_evapotranspiration_LE(BEGIN, END) == pytest.approx(-1.7632653061)
+    assert calculator.actual_evapotranspiration_le(BEGIN, END) == pytest.approx(-1.7632653061)
     assert calculator.soil_water_deficit(BEGIN, END) == pytest.approx(2.7632653061)
     assert np.isnan(calculator.total_precipitation(BEGIN, END))
     assert np.isnan(calculator.max_daily_precipitation(BEGIN, END))
     assert calculator.max_no_rain_period(BEGIN, END) == 3
     assert calculator.max_no_rain_period(BEGIN, END, threshold=0) == 0
     calculator = AgroClimateCalculator({'LHTFL': np.array([100, np.nan])})
-    assert np.isnan(calculator.actual_evapotranspiration_LE(BEGIN, END))
+    assert np.isnan(calculator.actual_evapotranspiration_le(BEGIN, END))
 
 
 def test_invalid_calculator_inputs():

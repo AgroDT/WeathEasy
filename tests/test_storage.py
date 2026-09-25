@@ -21,7 +21,17 @@ from weatheasy.storage import (
 )
 
 
-def field(*, latitude=(55.125, 55.375), longitude=(0.125, 0.375), day='2026-01-01'):
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def field(
+    *,
+    latitude: tuple[float, ...] = (55.125, 55.375),
+    longitude: tuple[float, ...] = (0.125, 0.375),
+    day: str = '2026-01-01',
+):
     values = np.arange(len(latitude) * len(longitude), dtype='float32').reshape(
         1, len(latitude), len(longitude)
     )
@@ -36,7 +46,7 @@ def field(*, latitude=(55.125, 55.375), longitude=(0.125, 0.375), day='2026-01-0
     return prepare_dataset(ds, crs='EPSG:4326')
 
 
-def test_round_trip_metadata_nan_and_direct_xarray(tmp_path):
+def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
     ds = field()
     ds.TMP.data[0, 0, 0] = np.nan
     path = tmp_path / 'weather.zarr'
@@ -84,7 +94,7 @@ def test_point_selection_preserves_cmip6_latitude_orientation():
 
 
 @pytest.mark.parametrize('longitude', [-180, 180])
-def test_global_longitude_seam(longitude):
+def test_global_longitude_seam(longitude: float):
     ds = field(longitude=(0, 90, 180, 270))
     assert select_point(ds, latitude=55.125, longitude=longitude).TMP.item() == 2
     assert select_point(ds, latitude=55.125, longitude=-1).TMP.item() == 0
@@ -146,12 +156,12 @@ def test_append_and_conflict_leave_committed_data_unchanged():
     xr.testing.assert_identical(open_dataset(store, 'cfs2/reanalysis/flx'), committed)
 
 
-def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch):
+def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pytest.MonkeyPatch):
     store = MemoryStore()
     write_batch(store, 'grid', field())
     real_write = xr.Dataset.to_zarr
 
-    def fail_after_partial_write(_self, *_args, **_kwargs):
+    def fail_after_partial_write(_self, *_args, **_kwargs):  # noqa: ANN001
         target = zarr.open_group(store).get_group('grid')
         array = target.get_array('TMP')
         array.resize((2, 2, 2))
@@ -172,13 +182,13 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch):
     np.testing.assert_array_equal(recovered.TMP[1], field().TMP[0])
 
 
-def test_zarr_read_does_not_import_grib_decoder(tmp_path, monkeypatch):
+def test_zarr_read_does_not_import_grib_decoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     path = tmp_path / 'prepared.zarr'
     write_batch(path, 'grid', field())
     original = builtins.__import__
 
-    def reject_decoder(name, *args, **kwargs):
-        if name.split('.')[0] in {'cfgrib', 'eccodes'}:
+    def reject_decoder(name: str, *args, **kwargs):
+        if name.split('.', maxsplit=1)[0] in {'cfgrib', 'eccodes'}:
             msg = f'Unexpected decoder import: {name}'
             raise AssertionError(msg)
         return original(name, *args, **kwargs)

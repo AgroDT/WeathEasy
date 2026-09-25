@@ -239,7 +239,7 @@ class PrecipCorrector:
         return features.flat_dem(self._dem_cache[key], len(lats) * len(lons))
 
 
-def _build_features(
+def _build_features(  # noqa: PLR0917
     flat_lats: NDArray,
     flat_lons: NDArray,
     elev: NDArray,

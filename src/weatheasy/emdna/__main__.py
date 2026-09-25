@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from ._base import EMDNABase
 
 
+_LOG = logging.getLogger(__name__)
+
+
 def main(*, configure_logging: bool = True) -> None:
     if configure_logging:
         logging.basicConfig(
@@ -85,7 +88,8 @@ def main(*, configure_logging: bool = True) -> None:
     processor: EMDNABase
     try:
         if args.kind == 'temperature':
-            from .temperature import TemperatureProcessor
+            # Keep the selected processor import inside the CLI error handler.
+            from .temperature import TemperatureProcessor  # noqa: PLC0415
 
             processor = TemperatureProcessor(
                 station_file=args.stations,
@@ -97,7 +101,8 @@ def main(*, configure_logging: bool = True) -> None:
                 search_radius_km=args.search_radius,
             )
         else:
-            from .precipitation import PrecipitationProcessor
+            # Keep the selected processor import inside the CLI error handler.
+            from .precipitation import PrecipitationProcessor  # noqa: PLC0415
 
             processor = PrecipitationProcessor(
                 station_file=args.stations,
@@ -109,14 +114,14 @@ def main(*, configure_logging: bool = True) -> None:
                 search_radius_km=args.search_radius,
             )
     except ImportError:
-        logging.exception('EMDNA requires scipy and xarray: pip install weatheasy[emdna]')
+        _LOG.exception('EMDNA requires scipy and xarray: pip install weatheasy[emdna]')
         sys.exit(1)
 
     results = processor.process_period(args.begin, args.end)
 
     n_ok = sum(1 for r in results if r['status'] in ('success', 'exists'))
     n_err = sum(1 for r in results if r['status'] not in ('success', 'exists'))
-    logging.info('Done: %d/%d days processed, %d errors', n_ok, len(results), n_err)
+    _LOG.info('Done: %d/%d days processed, %d errors', n_ok, len(results), n_err)
 
     if n_err:
         sys.exit(1)

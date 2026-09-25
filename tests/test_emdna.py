@@ -1,9 +1,8 @@
 """Small offline EMDNA sequences with real CSV, daily NetCDF, and NPZ files."""
 
-# ruff: noqa: SLF001 -- deterministic tests of ensemble state and numerical kernels
-
 import copy
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -15,8 +14,8 @@ from weatheasy.emdna._base import EMDNABase
 
 
 @pytest.fixture
-def stations(tmp_path, monkeypatch):
-    def small_grid(self):
+def stations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def small_grid(self):  # noqa: ANN001
         self.lats = np.array([50.0, 50.1], dtype=np.float32)
         self.lons = np.array([30.0, 30.1], dtype=np.float32)
         self.grid_lons, self.grid_lats = np.meshgrid(self.lons, self.lats)
@@ -42,11 +41,11 @@ def stations(tmp_path, monkeypatch):
     return path
 
 
-def processor(kind, stations, output, **kwargs):
+def processor(kind: type[EMDNABase], stations: Path, output: Path, **kwargs):
     return kind(stations, output, min_stations=3, max_stations=4, n_ensemble=2, **kwargs)
 
 
-def test_distances_and_station_selection(stations, tmp_path):
+def test_distances_and_station_selection(stations: Path, tmp_path: Path):
     coords = np.array([[60, 2], [61, 0], [60, 0]], dtype=float)
     np.testing.assert_allclose(EMDNABase._distances(np.array([60, 0]), coords), [111, 111, 0])
     np.testing.assert_allclose(EMDNABase._distances(np.array([0, 0]), np.array([[0, 2]])), [222])
@@ -64,7 +63,7 @@ def test_distances_and_station_selection(stations, tmp_path):
     ]
 
 
-def test_temperature_member_state(stations, tmp_path, monkeypatch):
+def test_temperature_member_state(stations: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     model = processor(TemperatureProcessor, stations, tmp_path / 'out')
     fields = iter(np.full((2, 2), value, np.float32) for value in (1, 10, 2, 20))
     monkeypatch.setattr(model, '_spatial_random_field', lambda _: next(fields))
@@ -75,7 +74,11 @@ def test_temperature_member_state(stations, tmp_path, monkeypatch):
     np.testing.assert_allclose(second[:, 0, 0], [0.8 * 1 + 0.6 * 2, 0.8 * 10 + 0.6 * 20])
 
 
-def test_precipitation_member_state(stations, tmp_path, monkeypatch):
+def test_precipitation_member_state(
+    stations: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     model = processor(PrecipitationProcessor, stations, tmp_path / 'out')
     fields = iter(np.full((2, 2), value, np.float32) for value in (1, 10, 2, 20))
     monkeypatch.setattr(model, '_spatial_random_field', lambda _: next(fields))
@@ -95,7 +98,12 @@ def test_precipitation_member_state(stations, tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ('kind', 'prefix'), [(TemperatureProcessor, 'temp'), (PrecipitationProcessor, 'precip')]
 )
-def test_resume_matches_uninterrupted_and_new_dates(stations, tmp_path, kind, prefix):
+def test_resume_matches_uninterrupted_and_new_dates(
+    stations: Path,
+    tmp_path: Path,
+    kind: type[EMDNABase],
+    prefix: str,
+):
     uninterrupted = processor(kind, stations, tmp_path / 'full')
     uninterrupted._rng = np.random.default_rng(42)
     assert [r['status'] for r in uninterrupted.process_period()] == ['success'] * 3
@@ -124,7 +132,11 @@ def test_resume_matches_uninterrupted_and_new_dates(stations, tmp_path, kind, pr
     assert (tmp_path / 'resume' / f'emdna_{prefix}_20260104.npz').exists()
 
 
-def test_partial_write_is_retryable_with_unchanged_state(stations, tmp_path, monkeypatch):
+def test_partial_write_is_retryable_with_unchanged_state(
+    stations: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     model = processor(TemperatureProcessor, stations, tmp_path / 'out')
     model._rng = np.random.default_rng(42)
     model.process_period(end=date(2026, 1, 1))
@@ -132,7 +144,7 @@ def test_partial_write_is_retryable_with_unchanged_state(stations, tmp_path, mon
     old_rng = copy.deepcopy(model._rng.bit_generator.state)
     original = np.savez_compressed
 
-    def failed_save(path, **_payload):
+    def failed_save(path: Path, **_payload):
         path.write_bytes(b'incomplete archive')
         msg = 'simulated storage failure'
         raise OSError(msg)
@@ -150,9 +162,9 @@ def test_partial_write_is_retryable_with_unchanged_state(stations, tmp_path, mon
     assert restarted.process_period() == []
 
 
-def daily_netcdf(path, model, day, precipitation=None):
+def daily_netcdf(path: Path, model: EMDNABase, day: str):
     values = np.full((1, 2, 2), 20.0, np.float32)
-    rain = np.full((1, 2, 2), 0.008, np.float32) if precipitation is None else precipitation[None]
+    rain = np.full((1, 2, 2), 0.008, np.float32)
     xr.Dataset(
         {
             't2m_mean': (('date', 'latitude', 'longitude'), values),
@@ -165,7 +177,13 @@ def daily_netcdf(path, model, day, precipitation=None):
 @pytest.mark.parametrize(
     ('kind', 'prefix'), [(TemperatureProcessor, 'temp'), (PrecipitationProcessor, 'precip')]
 )
-def test_daily_era5_exact_date_and_missing_date(stations, tmp_path, caplog, kind, prefix):
+def test_daily_era5_exact_date_and_missing_date(
+    stations: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    kind: type[EMDNABase],
+    prefix: str,
+):
     era5 = tmp_path / 'era5'
     era5.mkdir()
     model = processor(kind, stations, tmp_path / 'out', era5_dir=era5)
@@ -187,7 +205,11 @@ def test_daily_era5_exact_date_and_missing_date(stations, tmp_path, caplog, kind
         np.testing.assert_array_equal(result[field], result[f'{field}_cai'])
 
 
-def test_missing_era5_cells_keep_station_precipitation_and_pop(stations, tmp_path, monkeypatch):
+def test_missing_era5_cells_keep_station_precipitation_and_pop(
+    stations: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     era5 = tmp_path / 'era5'
     era5.mkdir()
     model = processor(PrecipitationProcessor, stations, tmp_path / 'out', era5_dir=era5)
@@ -208,7 +230,13 @@ def test_missing_era5_cells_keep_station_precipitation_and_pop(stations, tmp_pat
 
 
 @pytest.mark.parametrize(('kind', 'prefix'), [('temperature', 'temp'), ('precipitation', 'precip')])
-def test_cli_discovers_dates_and_noops(stations, tmp_path, monkeypatch, kind, prefix):
+def test_cli_discovers_dates_and_noops(
+    stations: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    prefix: str,
+):
     output = tmp_path / 'cli'
     monkeypatch.setattr(
         'sys.argv',
@@ -234,7 +262,7 @@ def test_cli_discovers_dates_and_noops(stations, tmp_path, monkeypatch, kind, pr
     assert all(path.read_bytes() == content for path, content in original.items())
 
 
-def test_precipitation_cross_state_survives_restart(stations, tmp_path):
+def test_precipitation_cross_state_survives_restart(stations: Path, tmp_path: Path):
     trange = np.ones((2, 2), np.float32)
     full = processor(PrecipitationProcessor, stations, tmp_path / 'full')
     full._rng = np.random.default_rng(17)
@@ -253,7 +281,7 @@ def test_precipitation_cross_state_survives_restart(stations, tmp_path):
         np.testing.assert_array_equal(actual['ensemble'], expected['ensemble'])
 
 
-def test_insufficient_day_does_not_advance_progress(stations, tmp_path):
+def test_insufficient_day_does_not_advance_progress(stations: Path, tmp_path: Path):
     frame = pd.read_csv(stations)
     frame = frame[~((frame.day == 2) & (frame.station_id > 0))]
     frame.to_csv(stations, index=False)
@@ -266,7 +294,7 @@ def test_insufficient_day_does_not_advance_progress(stations, tmp_path):
     assert [result['status'] for result in model.process_period()] == ['insufficient_stations']
 
 
-def test_resume_rejects_different_ensemble(stations, tmp_path):
+def test_resume_rejects_different_ensemble(stations: Path, tmp_path: Path):
     model = processor(TemperatureProcessor, stations, tmp_path / 'out')
     model.process_period(end=date(2026, 1, 1))
     incompatible = TemperatureProcessor(

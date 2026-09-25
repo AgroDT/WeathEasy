@@ -20,7 +20,7 @@ import numpy as np
 import xarray as xr
 
 from weatheasy import const
-from weatheasy.storage import StorageError, last_date, prepare_dataset, write_batch
+from weatheasy.storage import StorageError, last_date, open_dataset, prepare_dataset, write_batch
 from weatheasy.util import utc_now
 
 
@@ -75,8 +75,6 @@ def available_period(root: zarr.Group) -> tuple[date, date]:
     updating that marker must neither hide data nor cause a duplicate append.
     """
     path = '/'.join(filter(None, (root.path, const.ERA5_DIR, 'daily')))
-    from weatheasy.storage import open_dataset
-
     with open_dataset(root.store, path) as ds:
         times = ds.time.to_numpy().astype('datetime64[D]')
         first = date.fromisoformat(str(times[0]))
@@ -118,7 +116,8 @@ def download_era5_data(
     if next_month(first) > latest:
         return
     try:
-        import cdsapi
+        # The CDS client is optional and needed only for a pending download.
+        import cdsapi  # noqa: PLC0415
     except ImportError as err:
         msg = 'ERA5 preparation requires weatheasy[prepare]'
         raise ImportError(msg) from err
@@ -126,10 +125,11 @@ def download_era5_data(
     with TemporaryDirectory() as temporary:
         cache = (download_dir / 'era5') if download_dir else Path(temporary)
         cache.mkdir(parents=True, exist_ok=True)
+        downloader = _Downloader(client, cache, area)
         while next_month(first) <= latest:
             following = next_month(first)
-            main = _retrieve(client, cache, first, area, boundary=False)
-            boundary = _retrieve(client, cache, following, area, boundary=True)
+            main = downloader.retrieve(first, boundary=False)
+            boundary = downloader.retrieve(following, boundary=True)
             _validate_area(main, area)
             ds = process_month(main, boundary, first)
             # write_batch checks exact normalized axes, CRS, fields and units
@@ -140,67 +140,74 @@ def download_era5_data(
             first = following
 
 
-def _retrieve(client: Any, cache: Path, month: date, area: tuple, *, boundary: bool) -> xr.Dataset:
-    names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
-    names.update({cds: nc for nc, cds in EXTRA.items()})
-    variables = sorted(names)
-    pieces = []
-    # CDS NetCDF costing counts two items per hourly field. Eight variables
-    # in the longest month cost 8 * 31 * 24 * 2 = 11904, below the 12000 limit.
-    for offset in range(0, len(variables), 8):
-        subset = variables[offset : offset + 8]
-        pieces.append(
-            _retrieve_part(
-                client,
-                cache,
-                month,
-                area,
-                subset,
-                {names[name] for name in subset},
-                boundary=boundary,
+class _Downloader:
+    __slots__ = ('area', 'cache', 'client')
+
+    def __init__(self, client: Any, cache: Path, area: tuple) -> None:
+        self.client = client
+        self.cache = cache
+        self.area = area
+
+    def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
+        names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
+        names.update({cds: nc for nc, cds in EXTRA.items()})
+        variables = sorted(names)
+        pieces = []
+        # CDS NetCDF costing counts two items per hourly field. Eight variables
+        # in the longest month cost 8 * 31 * 24 * 2 = 11904, below the 12000 limit.
+        for offset in range(0, len(variables), 8):
+            subset = variables[offset : offset + 8]
+            pieces.append(
+                self._retrieve_part(
+                    month,
+                    subset,
+                    {names[name] for name in subset},
+                    boundary=boundary,
+                )
             )
-        )
-    ds = xr.merge(pieces, join='exact', compat='identical')
-    _validate(ds, month, boundary=boundary)
-    return ds
-
-
-def _retrieve_part(
-    client: Any,
-    cache: Path,
-    month: date,
-    area: tuple,
-    variables: list[str],
-    required: set[str],
-    *,
-    boundary: bool,
-) -> xr.Dataset:
-    request = {
-        'variable': variables,
-        'year': str(month.year),
-        'month': f'{month.month:02d}',
-        'day': ['01']
-        if boundary
-        else [f'{d:02d}' for d in range(1, calendar.monthrange(month.year, month.month)[1] + 1)],
-        'time': ['00:00'] if boundary else [f'{h:02d}:00' for h in range(24)],
-        'area': list(area),
-        'data_format': 'netcdf',
-        'download_format': 'unarchived',
-    }
-    key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:20]
-    path = cache / f'{month:%Y%m}-{key}.nc'
-    if not path.exists():
-        pending = path.with_suffix('.pending')
-        client.retrieve('reanalysis-era5-land', request).download(str(pending))
-        # Cache only readable/complete responses. Failed downloads are retried by
-        # the next external job; credentials and CDS transport remain with cdsapi.
-        ds = _read_response(pending)
-        _validate(ds, month, boundary=boundary, required=required)
-        pending.replace(path)
+        ds = xr.merge(pieces, join='exact', compat='identical')
+        _validate(ds, month, boundary=boundary)
         return ds
-    ds = _read_response(path)
-    _validate(ds, month, boundary=boundary, required=required)
-    return ds
+
+    def _retrieve_part(
+        self,
+        month: date,
+        variables: list[str],
+        required: set[str],
+        *,
+        boundary: bool,
+    ) -> xr.Dataset:
+        if boundary:
+            day = ['01']
+            time_ = ['00:00']
+        else:
+            day_count = calendar.monthrange(month.year, month.month)[1]
+            day = [f'{d:02d}' for d in range(1, day_count + 1)]
+            time_ = [f'{h:02d}:00' for h in range(24)]
+        request = {
+            'variable': variables,
+            'year': str(month.year),
+            'month': f'{month.month:02d}',
+            'day': day,
+            'time': time_,
+            'area': list(self.area),
+            'data_format': 'netcdf',
+            'download_format': 'unarchived',
+        }
+        key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:20]
+        path = self.cache / f'{month:%Y%m}-{key}.nc'
+        if not path.exists():
+            pending = path.with_suffix('.pending')
+            self.client.retrieve('reanalysis-era5-land', request).download(str(pending))
+            # Cache only readable/complete responses. Failed downloads are retried by
+            # the next external job; credentials and CDS transport remain with cdsapi.
+            ds = _read_response(pending)
+            _validate(ds, month, boundary=boundary, required=required)
+            pending.replace(path)
+            return ds
+        ds = _read_response(path)
+        _validate(ds, month, boundary=boundary, required=required)
+        return ds
 
 
 def _read_response(path: Path) -> xr.Dataset:

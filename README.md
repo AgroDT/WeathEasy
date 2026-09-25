@@ -385,7 +385,11 @@ from weatheasy.agro_clim import AgroClimateCalculator, format_results
 
 variables = ['LHTFL', 'PEVPR', 'SOILW_0-0.1m', 'TMP', 'RH', 'PRATE']
 values = get_era5_data(
-    root=root, begin=begin, end=end, coords=Coords(55.0, 37.0), variables=variables,
+    root=root,
+    begin=begin,
+    end=end,
+    coords=Coords(55.0, 37.0),
+    variables=variables,
 )
 data = dict(zip(variables, values, strict=True))
 results = AgroClimateCalculator(data).calculate_all_parameters(begin, end)

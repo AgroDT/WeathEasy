@@ -39,11 +39,13 @@ def main(argv: list[str] | None = None) -> None:
     root = get_storage(args.store)
     source = SOURCES[args.source]
     if action == 'train':
-        from .training import build_artifacts
+        # Load the training pipeline only for the train command.
+        from .training import build_artifacts  # noqa: PLC0415
 
         build_artifacts(source, root, args.stations, args.dem, args.artifacts, only=args.only)
     else:
-        from .apply import correct_store
+        # Load the application pipeline only for the apply command.
+        from .apply import correct_store  # noqa: PLC0415
 
         days = correct_store(
             source,

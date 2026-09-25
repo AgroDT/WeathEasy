@@ -7,8 +7,7 @@ sliced here. NaN propagates through numerical summaries; an unknown day breaks a
 dry spell, so the reported spell is the longest confirmed run of dry days.
 """
 
-# Date arguments remain part of the donor API; callers select the interval.
-# ruff: noqa: ARG002
+# ruff: noqa: ARG002 - date arguments remain part of the donor API; callers select the interval
 
 from __future__ import annotations
 
@@ -38,9 +37,7 @@ class AgroClimateCalculator:
             raise ValueError(msg)
         return values
 
-    def actual_evapotranspiration_LE(  # noqa: N802
-        self, start_date: date, end_date: date
-    ) -> float:
+    def actual_evapotranspiration_le(self, start_date: date, end_date: date) -> float:
         """Return mean actual evapotranspiration in mm/day from latent heat flux."""
         return float(np.mean(self._values('LHTFL') * 86400 / 2.45e6))
 
@@ -82,7 +79,7 @@ class AgroClimateCalculator:
 
     def calculate_all_parameters(self, start_date: date, end_date: date) -> dict[str, float | int]:
         return {
-            'AET': self.actual_evapotranspiration_LE(start_date, end_date),
+            'AET': self.actual_evapotranspiration_le(start_date, end_date),
             'SWD': self.soil_water_deficit(start_date, end_date),
             'SWC': self.mean_soil_water_content(start_date, end_date),
             'T_AVG': self.average_temperature(start_date, end_date),
@@ -96,14 +93,16 @@ class AgroClimateCalculator:
 def format_results(results: Mapping[str, float | int]) -> str:
     return '\n'.join(
         [
-            f"Фактическая эвапотранспирация (AET): {results['AET']:.2f} мм/день",
-            f"Дефицит влаги в почве (SWD): {results['SWD']:.2f} мм/день",
-            f"Среднее содержание влаги в почве (SWC): {results['SWC']:.2f} %",
-            f"Средняя температура воздуха (T_AVG): {results['T_AVG']:.2f} °C",
-            f"Средняя относительная влажность воздуха (RH_AVG): {results['RH_AVG']:.2f} %",
-            f"Сумма осадков (P_SUM): {results['P_SUM']:.2f} мм",
-            "Максимальная продолжительность периода без осадков (P0_INT): "
-            f"{results['P0_INT']} дней",
-            f"Максимальное количество осадков за сутки (P_MAX): {results['P_MAX']:.2f} мм",
+            f'Фактическая эвапотранспирация (AET): {results["AET"]:.2f} мм/день',
+            f'Дефицит влаги в почве (SWD): {results["SWD"]:.2f} мм/день',
+            f'Среднее содержание влаги в почве (SWC): {results["SWC"]:.2f} %',
+            f'Средняя температура воздуха (T_AVG): {results["T_AVG"]:.2f} °C',
+            f'Средняя относительная влажность воздуха (RH_AVG): {results["RH_AVG"]:.2f} %',
+            f'Сумма осадков (P_SUM): {results["P_SUM"]:.2f} мм',
+            (
+                'Максимальная продолжительность периода без осадков (P0_INT): '
+                f'{results["P0_INT"]} дней'
+            ),
+            f'Максимальное количество осадков за сутки (P_MAX): {results["P_MAX"]:.2f} мм',
         ]
     )

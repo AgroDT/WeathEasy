@@ -194,7 +194,7 @@ def _ravel_or_zero(data: NDArray | None, n_pts: int) -> NDArray[np.float32]:
     return data.ravel().astype(np.float32)
 
 
-def seasonal_field(
+def seasonal_field(  # noqa: PLR0917
     fields: dict[int, NDArray[np.float32]],
     grid_lats: NDArray,
     grid_lons: NDArray,

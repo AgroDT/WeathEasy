@@ -7,7 +7,13 @@ import numpy as np
 from rasterio.coords import BoundingBox
 
 from weatheasy import const
-from weatheasy.error import CFS2Error, CMIP6DateRangeError, CoordsError, DateRangeError
+from weatheasy.error import (
+    CFS2Error,
+    CMIP6DateRangeError,
+    CoordsError,
+    DateRangeError,
+    ERA5DateRangeError,
+)
 from weatheasy.storage import StorageError, open_dataset, select_point
 
 
@@ -121,8 +127,8 @@ def get_era5_data(
     variables: Sequence[str],
 ) -> NDArray[np.float32]:
     """Read completed ERA5 months; PRATE and PRATE_corr are returned in mm/day."""
-    from weatheasy.era5 import available_period
-    from weatheasy.error import ERA5DateRangeError
+    # Load the preparation module only when ERA5 data is requested.
+    from weatheasy.era5 import available_period  # noqa: PLC0415
 
     _check_date_range(begin, end)
     first, last = available_period(root)
@@ -151,8 +157,13 @@ def _daily_precipitation(
     return result
 
 
-def _read_point(
-    root: zarr.Group, group: str, begin: date, end: date, coords: Coords, variables: Sequence[str]
+def _read_point(  # noqa: PLR0917
+    root: zarr.Group,
+    group: str,
+    begin: date,
+    end: date,
+    coords: Coords,
+    variables: Sequence[str],
 ):
     dates = np.arange(np.datetime64(begin), np.datetime64(end) + np.timedelta64(1, 'D'))
     with open_dataset(root.store, '/'.join(filter(None, (root.path, group)))) as dataset:
