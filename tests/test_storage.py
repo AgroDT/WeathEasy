@@ -3,22 +3,25 @@ from __future__ import annotations
 import builtins
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import xarray as xr
 import zarr
 from rasterio import CRS
-from zarr.storage import MemoryStore
+from zarr.storage import FsspecStore, MemoryStore, StoreLike
 
 from weatheasy.storage import (
     StorageError,
+    get_store,
     merge_fields,
     open_dataset,
     prepare_dataset,
     select_point,
     write_batch,
 )
+from weatheasy.util import get_storage
 
 
 TYPE_CHECKING = False
@@ -195,3 +198,99 @@ def test_zarr_read_does_not_import_grib_decoder(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(builtins, '__import__', reject_decoder)
     assert open_dataset(path, 'grid').TMP.sel(latitude=55.375, longitude=0.375).item() == 3
+
+
+def test_local_uri_needs_no_s3_dependency(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    original = builtins.__import__
+
+    def reject_s3fs(name: str, *args, **kwargs):
+        if name == 's3fs':
+            msg = 'Local storage must not import s3fs'
+            raise AssertionError(msg)
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', reject_s3fs)
+    path = tmp_path / 'prepared.zarr'
+    assert get_store(path) == path
+    assert get_store(str(path)) == str(path)
+
+
+def test_s3_uri_reuses_supplied_filesystem_without_network():
+    s3fs = pytest.importorskip('s3fs')
+    filesystem = s3fs.S3FileSystem(asynchronous=True)
+    weather = get_store('s3://weather-bucket/zarr', filesystem=filesystem)
+    dem = get_store('s3://weather-bucket/dem.zarr', filesystem=filesystem)
+    assert isinstance(weather, FsspecStore)
+    assert isinstance(dem, FsspecStore)
+    assert weather.fs is dem.fs is filesystem
+    assert weather.path == 'weather-bucket/zarr'
+    assert dem.path == 'weather-bucket/dem.zarr'
+    assert get_store(weather) is weather
+
+
+def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    s3fs = pytest.importorskip('s3fs')
+    filesystem = s3fs.S3FileSystem(asynchronous=True)
+    seen = []
+
+    def get_group(group: str) -> SimpleNamespace:
+        assert group == 'era5/daily'
+        return SimpleNamespace(
+            attrs={
+                'storage_schema': 'weatheasy-coordinate-v1',
+                'write_state': 'complete',
+                'committed_length': 1,
+            }
+        )
+
+    def open_group(store: StoreLike, *, mode: str, zarr_format: int) -> SimpleNamespace:
+        assert mode == 'r'
+        assert zarr_format == 3
+        seen.append(store)
+        return SimpleNamespace(get_group=get_group)
+
+    def open_zarr(store: StoreLike, *, group: str, **kwargs):
+        assert group == 'era5/daily'
+        assert kwargs['decode_coords'] == 'all'
+        seen.append(store)
+        return field()
+
+    monkeypatch.setattr(zarr, 'open_group', open_group)
+    monkeypatch.setattr(xr, 'open_zarr', open_zarr)
+    result = open_dataset('s3://weather-bucket/zarr', 'era5/daily', filesystem=filesystem)
+    assert result.TMP.sel(latitude=55.375, longitude=0.375).item() == 3
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    assert isinstance(seen[0], FsspecStore)
+    assert seen[0].fs is filesystem
+    assert seen[0].path == 'weather-bucket/zarr'
+
+
+def test_get_storage_preserves_shared_s3_filesystem(monkeypatch: pytest.MonkeyPatch):
+    s3fs = pytest.importorskip('s3fs')
+    filesystem = s3fs.S3FileSystem(asynchronous=True)
+
+    def open_group(store: StoreLike, *, mode: str, zarr_format: int) -> StoreLike:
+        assert isinstance(store, FsspecStore)
+        assert store.fs is filesystem
+        assert store.path == 'weather-bucket/zarr'
+        assert mode == 'a'
+        assert zarr_format == 3
+        return store
+
+    monkeypatch.setattr(zarr, 'open_group', open_group)
+    result = get_storage('s3://weather-bucket/zarr', filesystem=filesystem)
+    assert isinstance(result, FsspecStore)
+    assert result.fs is filesystem
+
+
+def test_store_rejects_missing_s3_bucket_or_filesystem_for_local_path(tmp_path: Path):
+    with pytest.raises(StorageError, match='bucket'):
+        get_store('s3://')
+    with pytest.raises(StorageError, match='bucket'):
+        get_store('s3:///without-bucket')
+    s3fs = pytest.importorskip('s3fs')
+    with pytest.raises(StorageError, match='only be used'):
+        get_store(tmp_path / 'data', filesystem=s3fs.S3FileSystem(asynchronous=True))

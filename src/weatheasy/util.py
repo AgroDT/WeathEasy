@@ -4,12 +4,14 @@ from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import zarr
-from zarr.storage import FsspecStore
 
-from weatheasy.error import S3ImportError
+
+if TYPE_CHECKING:
+    from fsspec.asyn import AsyncFileSystem
 
 
 try:
@@ -25,7 +27,7 @@ def utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
 
-def get_storage(root: str) -> zarr.Group:
+def get_storage(root: str | Path, *, filesystem: AsyncFileSystem | None = None) -> zarr.Group:
     """Initialize zarr group.
 
     To work with S3 pass `root` in format `s3://<bucket>[/path]`.
@@ -36,21 +38,13 @@ def get_storage(root: str) -> zarr.Group:
     - AWS_SECRET_ACCESS_KEY
     - AWS_ENDPOINT_URL_S3
     - etc.
+
+    Supply ``filesystem`` to share one asynchronous S3 filesystem between
+    this weather store and other Zarr stores in the same job.
     """
+    from weatheasy.storage import get_store  # noqa: PLC0415
 
-    store: str | FsspecStore
-    if root.startswith('s3://'):
-        try:
-            # Local stores must work without the optional S3 extra.
-            import s3fs  # noqa: PLC0415
-        except ImportError as exc:
-            raise S3ImportError from exc
-        else:
-            store = FsspecStore(s3fs.S3FileSystem(asynchronous=True), path=root[5:])
-    else:
-        store = root
-
-    return zarr.open_group(store, mode='a', zarr_format=3)
+    return zarr.open_group(get_store(root, filesystem=filesystem), mode='a', zarr_format=3)
 
 
 def init_parser(module: str = 'weatheasy') -> ArgumentParser:

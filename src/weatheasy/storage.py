@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
+from os import PathLike
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -28,11 +29,15 @@ import rioxarray
 import xarray as xr
 import zarr
 from xarray.coding.times import decode_cf_datetime
+from zarr.storage import FsspecStore
+
+from weatheasy.error import S3ImportError
 
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
 
+    from fsspec.asyn import AsyncFileSystem
     from rasterio import CRS
     from zarr.core.metadata import ArrayV3Metadata
     from zarr.storage import StoreLike
@@ -43,6 +48,35 @@ DIMS = ('time', 'latitude', 'longitude')
 
 class StorageError(ValueError):
     """Invalid schema, conflicting grid or incomplete write."""
+
+
+def get_store(uri: StoreLike, *, filesystem: AsyncFileSystem | None = None) -> StoreLike:
+    """Resolve a local path or S3 URI, or pass through an existing Zarr store.
+
+    Pass one asynchronous S3 filesystem to reuse its connection pool across
+    stores within a job. Local paths need no S3 dependencies or filesystem.
+    """
+    if not isinstance(uri, (str, PathLike)):
+        if filesystem is not None:
+            msg = 'A filesystem can only be supplied with an s3:// URI'
+            raise StorageError(msg)
+        return uri
+    location = str(uri)
+    if location.startswith('s3://'):
+        if not location[5:].split('/', maxsplit=1)[0]:
+            msg = 'S3 URI requires a bucket'
+            raise StorageError(msg)
+        if filesystem is None:
+            try:
+                import s3fs  # noqa: PLC0415
+            except ImportError as exc:
+                raise S3ImportError from exc
+            filesystem = s3fs.S3FileSystem(asynchronous=True)
+        return FsspecStore(filesystem, path=location[5:])
+    if filesystem is not None:
+        msg = 'An S3 filesystem can only be used with an s3:// URI'
+        raise StorageError(msg)
+    return uri
 
 
 def _normalize_spatial_axes(ds: xr.Dataset) -> xr.Dataset:
@@ -169,18 +203,28 @@ def _truncate_uncommitted(target: zarr.Group, count: int) -> None:
                 array.resize(tuple(shape))
 
 
-def write_batch(store: StoreLike, group: str, dataset: xr.Dataset, *, tile_size: int = 128) -> None:
+def write_batch(
+    store: StoreLike,
+    group: str,
+    dataset: xr.Dataset,
+    *,
+    tile_size: int = 128,
+    filesystem: AsyncFileSystem | None = None,
+) -> None:
     """Create or append prepared data, publishing only after all arrays are written.
 
     The caller serializes writers. A failed write is retried with the same grid
     and field metadata; previously committed dates must not be supplied again.
-    S3 callers may pass zarr.storage.FsspecStore with an asynchronous S3 filesystem.
+    S3 callers may pass an URI with a shared asynchronous filesystem, or an
+    already resolved FsspecStore. Direct Zarr access remains confined here to
+    the commit marker and recovery of interrupted in-place appends.
     """
     if tile_size < 1 or dataset.attrs.get('storage_schema') != SCHEMA:
         msg = 'A prepared dataset and positive tile_size are required'
         raise StorageError(msg)
     ds = dataset.copy()
     signature = _signature(ds)
+    store = get_store(store, filesystem=filesystem)
     root = zarr.open_group(store, mode='a', zarr_format=3)
     target = root.require_group(group)
     count = int(cast('int', target.attrs.get('committed_length', 0)))
@@ -255,8 +299,11 @@ def write_batch(store: StoreLike, group: str, dataset: xr.Dataset, *, tile_size:
     target.attrs.update(committed_length=count + ds.sizes['time'], write_state='complete')
 
 
-def open_dataset(store: StoreLike, group: str) -> xr.Dataset:
+def open_dataset(
+    store: StoreLike, group: str, *, filesystem: AsyncFileSystem | None = None
+) -> xr.Dataset:
     """Open a fully committed group without GRIB ingestion dependencies or Dask."""
+    store = get_store(store, filesystem=filesystem)
     root = zarr.open_group(store, mode='r', zarr_format=3)
     target = root.get_group(group)
     if (
@@ -275,9 +322,11 @@ def open_dataset(store: StoreLike, group: str) -> xr.Dataset:
     return ds
 
 
-def last_date(store: StoreLike, group: str) -> date | None:
+def last_date(
+    store: StoreLike, group: str, *, filesystem: AsyncFileSystem | None = None
+) -> date | None:
     """Last committed day, including after a failed append awaiting retry."""
-    root = zarr.open_group(store, mode='a', zarr_format=3)
+    root = zarr.open_group(get_store(store, filesystem=filesystem), mode='a', zarr_format=3)
     if group not in root:
         return None
     target = root.get_group(group)
