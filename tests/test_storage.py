@@ -131,17 +131,19 @@ def test_append_and_conflict_leave_committed_data_unchanged():
     write_batch(store, 'cfs2/reanalysis/flx', field())
     write_batch(store, 'cfs2/reanalysis/flx', field(day='2026-01-02'))
     actual = open_dataset(store, 'cfs2/reanalysis/flx')
+    committed = actual.load().copy(deep=True)
     np.testing.assert_array_equal(
         actual.time.to_numpy(), np.array(['2026-01-01', '2026-01-02'], dtype='datetime64[ns]')
     )
     assert CRS.from_wkt(actual.spatial_ref.attrs['crs_wkt']).to_epsg() == 4326
     with pytest.raises(StorageError, match='follow'):
         write_batch(store, 'cfs2/reanalysis/flx', field(day='2026-01-02'))
+    xr.testing.assert_identical(open_dataset(store, 'cfs2/reanalysis/flx'), committed)
     changed = field(day='2026-01-03')
     changed.TMP.attrs['units'] = 'degC'
     with pytest.raises(StorageError, match='conflicting'):
         write_batch(store, 'cfs2/reanalysis/flx', changed)
-    assert open_dataset(store, 'cfs2/reanalysis/flx').sizes['time'] == 2
+    xr.testing.assert_identical(open_dataset(store, 'cfs2/reanalysis/flx'), committed)
 
 
 def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch):

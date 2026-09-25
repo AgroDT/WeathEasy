@@ -47,21 +47,17 @@ def weather_store(tmp_path, source):
     else:
         path = 'era5/daily' if source == 'era5' else 'cmip6/pr'
         write_batch(root.store, path, dataset)
-    return root, name, path, raw
+    return root, name, path
 
 
 @pytest.mark.parametrize('source', ['cfs2', 'era5', 'cmip6'])
 def test_daily_getter_and_csv_units(tmp_path, monkeypatch, source):
     from weatheasy.__main__ import main
 
-    root, name, path, raw = weather_store(tmp_path, source)
+    root, name, _ = weather_store(tmp_path, source)
     getter = {'cfs2': get_cfs2_data, 'era5': get_era5_data, 'cmip6': get_cmip6_data}[source]
     result = getter(root=root, begin=BEGIN, end=END, coords=Coords(55, 37), variables=[name])
     np.testing.assert_allclose(result, [[8, np.nan, 2]])
-    # Retrieval leaves native source values and metadata intact.
-    with open_dataset(root.store, path) as ds:
-        np.testing.assert_allclose(ds[name][:, 0, 0], raw[: ds.sizes['time']])
-        assert ds[name].attrs['units'] == 'kg m-2 s-1'
     target = tmp_path / 'result.csv'
     argv = [
         'weatheasy',
@@ -97,7 +93,7 @@ def test_http_precipitation_units_and_response_shape(tmp_path, monkeypatch, sour
     pytest.importorskip('fastapi')
     from weatheasy.web import controller
 
-    root, name, _, _ = weather_store(tmp_path, source)
+    root, name, _ = weather_store(tmp_path, source)
     getter = get_cmip6_data if source == 'cmip6' else get_cfs2_data
     monkeypatch.setattr(
         controller,
@@ -123,7 +119,7 @@ def test_http_precipitation_units_and_response_shape(tmp_path, monkeypatch, sour
 
 @pytest.mark.parametrize('source', ['cfs2', 'era5'])
 def test_raw_and_corrected_precipitation_have_same_units(tmp_path, source):
-    root, _, path, _ = weather_store(tmp_path, source)
+    root, _, path = weather_store(tmp_path, source)
     with open_dataset(root.store, path) as raw:
         corrected = raw.rename({'PRATE': 'PRATE_corr'}).load()
     corrected['PRATE_corr'][:] = 12

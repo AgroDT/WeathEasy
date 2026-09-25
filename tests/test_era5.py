@@ -80,14 +80,43 @@ def test_daily_units_midnight_wind_and_coordinates(month):
     np.testing.assert_allclose(result.latitude, [55.2, 55.3])
 
 
-@pytest.mark.parametrize(
-    'name', sorted({v.nc_name for v in const.ERA5_VARS.values()} | set(era5.EXTRA))
+# Required ERA5-Land NetCDF fields, independently of the production variable registry.
+REQUIRED_INPUTS = (
+    'd2m',
+    'pev',
+    'sd',
+    'sde',
+    'skt',
+    'slhf',
+    'sp',
+    'sshf',
+    'ssr',
+    'ssrd',
+    'stl1',
+    'stl2',
+    'stl3',
+    'stl4',
+    'str',
+    'strd',
+    'swvl1',
+    'swvl2',
+    'swvl3',
+    'swvl4',
+    't2m',
+    'tp',
+    'u10',
+    'v10',
 )
+
+
+@pytest.mark.parametrize('name', REQUIRED_INPUTS)
 def test_all_inputs_required(name):
     month = date(2000, 1, 1)
+    main = source(month)
+    assert name in main
     with pytest.raises(StorageError, match='Missing ERA5'):
         era5.process_month(
-            source(month).drop_vars(name), source(era5.next_month(month), boundary=True), month
+            main.drop_vars(name), source(era5.next_month(month), boundary=True), month
         )
 
 

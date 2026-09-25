@@ -150,7 +150,10 @@ def test_adapter_units_independent_fallback_and_readonly(tmp_path, correction):
     np.testing.assert_allclose(actual.tmax, 21.5)
     assert actual.dtype.names == ('tmin', 'tmax', 'pr', 'et0')
     if 'TMP_corr' in correction:
-        assert actual.et0[0] != raw.et0[0]
+        corrected_et0 = et0_fao56(
+            **(UCCLE | {'t_mean': 23, 'rs0': 0.752 * extraterrestrial_radiation(50.8, 59)})
+        )
+        assert actual.et0[0] == pytest.approx(corrected_et0)
         assert np.isnan(actual.et0[1])  # Existing corrected NaN never falls back to raw.
     else:
         np.testing.assert_allclose(actual.et0, raw.et0)

@@ -54,7 +54,8 @@ def raw_store(tmp_path, source=ERA5, days=2, day_offsets=None, lon_start=37):
     offsets = tuple(range(days)) if day_offsets is None else day_offsets
     shape = (len(offsets), len(lats), len(lons))
     tmp = np.full(shape, 10, np.float32)
-    prate = np.full(shape, 10 / source.precip_to_mm, np.float32)
+    # Raw daily samples are rates; keep their scale independent of Source.precip_to_mm.
+    prate = np.full(shape, 10 / (86400 if source == ERA5 else 21600), np.float32)
     prate[0, 1, 1] = np.nan
     ds = xr.Dataset(
         {
@@ -97,7 +98,7 @@ def heterogeneous_store(tmp_path, source):
             'TMP': (('time', 'latitude', 'longitude'), tmp, {'units': 'degC'}),
             'PRATE': (
                 ('time', 'latitude', 'longitude'),
-                precip / source.precip_to_mm,
+                precip / (86400 if source == ERA5 else 21600),
                 {'units': 'kg m-2 s-1'},
             ),
         },
@@ -233,7 +234,7 @@ def test_correction_rejects_skipping_prepared_day(tmp_path, monkeypatch):
         apply.correct_store(*args, begin=first + timedelta(days=2))
 
 
-def test_missing_precipitation_stays_missing(tmp_path):
+def test_missing_precipitation_stays_missing(tmp_path, monkeypatch):
     root, first = raw_store(tmp_path)
     corrector = PrecipCorrector(ERA5, tmp_path, tmp_path / 'missing.nc')
     corrector.clf = corrector.fallback_clf = AlwaysWet()
@@ -248,10 +249,18 @@ def test_missing_precipitation_stays_missing(tmp_path):
         'log_ratio': {m: np.zeros((len(lats), len(lons)), np.float32) for m in range(1, 13)},
         'wet_bias': {m: np.full((len(lats), len(lons)), 0.5, np.float32) for m in range(1, 13)},
     }
+    calibration_targets = []
+
+    def record_target(_features, target):
+        calibration_targets.append(target)
+        return 0.5
+
+    monkeypatch.setattr(corrector, '_calibrate', record_target)
     result = corrector.correct(root, first)
     assert np.isnan(result['corrected'][1, 1])
     assert result['corrected'][0, 0] == pytest.approx(8)
-    # The missing cell is excluded from the spatial wet fraction, not counted dry.
+    # Every known cell is wet; the missing cell must not dilute the wet fraction.
+    assert calibration_targets == pytest.approx([0.65])
     assert result['original'][0, 0] == pytest.approx(10)
 
 
