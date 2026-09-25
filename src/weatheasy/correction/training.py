@@ -8,6 +8,7 @@ correctors. This is the heavy offline step (PR 3), not part of the realtime path
 from __future__ import annotations
 
 import logging
+import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,13 @@ import xarray as xr
 import xgboost as xgb
 
 from . import features
+from .climatology import (
+    PRECIP_FILES,
+    TEMP_FILES,
+    Climatology,
+    build_climatology,
+    write_manifest,
+)
 from .precip import WET_FEAT, WET_THRESHOLD
 from .temperature import FEATURE_COLS
 from weatheasy.storage import StorageError, select_point
@@ -179,6 +187,8 @@ def sample_reanalysis(
         li, lo = np.asarray(indices).T
         out = group.copy()
         out['reanalysis'] = (grid[li, lo] * scale).astype(np.float32)
+        out['_lat_index'] = li
+        out['_lon_index'] = lo
         out = out[np.isfinite(out['reanalysis'])]
         chunks.append(out)
     if not chunks or not any(len(chunk) for chunk in chunks):
@@ -203,13 +213,16 @@ def build_temp_artifacts(
     dem = features.load_dem(dem_path)
     stations = enrich_stations(load_stations(stations_csv, ['temperature']), dem)
     sampled = sample_reanalysis(source, root, stations, source.temp_var, 1.0)
-    dataset = _temp_features(sampled)
+    climate = build_climatology(source, root, source.temp_var, 1.0)
+    dataset = _temp_features(sampled, climate)
     model = _train_bias_regressor(dataset)
     lats, lons = source.grid(root)
     seasonal = idw_seasonal(dataset, 'era5_seasonal_bias', lats, lons)
 
     out = Path(artifacts_dir) / source.name / 'temp'
     out.mkdir(parents=True, exist_ok=True)
+    climate.metadata['training_id'] = uuid.uuid4().hex
+    climate.save(out / 'climatology.npz')
     joblib.dump(model, out / 'model.joblib')
     np.savez_compressed(
         out / 'seasonal_bias_grid.npz',
@@ -217,10 +230,11 @@ def build_temp_artifacts(
     )
     np.save(out / 'lats.npy', lats)
     np.save(out / 'lons.npy', lons)
+    write_manifest(out, TEMP_FILES)
     _LOG.info('Wrote temperature artifacts for %s to %s', source.name, out)
 
 
-def _temp_features(sampled: pd.DataFrame) -> pd.DataFrame:
+def _temp_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
     dataset = sampled.copy()
     dataset['bias'] = (dataset['reanalysis'] - dataset['temperature']).astype(np.float32)
     dataset['month'] = dataset['date'].dt.month.astype(np.int8)
@@ -228,8 +242,12 @@ def _temp_features(sampled: pd.DataFrame) -> pd.DataFrame:
     dataset['doy_sin'] = np.sin(2 * np.pi * doy / 365).astype(np.float32)
     dataset['doy_cos'] = np.cos(2 * np.pi * doy / 365).astype(np.float32)
     dataset['era5_value'] = dataset['reanalysis']
-    clim = dataset.groupby(['station_id', 'month'])['reanalysis'].transform('mean')
-    dataset['era5_anomaly'] = (dataset['reanalysis'] - clim).astype(np.float32)
+    clim = climate.sample(
+        dataset['month'].to_numpy(),
+        dataset['_lat_index'].to_numpy(),
+        dataset['_lon_index'].to_numpy(),
+    )
+    dataset['era5_anomaly'] = (dataset['reanalysis'].to_numpy() - clim).astype(np.float32)
     seasonal_bias = dataset.groupby(['station_id', 'month'])['bias'].transform('mean')
     dataset['era5_seasonal_bias'] = seasonal_bias.astype(np.float32)
     for col in _TERRAIN_COLS:
@@ -239,7 +257,7 @@ def _temp_features(sampled: pd.DataFrame) -> pd.DataFrame:
 
 
 def _train_bias_regressor(dataset: pd.DataFrame) -> Any:
-    x = dataset[FEATURE_COLS].fillna(0).astype(np.float32).to_numpy()
+    x = dataset[FEATURE_COLS].astype(np.float32).to_numpy()
     y = dataset['bias'].astype(np.float32).to_numpy()
     model = xgb.XGBRegressor(**_XGB_PARAMS)
     model.fit(x, y, verbose=False)
@@ -296,7 +314,10 @@ def build_precip_artifacts(
     dem = features.load_dem(dem_path)
     stations = enrich_stations(load_stations(stations_csv, ['precipitation']), dem)
     sampled = sample_reanalysis(source, root, stations, source.precip_var, source.precip_to_mm)
-    dataset = _precip_features(sampled)
+    climate = build_climatology(
+        source, root, source.precip_var, source.precip_to_mm, wet_threshold=WET_THRESHOLD
+    )
+    dataset = _precip_features(sampled, climate)
 
     clf, reg = _train_two_stage(dataset)
     fallback = dataset.copy()
@@ -312,6 +333,8 @@ def build_precip_artifacts(
 
     out = Path(artifacts_dir) / source.name / 'precip'
     out.mkdir(parents=True, exist_ok=True)
+    climate.metadata['training_id'] = uuid.uuid4().hex
+    climate.save(out / 'climatology.npz')
     joblib.dump(clf, out / 'clf.joblib')
     joblib.dump(reg, out / 'reg.joblib')
     joblib.dump(fallback_clf, out / 'fallback_clf.joblib')
@@ -324,10 +347,11 @@ def build_precip_artifacts(
         seasonal[f'log_ratio_m{month}'] = log_ratio[month]
         seasonal[f'wet_bias_m{month}'] = wet_bias[month]
     np.savez_compressed(out / 'seasonal.npz', **seasonal)
+    write_manifest(out, PRECIP_FILES)
     _LOG.info('Wrote precip artifacts for %s to %s', source.name, out)
 
 
-def _precip_features(sampled: pd.DataFrame) -> pd.DataFrame:
+def _precip_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
     dataset = sampled.copy()
     dataset['era5_precip'] = np.maximum(dataset['reanalysis'].to_numpy(), 0.0).astype(np.float32)
     dataset['obs_precip'] = np.maximum(dataset['precipitation'].to_numpy(), 0.0).astype(np.float32)
@@ -340,11 +364,13 @@ def _precip_features(sampled: pd.DataFrame) -> pd.DataFrame:
     dataset['doy_sin'] = np.sin(2 * np.pi * doy / 365).astype(np.float32)
     dataset['doy_cos'] = np.cos(2 * np.pi * doy / 365).astype(np.float32)
     grp = ['station_id', 'month']
-    clim = dataset.groupby(grp)['era5_precip'].transform('mean')
-    dataset['era5_precip_anom'] = (dataset['era5_precip'] - clim).astype(np.float32)
-    dataset['era5_wet_fraction'] = (
-        dataset.groupby(grp)['era5_wet'].transform('mean').astype(np.float32)
-    )
+    month = dataset['month'].to_numpy()
+    lat_index = dataset['_lat_index'].to_numpy()
+    lon_index = dataset['_lon_index'].to_numpy()
+    clim = climate.sample(month, lat_index, lon_index)
+    dataset['era5_precip_anom'] = (dataset['era5_precip'].to_numpy() - clim).astype(np.float32)
+    wet_fraction = climate.require_wet_fraction()
+    dataset['era5_wet_fraction'] = wet_fraction[month - 1, lat_index, lon_index]
     wet_wet = (dataset['era5_wet'] == 1) & (dataset['obs_wet'] == 1)
     dataset['_log_ratio'] = np.where(
         wet_wet,
@@ -369,14 +395,14 @@ def _precip_features(sampled: pd.DataFrame) -> pd.DataFrame:
 def _train_two_stage(dataset: pd.DataFrame) -> tuple[Any, Any]:
     clf = xgb.XGBClassifier(**_XGB_PARAMS, eval_metric='logloss')
     clf.fit(
-        dataset[WET_FEAT].fillna(0).astype(np.float32).to_numpy(),
+        dataset[WET_FEAT].astype(np.float32).to_numpy(),
         dataset['obs_wet'].to_numpy(),
         verbose=False,
     )
     wet = dataset[dataset['obs_wet'] == 1]
     reg = xgb.XGBRegressor(**_XGB_PARAMS)
     reg.fit(
-        wet[WET_FEAT].fillna(0).astype(np.float32).to_numpy(),
+        wet[WET_FEAT].astype(np.float32).to_numpy(),
         wet['obs_precip_log'].to_numpy(),
         verbose=False,
     )
@@ -384,7 +410,7 @@ def _train_two_stage(dataset: pd.DataFrame) -> tuple[Any, Any]:
 
 
 def _tune_threshold(clf: Any, dataset: pd.DataFrame) -> float:
-    probs = clf.predict_proba(dataset[WET_FEAT].fillna(0).astype(np.float32).to_numpy())[:, 1]
+    probs = clf.predict_proba(dataset[WET_FEAT].astype(np.float32).to_numpy())[:, 1]
     target = float(dataset['obs_wet'].mean())
     best_t, best_score = 0.5, np.inf
     for t in np.linspace(0.1, 0.9, 81):

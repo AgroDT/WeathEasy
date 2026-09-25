@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from . import features
+from .climatology import TEMP_FILES, Climatology, verify_manifest
 
 
 if TYPE_CHECKING:
@@ -54,12 +55,17 @@ class TemperatureCorrector:
         self.dir = Path(artifacts_dir) / source.name / 'temp'
         self.dem_path = Path(dem_path)
         self.model: Any = None
+        self.climatology: Climatology | None = None
         self.seasonal_bias: dict[int, NDArray[np.float32]] | None = None
         self.grid_lats: NDArray[np.float32] | None = None
         self.grid_lons: NDArray[np.float32] | None = None
         self._dem_cache: dict[tuple[int, int], features.Dem | None] = {}
 
     def load_artifacts(self) -> TemperatureCorrector:
+        verify_manifest(self.dir, TEMP_FILES)
+        self.climatology = Climatology.load(
+            self.dir / 'climatology.npz', self.source, self.source.temp_var
+        )
         self.model = joblib.load(self.dir / 'model.joblib')
         data = np.load(self.dir / 'seasonal_bias_grid.npz')
         self.seasonal_bias = {m: data[f'month_{m}'] for m in range(1, 13)}
@@ -68,9 +74,17 @@ class TemperatureCorrector:
         _LOG.info('Loaded %s temperature artifacts from %s', self.source.name, self.dir)
         return self
 
+    @property
+    def artifact_id(self) -> str:
+        if self.climatology is None:
+            msg = 'Temperature artifacts not loaded'
+            raise RuntimeError(msg)
+        return str(self.climatology.metadata['training_id'])
+
     def correct(self, root: zarr.Group, day: date) -> dict[str, NDArray[np.float32]]:
         if (
             self.model is None
+            or self.climatology is None
             or self.seasonal_bias is None
             or self.grid_lats is None
             or self.grid_lons is None
@@ -79,8 +93,9 @@ class TemperatureCorrector:
             raise RuntimeError(msg)
 
         grid, lats, lons = self.source.read_day(root, self.source.temp_var, day)
-        n_lat, n_lon = grid.shape
-        anomaly = (grid - np.nanmean(grid)).astype(np.float32)
+        self.climatology.require_grid(lats, lons)
+        monthly_mean = self.climatology.mean[day.month - 1]
+        anomaly = (grid - monthly_mean).astype(np.float32)
         elev, slope_we, slope_sn = self._dem_arrays(lats, lons)
         seasonal = features.seasonal_field(
             self.seasonal_bias,
@@ -107,14 +122,16 @@ class TemperatureCorrector:
                 'era5_anomaly': anomaly.ravel(),
             }
         )
-        bias = (
-            self.model.predict(
-                feat[FEATURE_COLS].fillna(0).astype(np.float32).to_numpy(),
+        valid = np.isfinite(grid) & np.isfinite(monthly_mean)
+        bias = np.full(grid.shape, np.nan, np.float32)
+        if valid.any():
+            predicted = self.model.predict(
+                feat.iloc[np.flatnonzero(valid.ravel())][FEATURE_COLS]
+                .astype(np.float32)
+                .to_numpy(),
             )
-            .reshape(n_lat, n_lon)
-            .astype(np.float32)
-        )
-        bias[np.abs(seasonal) < CORRECTION_THRESHOLD] = 0.0
+            bias[valid] = predicted.astype(np.float32)
+        bias[(np.abs(seasonal) < CORRECTION_THRESHOLD) & valid] = 0.0
         corrected = (grid - bias).astype(np.float32)
         _LOG.info(
             '%s %s: mean %.2f -> %.2f degC (corrected %.0f%% of cells)',

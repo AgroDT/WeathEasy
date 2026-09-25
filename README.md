@@ -264,6 +264,11 @@ independently when their arrays exist; otherwise the raw variable is used.
 Missing values within an existing corrected array remain missing. Set
 `use_corrected=False` to select both raw variables.
 
+Bias-correction models include a frozen monthly climatology. They remain valid
+through ordinary daily appends to the raw Zarr store. If the raw store is deleted
+and recreated, retrain both temperature and precipitation models before applying
+correction, even when the dates and coordinates are unchanged.
+
 ET0 uses the daily [FAO-56 equations](https://www.fao.org/4/x0490e/x0490e08.htm),
 with the selected `TMP_corr`/`TMP` as its mean temperature instead of the standard
 `(Tmin + Tmax)/2`. Tmin/Tmax remain raw for output and radiation calculations.

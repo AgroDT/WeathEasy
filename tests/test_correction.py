@@ -10,9 +10,10 @@ import xarray as xr
 from weatheasy import Coords, get_cfs2_data, get_era5_data
 from weatheasy.build_copdem import _slopes
 from weatheasy.correction import apply, features, training
-from weatheasy.correction.precip import PrecipCorrector
+from weatheasy.correction.climatology import build_climatology
+from weatheasy.correction.precip import WET_FEAT, PrecipCorrector
 from weatheasy.correction.sources import CFS2, ERA5
-from weatheasy.correction.temperature import TemperatureCorrector
+from weatheasy.correction.temperature import FEATURE_COLS, TemperatureCorrector
 from weatheasy.error import CoordsError
 from weatheasy.storage import open_dataset, prepare_dataset, write_batch
 from weatheasy.util import get_storage
@@ -29,6 +30,18 @@ class Constant:
 class AlwaysWet:
     def predict_proba(self, x):
         return np.tile([0.1, 0.9], (len(x), 1))
+
+
+class RecordTemperature:
+    def predict(self, x):
+        self.captured = x.copy()
+        return np.full(len(x), 1.0, np.float32)
+
+
+class RecordWet(AlwaysWet):
+    def predict_proba(self, x):
+        self.captured = x.copy()
+        return super().predict_proba(x)
 
 
 def raw_store(tmp_path, source=ERA5, days=2, day_offsets=None, lon_start=37):
@@ -66,8 +79,53 @@ def raw_store(tmp_path, source=ERA5, days=2, day_offsets=None, lon_start=37):
     return root, start
 
 
+def heterogeneous_store(tmp_path, source):
+    root = get_storage(str(tmp_path / 'data'))
+    if source == ERA5:
+        lats, lons = [55.0, 56.0], [37.0, 38.0]
+        station_lat, station_lon = 55.0, 37.0
+    else:
+        lats, lons = [40.0, 41.0, 42.0], [18.0, 19.0, 20.0]
+        station_lat, station_lon = 41.0, 19.0
+    tmp = np.full((3, len(lats), len(lons)), 20.0, np.float32)
+    precip = np.full_like(tmp, 8.0)
+    li, lo = (0, 0) if source == ERA5 else (1, 1)
+    tmp[:, li, lo] = [7.0, 13.0, np.nan]
+    precip[:, li, lo] = [0.0, 8.0, np.nan]
+    ds = xr.Dataset(
+        {
+            'TMP': (('time', 'latitude', 'longitude'), tmp, {'units': 'degC'}),
+            'PRATE': (
+                ('time', 'latitude', 'longitude'),
+                precip / source.precip_to_mm,
+                {'units': 'kg m-2 s-1'},
+            ),
+        },
+        coords={
+            'time': np.array(['2020-01-01', '2020-01-02', '2020-01-03'], dtype='datetime64[D]'),
+            'latitude': lats,
+            'longitude': lons,
+        },
+    )
+    write_batch(root.store, source.path(root), prepare_dataset(ds, crs='EPSG:4326'))
+    station = pd.DataFrame(
+        {
+            'station_id': [1],
+            'lat': [station_lat],
+            'lon': [station_lon],
+            'date': [pd.Timestamp('2020-01-02')],
+            'temperature': [12.0],
+            'precipitation': [7.0],
+        }
+    )
+    return root, station, (0, 0)
+
+
 def stub_models(monkeypatch):
     class FakeTemperature:
+        artifact_id = 'test-artifact'
+        climatology = None
+
         def __init__(self, source, _artifacts_dir, _dem_path) -> None:
             self.source = source
 
@@ -183,6 +241,9 @@ def test_missing_precipitation_stays_missing(tmp_path):
     corrector.train_coords = np.array([[55.5, 37.5]], np.float32)
     lats, lons = ERA5.grid(root)
     corrector.grid_lats, corrector.grid_lons = lats, lons
+    corrector.climatology = build_climatology(
+        ERA5, root, ERA5.precip_var, ERA5.precip_to_mm, wet_threshold=1.0
+    )
     corrector.seasonal = {
         'log_ratio': {m: np.zeros((len(lats), len(lons)), np.float32) for m in range(1, 13)},
         'wet_bias': {m: np.full((len(lats), len(lons)), 0.5, np.float32) for m in range(1, 13)},
@@ -200,12 +261,107 @@ def test_temperature_corrector_applies_and_suppresses_small_bias(tmp_path):
     corrector = TemperatureCorrector(ERA5, tmp_path, tmp_path / 'missing.nc')
     corrector.model = Constant(1.5)
     corrector.grid_lats, corrector.grid_lons = lats, lons
+    corrector.climatology = build_climatology(ERA5, root, ERA5.temp_var, 1.0)
     corrector.seasonal_bias = {m: np.ones((len(lats), len(lons)), np.float32) for m in range(1, 13)}
     corrected = corrector.correct(root, first)
     np.testing.assert_allclose(corrected['original'] - corrected['corrected'], 1.5)
     corrector.seasonal_bias[1][:] = 0.1
     suppressed = corrector.correct(root, first)
     np.testing.assert_allclose(suppressed['original'], suppressed['corrected'])
+
+
+@pytest.mark.parametrize('source', [ERA5, CFS2])
+def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path, source):
+    root, station, target = heterogeneous_store(tmp_path, source)
+    day = date(2020, 1, 2)
+    temp_climate = build_climatology(source, root, 'TMP', 1.0)
+    precip_climate = build_climatology(
+        source, root, 'PRATE', source.precip_to_mm, wet_threshold=1.0
+    )
+    li, lo = target
+    assert temp_climate.mean[0, li, lo] == pytest.approx(10.0)
+    assert precip_climate.mean[0, li, lo] == pytest.approx(4.0)
+    assert precip_climate.require_wet_fraction()[0, li, lo] == pytest.approx(0.5)
+    assert np.isnan(temp_climate.mean[1]).all()  # No February observations.
+
+    temp_rows = training._temp_features(  # noqa: SLF001
+        training.sample_reanalysis(source, root, station, 'TMP', 1.0), temp_climate
+    )
+    precip_rows = training._precip_features(  # noqa: SLF001
+        training.sample_reanalysis(source, root, station, 'PRATE', source.precip_to_mm),
+        precip_climate,
+    )
+    assert temp_rows.era5_anomaly.iloc[0] == pytest.approx(3.0)
+    assert precip_rows.era5_precip_anom.iloc[0] == pytest.approx(4.0)
+    assert precip_rows.era5_wet_fraction.iloc[0] == pytest.approx(0.5)
+
+    temp_model = RecordTemperature()
+    temp = TemperatureCorrector(source, tmp_path, tmp_path / 'missing.nc')
+    temp.model = temp_model
+    temp.climatology = temp_climate
+    temp.grid_lats, temp.grid_lons = source.grid(root)
+    temp.seasonal_bias = {m: np.ones_like(temp_climate.mean[0]) for m in range(1, 13)}
+    temp.correct(root, day)
+    index = FEATURE_COLS.index('era5_anomaly')
+    assert temp_model.captured[0, index] == pytest.approx(temp_rows.era5_anomaly.iloc[0])
+
+    wet_model = RecordWet()
+    precip = PrecipCorrector(source, tmp_path, tmp_path / 'missing.nc')
+    precip.clf = precip.fallback_clf = wet_model
+    precip.reg = precip.fallback_reg = Constant(np.log1p(8))
+    precip.climatology = precip_climate
+    precip.grid_lats, precip.grid_lons = source.grid(root)
+    precip.train_coords = station[['lat', 'lon']].to_numpy()
+    precip.seasonal = {
+        'log_ratio': {m: np.zeros_like(precip_climate.mean[0]) for m in range(1, 13)},
+        'wet_bias': {m: np.full_like(precip_climate.mean[0], 0.5) for m in range(1, 13)},
+    }
+    precip.correct(root, day)
+    assert wet_model.captured[0, WET_FEAT.index('era5_precip_anom')] == pytest.approx(
+        precip_rows.era5_precip_anom.iloc[0]
+    )
+    assert wet_model.captured[0, WET_FEAT.index('era5_wet_fraction')] == pytest.approx(
+        precip_rows.era5_wet_fraction.iloc[0]
+    )
+
+    # New raw days do not silently change features until a new training run.
+    extra = xr.Dataset(
+        {
+            'TMP': (
+                ('time', 'latitude', 'longitude'),
+                np.full((1, *temp_climate.mean.shape[1:]), 100.0, np.float32),
+                {'units': 'degC'},
+            ),
+            'PRATE': (
+                ('time', 'latitude', 'longitude'),
+                np.full(
+                    (1, *temp_climate.mean.shape[1:]),
+                    100.0 / source.precip_to_mm,
+                    np.float32,
+                ),
+                {'units': 'kg m-2 s-1'},
+            ),
+        },
+        coords={
+            'time': [np.datetime64('2020-01-04')],
+            'latitude': temp_climate.lats,
+            'longitude': temp_climate.lons,
+        },
+    )
+    # CFS2 raw contains the full grid; its cropped correction grid cannot append raw data.
+    if source == ERA5:
+        write_batch(root.store, source.path(root), prepare_dataset(extra, crs='EPSG:4326'))
+        temp.correct(root, day)
+        assert temp_model.captured[0, index] == pytest.approx(3.0)
+        february = extra.assign_coords(time=[np.datetime64('2020-02-01')])
+        write_batch(root.store, source.path(root), prepare_dataset(february, crs='EPSG:4326'))
+        new_day = date(2020, 2, 1)
+        temp_result = temp.correct(root, new_day)
+        precip_result = precip.correct(root, new_day)
+        assert np.isnan(temp_result['corrected']).all()
+        assert np.isnan(precip_result['corrected']).all()
+        assert np.isfinite(temp_result['original']).all()
+        assert np.isfinite(precip_result['original']).all()
 
 
 def test_training_discards_missing_observation_and_reanalysis(tmp_path):
@@ -338,8 +494,38 @@ def test_separate_training_and_apply_commands(tmp_path, monkeypatch):
     ]
     main(['train', *common, '--stations', str(stations)])
     main(['apply', *common, '--end', first.isoformat()])
+    old_id = root[ERA5.correction_path].attrs['correction_artifact_id']
     with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
         assert ds.sizes['time'] == 1
         assert np.isfinite(ds.TMP_corr).all()
         assert float(ds.TMP_corr.mean()) < 10
         assert np.isnan(ds.PRATE_corr[0, 1, 1])
+    main(['train', *common, '--stations', str(stations), '--only', 'temp'])
+    main(['apply', *common])
+    assert root[ERA5.correction_path].attrs['correction_artifact_id'] != old_id
+    with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
+        assert ds.sizes['time'] == 2  # Rebuilt from the first day with the new model pair.
+
+
+def test_old_artifacts_are_rejected_before_correction_is_deleted(tmp_path):
+    root, first = raw_store(tmp_path)
+    artifacts = tmp_path / 'artifacts'
+    old_dir = artifacts / ERA5.name / 'temp'
+    old_dir.mkdir(parents=True)
+    with pytest.raises(ValueError, match='old or incomplete correction artifacts; retrain'):
+        apply.correct_store(ERA5, root, artifacts, tmp_path / 'missing.nc', end=first)
+    assert ERA5.correction_path not in root
+
+
+def test_interrupted_retraining_artifacts_are_rejected(tmp_path):
+    from weatheasy.correction.climatology import TEMP_FILES, verify_manifest, write_manifest
+
+    directory = tmp_path / 'artifacts'
+    directory.mkdir()
+    for name in TEMP_FILES:
+        (directory / name).write_bytes(b'original')
+    write_manifest(directory, TEMP_FILES)
+    verify_manifest(directory, TEMP_FILES)
+    (directory / 'model.joblib').write_bytes(b'interrupted replacement')
+    with pytest.raises(ValueError, match='incomplete or modified correction artifacts'):
+        verify_manifest(directory, TEMP_FILES)

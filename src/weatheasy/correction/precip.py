@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from . import features
+from .climatology import PRECIP_FILES, Climatology, verify_manifest
 
 
 if TYPE_CHECKING:
@@ -65,6 +66,7 @@ class PrecipCorrector:
         self.dir = Path(artifacts_dir) / source.name / 'precip'
         self.dem_path = Path(dem_path)
         self.clf: Any = None
+        self.climatology: Climatology | None = None
         self.reg: Any = None
         self.fallback_clf: Any = None
         self.fallback_reg: Any = None
@@ -77,6 +79,10 @@ class PrecipCorrector:
         self._dem_cache: dict[tuple[int, int], features.Dem | None] = {}
 
     def load_artifacts(self) -> PrecipCorrector:
+        verify_manifest(self.dir, PRECIP_FILES)
+        self.climatology = Climatology.load(
+            self.dir / 'climatology.npz', self.source, self.source.precip_var
+        )
         self.clf = joblib.load(self.dir / 'clf.joblib')
         self.reg = joblib.load(self.dir / 'reg.joblib')
         self.fallback_clf = joblib.load(self.dir / 'fallback_clf.joblib')
@@ -94,9 +100,17 @@ class PrecipCorrector:
         _LOG.info('Loaded %s precip artifacts from %s', self.source.name, self.dir)
         return self
 
+    @property
+    def artifact_id(self) -> str:
+        if self.climatology is None:
+            msg = 'Precipitation artifacts not loaded'
+            raise RuntimeError(msg)
+        return str(self.climatology.metadata['training_id'])
+
     def correct(self, root: zarr.Group, day: date) -> dict[str, NDArray[np.float32]]:
         if (
             self.clf is None
+            or self.climatology is None
             or self.seasonal is None
             or self.train_coords is None
             or self.grid_lats is None
@@ -106,6 +120,7 @@ class PrecipCorrector:
             raise RuntimeError(msg)
 
         raw, lats, lons = self.source.read_day(root, self.source.precip_var, day)
+        self.climatology.require_grid(lats, lons)
         era5_day = np.maximum(raw * self.source.precip_to_mm, 0.0).astype(np.float32)
         valid = np.isfinite(era5_day)
         if not valid.any():
@@ -116,9 +131,17 @@ class PrecipCorrector:
 
         elev, slope_we, slope_sn = self._dem_arrays(lats, lons)
         coast = np.log1p(features.dist_to_coast(flat_lats, flat_lons)).astype(np.float32)
-        anomaly = (era5_day - np.nanmean(era5_day)).astype(np.float32)
-        wet_frac = float((era5_day[valid] >= WET_THRESHOLD).mean())
-        target_wet = wet_frac * _WET_FRAC_CALIB
+        monthly_mean = self.climatology.mean[day.month - 1]
+        wet_fraction = self.climatology.require_wet_fraction()[day.month - 1]
+        anomaly = (era5_day - monthly_mean).astype(np.float32)
+        # The daily wet fraction still calibrates the day's output count; the
+        # model feature below is the frozen cell/month temporal fraction.
+        predictable = valid & np.isfinite(monthly_mean) & np.isfinite(wet_fraction)
+        target_wet = (
+            float((era5_day[predictable] >= WET_THRESHOLD).mean()) * _WET_FRAC_CALIB
+            if predictable.any()
+            else 0.0
+        )
         log_ratio = features.seasonal_field(
             self.seasonal['log_ratio'],
             self.grid_lats,
@@ -146,7 +169,7 @@ class PrecipCorrector:
             day,
             era5_day.ravel(),
             anomaly.ravel(),
-            wet_frac,
+            wet_fraction.ravel(),
             log_ratio.ravel(),
             wet_bias.ravel(),
         )
@@ -156,13 +179,17 @@ class PrecipCorrector:
             self.train_coords,
         )
         near = dists.min(axis=1) < HYBRID_RADIUS_KM
-        threshold = self._calibrate(feat.iloc[np.flatnonzero(valid)], target_wet)
+        threshold = (
+            self._calibrate(feat.iloc[np.flatnonzero(predictable)], target_wet)
+            if predictable.any()
+            else self.threshold
+        )
 
         corrected = np.full(n_lat * n_lon, np.nan, np.float32)
-        near_idx = np.where(near & valid.ravel())[0]
+        near_idx = np.where(near & predictable.ravel())[0]
         if near_idx.size:
             corrected[near_idx] = _predict(feat.iloc[near_idx], self.clf, self.reg, threshold)
-        far_idx = np.where(~near & valid.ravel())[0]
+        far_idx = np.where(~near & predictable.ravel())[0]
         if far_idx.size:
             far_feat = feat.iloc[far_idx].copy()
             far_feat[_SEASONAL_FEAT] = np.float32(0.0)
@@ -173,7 +200,7 @@ class PrecipCorrector:
                 self.fallback_threshold,
             )
 
-        suppress = (np.abs(wet_bias.ravel()) < WET_BIAS_THRESHOLD) & valid.ravel()
+        suppress = (np.abs(wet_bias.ravel()) < WET_BIAS_THRESHOLD) & predictable.ravel()
         corrected[suppress] = era5_day.ravel()[suppress]
         corrected_grid = np.maximum(corrected.reshape(n_lat, n_lon), 0.0).astype(np.float32)
 
@@ -191,7 +218,7 @@ class PrecipCorrector:
         rng = np.random.default_rng(0)
         sample = rng.choice(len(feat), min(_CALIB_SAMPLE, len(feat)), replace=False)
         probs = self.clf.predict_proba(
-            feat.iloc[sample][WET_FEAT].fillna(0).astype(np.float32).to_numpy(),
+            feat.iloc[sample][WET_FEAT].astype(np.float32).to_numpy(),
         )[:, 1]
         best_t, best_score = self.threshold, np.inf
         for t in np.linspace(0.05, 0.95, 91):
@@ -222,7 +249,7 @@ def _build_features(
     day: date,
     era5_flat: NDArray,
     anom_flat: NDArray,
-    wet_frac: float,
+    wet_frac_flat: NDArray,
     log_ratio_flat: NDArray,
     wet_bias_flat: NDArray,
 ) -> pd.DataFrame:
@@ -241,7 +268,7 @@ def _build_features(
             'era5_precip': era5_flat,
             'era5_precip_log': np.log1p(era5_flat).astype(np.float32),
             'era5_precip_anom': anom_flat,
-            'era5_wet_fraction': np.float32(wet_frac),
+            'era5_wet_fraction': wet_frac_flat,
             'era5_seasonal_log_ratio': log_ratio_flat,
             'precip_wet_bias': wet_bias_flat,
         }
@@ -250,10 +277,10 @@ def _build_features(
 
 def _predict(feat: pd.DataFrame, clf: Any, reg: Any, threshold: float) -> NDArray[np.float32]:
     """Two-stage prediction: classify wet/dry, then regress amount (mm) on wet cells."""
-    probs = clf.predict_proba(feat[WET_FEAT].fillna(0).astype(np.float32).to_numpy())[:, 1]
+    probs = clf.predict_proba(feat[WET_FEAT].astype(np.float32).to_numpy())[:, 1]
     result = np.zeros(len(feat), np.float32)
     wet = np.where(probs >= threshold)[0]
     if wet.size:
-        amount = reg.predict(feat.iloc[wet][REG_FEAT].fillna(0).astype(np.float32).to_numpy())
+        amount = reg.predict(feat.iloc[wet][REG_FEAT].astype(np.float32).to_numpy())
         result[wet] = np.expm1(np.maximum(amount, 0.0))
     return result

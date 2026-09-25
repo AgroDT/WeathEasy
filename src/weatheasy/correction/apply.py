@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import date
 from typing import TYPE_CHECKING, cast
@@ -26,7 +27,7 @@ _LOG = logging.getLogger(__name__)
 _FIELDS = {'TMP_corr', 'PRATE_corr'}
 
 
-def correct_store(  # noqa: C901
+def correct_store(  # noqa: C901, PLR0912, PLR0915
     source: Source,
     root: zarr.Group,
     artifacts_dir: Path,
@@ -57,8 +58,24 @@ def correct_store(  # noqa: C901
         raise ValueError(msg)
 
     lats, lons = source.grid(root)
+    temp = TemperatureCorrector(source, artifacts_dir, dem_path).load_artifacts()
+    precip = PrecipCorrector(source, artifacts_dir, dem_path).load_artifacts()
+    temp_climate = temp.climatology
+    precip_climate = precip.climatology
+    if temp_climate is not None and precip_climate is not None:
+        temp_climate.require_grid(lats, lons)
+        precip_climate.require_grid(lats, lons)
+        for key in ('first_day', 'last_day', 'day_count', 'days_sha256'):
+            if temp_climate.metadata[key] != precip_climate.metadata[key]:
+                msg = (
+                    f'{source.name}: temperature and precipitation artifacts use '
+                    'different raw snapshots; retrain both'
+                )
+                raise ValueError(msg)
+    ids = f'{temp.artifact_id}:{precip.artifact_id}'
+    artifact_id = hashlib.sha256(ids.encode()).hexdigest()
     path = source.corrected_path(root)
-    if _requires_rebuild(root, source.correction_path, lats, lons):
+    if _requires_rebuild(root, source.correction_path, lats, lons, artifact_id):
         _LOG.warning(
             '%s correction grid is incompatible; rebuilding from %s',
             source.name,
@@ -84,8 +101,6 @@ def correct_store(  # noqa: C901
     if not pending:
         return 0
 
-    temp = TemperatureCorrector(source, artifacts_dir, dem_path).load_artifacts()
-    precip = PrecipCorrector(source, artifacts_dir, dem_path).load_artifacts()
     if crs is None:
         msg = f'{source.name} prepared data have no CRS'
         raise ValueError(msg)
@@ -109,8 +124,11 @@ def correct_store(  # noqa: C901
                 ),
             },
             coords={'time': [np.datetime64(day)], 'latitude': lats, 'longitude': lons},
+            attrs={'correction_artifact_id': artifact_id},
         )
-        write_batch(root.store, path, prepare_dataset(ds, crs=crs))
+        prepared = prepare_dataset(ds, crs=crs)
+        prepared.attrs['correction_artifact_id'] = artifact_id
+        write_batch(root.store, path, prepared)
     return len(pending)
 
 
@@ -119,12 +137,15 @@ def _requires_rebuild(
     group_path: str,
     lats: np.ndarray,
     lons: np.ndarray,
+    artifact_id: str,
 ) -> bool:
     if group_path not in root:
         return False
     group = cast('zarr.Group', root[group_path])
     if not group.attrs or not any(group.keys()):
         return False
+    if group.attrs.get('correction_artifact_id') != artifact_id:
+        return True
     # Inspect even an interrupted append: its published coordinate arrays stay
     # unchanged, and write_batch can recover the uncommitted time tail.
     try:
