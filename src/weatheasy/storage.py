@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
-from os import PathLike
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -29,18 +28,19 @@ import rioxarray
 import xarray as xr
 import zarr
 from xarray.coding.times import decode_cf_datetime
-from zarr.storage import FsspecStore
+from zarr.storage import FsspecStore, LocalStore
 
 from weatheasy.error import S3ImportError
 
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
+    from os import PathLike
 
     from fsspec.asyn import AsyncFileSystem
     from rasterio import CRS
+    from zarr.abc.store import Store
     from zarr.core.metadata import ArrayV3Metadata
-    from zarr.storage import StoreLike
 
 SCHEMA = 'weatheasy-coordinate-v1'
 DIMS = ('time', 'latitude', 'longitude')
@@ -50,17 +50,12 @@ class StorageError(ValueError):
     """Invalid schema, conflicting grid or incomplete write."""
 
 
-def get_store(uri: StoreLike, *, filesystem: AsyncFileSystem | None = None) -> StoreLike:
-    """Resolve a local path or S3 URI, or pass through an existing Zarr store.
+def get_store(uri: str | PathLike[str], *, filesystem: AsyncFileSystem | None = None) -> Store:
+    """Create a Zarr store from a local path or S3 URI.
 
     Pass one asynchronous S3 filesystem to reuse its connection pool across
     stores within a job. Local paths need no S3 dependencies or filesystem.
     """
-    if not isinstance(uri, (str, PathLike)):
-        if filesystem is not None:
-            msg = 'A filesystem can only be supplied with an s3:// URI'
-            raise StorageError(msg)
-        return uri
     location = str(uri)
     if location.startswith('s3://'):
         if not location[5:].split('/', maxsplit=1)[0]:
@@ -76,7 +71,48 @@ def get_store(uri: StoreLike, *, filesystem: AsyncFileSystem | None = None) -> S
     if filesystem is not None:
         msg = 'An S3 filesystem can only be used with an s3:// URI'
         raise StorageError(msg)
-    return uri
+    return LocalStore(location)
+
+
+def group_attrs(store: Store, group: str) -> dict[str, Any]:
+    """Read metadata from a group without exposing Zarr objects to readers."""
+    target = zarr.open_group(store, mode='r', zarr_format=3).get_group(group)
+    return dict(target.attrs)
+
+
+def group_exists(store: Store, group: str) -> bool:
+    """Check whether a group exists without creating it."""
+    root = zarr.open_group(store, mode='r', zarr_format=3)
+    if group not in root:
+        return False
+    if not isinstance(root[group], zarr.Group):
+        msg = f'{group} must be a Zarr group'
+        raise TypeError(msg)
+    return True
+
+
+def pristine_group(store: Store, group: str) -> bool:
+    """Recognize an empty loader-created group; incomplete writes are not empty."""
+    root = zarr.open_group(store, mode='r', zarr_format=3)
+    target = root.get_group(group)
+    return not target.attrs and not any(target.keys())
+
+
+def set_group_attrs(store: Store, group: str, **attrs: Any) -> None:
+    """Create a metadata group if needed and update its attributes."""
+    zarr.open_group(store, mode='a', zarr_format=3).require_group(group).attrs.update(attrs)
+
+
+def remove_group_attr(store: Store, group: str, key: str) -> None:
+    """Remove a readiness marker before mutating its published data."""
+    zarr.open_group(store, mode='a', zarr_format=3).get_group(group).attrs.pop(key, None)
+
+
+def delete_group(store: Store, group: str) -> None:
+    """Remove a group in place, retaining the current published path."""
+    root = zarr.open_group(store, mode='a', zarr_format=3)
+    if group in root:
+        del root[group]
 
 
 def _normalize_spatial_axes(ds: xr.Dataset) -> xr.Dataset:
@@ -204,19 +240,17 @@ def _truncate_uncommitted(target: zarr.Group, count: int) -> None:
 
 
 def write_batch(
-    store: StoreLike,
+    store: Store,
     group: str,
     dataset: xr.Dataset,
     *,
     tile_size: int = 128,
-    filesystem: AsyncFileSystem | None = None,
 ) -> None:
     """Create or append prepared data, publishing only after all arrays are written.
 
     The caller serializes writers. A failed write is retried with the same grid
     and field metadata; previously committed dates must not be supplied again.
-    S3 callers may pass an URI with a shared asynchronous filesystem, or an
-    already resolved FsspecStore. Direct Zarr access remains confined here to
+    The caller supplies a ready local or S3 store. Direct Zarr access remains confined here to
     the commit marker and recovery of interrupted in-place appends.
     """
     if tile_size < 1 or dataset.attrs.get('storage_schema') != SCHEMA:
@@ -224,7 +258,6 @@ def write_batch(
         raise StorageError(msg)
     ds = dataset.copy()
     signature = _signature(ds)
-    store = get_store(store, filesystem=filesystem)
     root = zarr.open_group(store, mode='a', zarr_format=3)
     target = root.require_group(group)
     count = int(cast('int', target.attrs.get('committed_length', 0)))
@@ -299,11 +332,8 @@ def write_batch(
     target.attrs.update(committed_length=count + ds.sizes['time'], write_state='complete')
 
 
-def open_dataset(
-    store: StoreLike, group: str, *, filesystem: AsyncFileSystem | None = None
-) -> xr.Dataset:
+def open_dataset(store: Store, group: str) -> xr.Dataset:
     """Open a fully committed group without GRIB ingestion dependencies or Dask."""
-    store = get_store(store, filesystem=filesystem)
     root = zarr.open_group(store, mode='r', zarr_format=3)
     target = root.get_group(group)
     if (
@@ -322,11 +352,9 @@ def open_dataset(
     return ds
 
 
-def last_date(
-    store: StoreLike, group: str, *, filesystem: AsyncFileSystem | None = None
-) -> date | None:
+def last_date(store: Store, group: str) -> date | None:
     """Last committed day, including after a failed append awaiting retry."""
-    root = zarr.open_group(get_store(store, filesystem=filesystem), mode='a', zarr_format=3)
+    root = zarr.open_group(store, mode='a', zarr_format=3)
     if group not in root:
         return None
     target = root.get_group(group)

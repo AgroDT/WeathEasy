@@ -17,12 +17,21 @@ from httpx2 import Client, HTTPTransport
 from weatheasy import const
 from weatheasy.era5 import download_era5_data
 from weatheasy.sources import read_cfs2, read_netcdf
-from weatheasy.storage import last_date, prepare_dataset, write_batch
-from weatheasy.util import get_storage, init_parser, utc_now
+from weatheasy.storage import (
+    delete_group,
+    get_store,
+    group_attrs,
+    last_date,
+    prepare_dataset,
+    remove_group_attr,
+    set_group_attrs,
+    write_batch,
+)
+from weatheasy.util import init_parser, utc_now
 
 
 if TYPE_CHECKING:
-    import zarr
+    from zarr.abc.store import Store
 
 
 def main(*, configure_logging: bool = True) -> None:
@@ -52,7 +61,7 @@ def main(*, configure_logging: bool = True) -> None:
     args = parser.parse_args()
     if args.kind == 'era5':
         download_era5_data(
-            get_storage(args.data), args.download_dir, area=tuple(args.area) if args.area else None
+            get_store(args.data), args.download_dir, area=tuple(args.area) if args.area else None
         )
         return
     if args.area is not None:
@@ -64,15 +73,15 @@ def main(*, configure_logging: bool = True) -> None:
             download = download_cmip6_data
         case _:
             raise NotImplementedError
-    root = get_storage(args.data)
-    download(root, args.download_dir)
+    store = get_store(args.data)
+    download(store, args.download_dir)
 
 
-def download_cfs2_data(root: zarr.Group, download_dir: Path | None = None) -> None:
-    group = root.require_group(const.CFS2_DIR)
+def download_cfs2_data(store: Store, download_dir: Path | None = None) -> None:
+    set_group_attrs(store, const.CFS2_DIR)
     today = utc_now().date()
 
-    if updated := group.attrs.get(const.CFS2_KEY_UPDATED):
+    if updated := group_attrs(store, const.CFS2_DIR).get(const.CFS2_KEY_UPDATED):
         time_since_updated = today - date.fromisoformat(str(updated))
         if time_since_updated < const.ONE_DAY:
             _LOG.info('No forecast update required')
@@ -92,18 +101,18 @@ def download_cfs2_data(root: zarr.Group, download_dir: Path | None = None) -> No
         else:
             reanalysis_dir = stack.enter_context(_temp_dir())
             forecast_dir = stack.enter_context(_temp_dir())
-        _download_cfs2_reanalysis(root, forecast_begin, session, reanalysis_dir)
+        _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis_dir)
         _download_cfs2_forecast(forecast_begin, yesterday, session, forecast_dir)
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast_dir)
-        _merge_cfs2_forecast(root, forecast_begin, forecast_end, forecast_dir)
+        _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast_dir)
 
 
-def download_cmip6_data(root: zarr.Group, download_dir: Path | None = None) -> None:
-    _, download_dir = _process_args(const.CMIP6_DIR, root, download_dir)
+def download_cmip6_data(store: Store, download_dir: Path | None = None) -> None:
+    download_dir = _process_args(const.CMIP6_DIR, store, download_dir)
     with _session() as session, _temp_dir() as temporary:
         for var in const.CMIP6_VARS:
-            path = f'{root.path + "/" if root.path else ""}cmip6/{var}'
-            previous = last_date(root.store, path)
+            path = f'cmip6/{var}'
+            previous = last_date(store, path)
             first_year = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
             for year in range(first_year, const.CMIP6_LAST_YEAR + 1):
                 filename, content = _load_cmip6_dataset(download_dir, var, year, session)
@@ -124,7 +133,7 @@ def download_cmip6_data(root: zarr.Group, download_dir: Path | None = None) -> N
                     )
                 )
                 _LOG.info('Saving %s/%s', path, year)
-                write_batch(root.store, path, dataset)
+                write_batch(store, path, dataset)
 
 
 _MODULE_NAME = 'weatheasy.download'
@@ -133,12 +142,12 @@ _LOG = logging.getLogger(_MODULE_NAME)
 _CFS2_DOWNLOADED_FILENAME_TEMPLATE = '{}{}{}.grb2'
 
 
-def _process_args(group_name: str, root: zarr.Group, download_dir: Path | None):
-    group = root.require_group(group_name)
+def _process_args(group_name: str, store: Store, download_dir: Path | None):
+    set_group_attrs(store, group_name)
     if download_dir:
         download_dir /= group_name
         download_dir.mkdir(parents=True, exist_ok=True)
-    return group, download_dir
+    return download_dir
 
 
 def _session() -> Client:
@@ -151,12 +160,12 @@ def _temp_dir():
         yield Path(tmp_dir)
 
 
-def _download_cfs2_reanalysis(root: zarr.Group, end: date, session: Client, download_dir: Path):
+def _download_cfs2_reanalysis(store: Store, end: date, session: Client, download_dir: Path):
     download = _Cfs2ReanalysisDownloader(session, download_dir)
-    groups = {
-        kind: root.require_group(f'{const.CFS2_REANALYSIS_DIR}/{kind}') for kind in ('flx', 'pgb')
-    }
-    previous = {kind: last_date(root.store, group.path) for kind, group in groups.items()}
+    groups = {kind: f'{const.CFS2_REANALYSIS_DIR}/{kind}' for kind in ('flx', 'pgb')}
+    for kind in groups:
+        set_group_attrs(store, f'{const.CFS2_REANALYSIS_DIR}/{kind}')
+    previous = {kind: last_date(store, path) for kind, path in groups.items()}
     date_ = min(
         (value + const.ONE_DAY if value else const.CFS2_REANALYSIS_FIRST_DATE)
         for value in previous.values()
@@ -164,12 +173,12 @@ def _download_cfs2_reanalysis(root: zarr.Group, end: date, session: Client, down
     while date_ < end:
         paths = download(date_)
         if paths:
-            for kind, group in groups.items():
+            for kind, path in groups.items():
                 last = previous[kind]
                 if last is not None and date_ <= last:
                     continue
                 daily = _daily_cfs2(paths, kind, date_)
-                write_batch(root.store, group.path, daily)
+                write_batch(store, path, daily)
         else:
             _LOG.warning('%s was not found on the server', date_)
         date_ += const.ONE_DAY
@@ -248,15 +257,14 @@ def _download_cfs2_forecast(
     download('pgb', f'pgbf{{}}{{}}.01.{begin:%Y%m%d}00.grb2', const.CFS2_PGB_PARAMS)
 
 
-def _merge_cfs2_forecast(root: zarr.Group, begin: date, end: date, download_dir: Path):
+def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Path):
     # In-place replacement deliberately makes forecast data unavailable. Clear
     # readiness before deleting any chunks, then publish only after both grids.
-    parent = root[const.CFS2_DIR]
-    parent.attrs.pop(const.CFS2_KEY_UPDATED, None)
-    if const.CFS2_FORECAST_DIR in root:
-        del root[const.CFS2_FORECAST_DIR]
+    remove_group_attr(store, const.CFS2_DIR, const.CFS2_KEY_UPDATED)
+    delete_group(store, const.CFS2_FORECAST_DIR)
     for kind in ('flx', 'pgb'):
-        group = root.require_group(f'{const.CFS2_FORECAST_DIR}/{kind}')
+        group = f'{const.CFS2_FORECAST_DIR}/{kind}'
+        set_group_attrs(store, group)
         template = None
         paths_by_day = []
         date_ = begin
@@ -275,8 +283,8 @@ def _merge_cfs2_forecast(root: zarr.Group, begin: date, end: date, download_dir:
             msg = f'No forecast files for {kind}; forecast remains unavailable'
             raise ValueError(msg)
         for date_, paths in paths_by_day:
-            write_batch(root.store, group.path, _daily_cfs2(paths, kind, date_, template))
-    parent.attrs[const.CFS2_KEY_UPDATED] = utc_now().date().isoformat()
+            write_batch(store, group, _daily_cfs2(paths, kind, date_, template))
+    set_group_attrs(store, const.CFS2_DIR, updated=utc_now().date().isoformat())
 
 
 class _Cfs2ReanalysisDownloader:

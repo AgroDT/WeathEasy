@@ -15,7 +15,7 @@ from weatheasy.aquacrop_adapter import (
     get_weather_data,
     net_longwave_radiation,
 )
-from weatheasy.storage import prepare_dataset, write_batch
+from weatheasy.storage import StorageError, get_store, prepare_dataset, write_batch
 from weatheasy.util import get_storage
 
 
@@ -139,7 +139,7 @@ def weather_store(tmp_path: Path, correction: tuple[str, ...] = ()):
 
 def read_weather(root: zarr.Group, **kwargs):
     return get_weather_data(
-        root=root,
+        store=root.store,
         latitude=50.8,
         longitude=4.3,
         altitude=100,
@@ -191,3 +191,51 @@ def test_corrected_precip_missing_day_and_nonpositive_et0(tmp_path: Path):
     assert np.isnan(actual.pr[3])
     assert np.isnan(actual.et0[3])
     assert read_weather(root, use_corrected=False).pr[3] == pytest.approx(2)
+
+
+def test_adapter_reads_corrected_fields_from_store_path(tmp_path: Path):
+    weather_store(tmp_path, ('TMP_corr', 'PRATE_corr'))
+    actual = get_weather_data(
+        store=get_store(tmp_path / 'weather'),
+        latitude=50.8,
+        longitude=4.3,
+        altitude=100,
+        start=date(2020, 2, 28),
+        end=date(2020, 3, 2),
+    )
+    np.testing.assert_allclose(actual.pr, [12, np.nan, 0, 1])
+    assert np.isnan(actual.et0[1])
+    assert actual.et0[0] == pytest.approx(
+        _et0_fao56_for_uccle(t_mean=23, rs0=0.752 * extraterrestrial_radiation(50.8, 59))
+    )
+
+
+def test_adapter_ignores_only_pristine_empty_correction_group(tmp_path: Path):
+    root = weather_store(tmp_path)
+    correction = root.require_group('era5/correction')
+    actual = get_weather_data(
+        store=get_store(tmp_path / 'weather'),
+        latitude=50.8,
+        longitude=4.3,
+        altitude=100,
+        start=date(2020, 2, 28),
+        end=date(2020, 3, 2),
+    )
+    np.testing.assert_allclose(actual.pr, [8, np.nan, 0, 2])
+    correction.attrs['write_state'] = 'writing'
+    with pytest.raises(StorageError, match='completed'):
+        get_weather_data(
+            store=get_store(tmp_path / 'weather'),
+            latitude=50.8,
+            longitude=4.3,
+            altitude=100,
+            start=date(2020, 2, 28),
+            end=date(2020, 3, 2),
+        )
+
+
+def test_adapter_rejects_array_in_place_of_correction_group(tmp_path: Path):
+    root = weather_store(tmp_path)
+    root.create_array('era5/correction', shape=(1,), dtype='i4')
+    with pytest.raises(TypeError, match='must be a Zarr group'):
+        read_weather(root)

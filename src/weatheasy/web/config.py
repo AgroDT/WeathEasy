@@ -1,10 +1,11 @@
 from functools import cache, cached_property
 
-import zarr
 from pydantic import PositiveInt, computed_field
 from pydantic_settings import BaseSettings
+from zarr.abc.store import Store
 
-from weatheasy.util import FormatFloat, float_formatter_factory, get_storage
+from weatheasy.storage import get_store
+from weatheasy.util import FormatFloat, float_formatter_factory
 
 
 class Settings(BaseSettings):
@@ -20,8 +21,8 @@ class Settings(BaseSettings):
     enable_cors: bool = False
 
     @cached_property
-    def storage(self) -> zarr.Group:
-        return get_storage(self.data_root)
+    def storage(self) -> Store:
+        return get_store(self.data_root)
 
     @computed_field
     @cached_property

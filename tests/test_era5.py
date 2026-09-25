@@ -9,7 +9,7 @@ import pytest
 import xarray as xr
 
 from weatheasy import Coords, const, era5, get_era5_data
-from weatheasy.storage import StorageError, open_dataset
+from weatheasy.storage import StorageError, get_store, open_dataset
 from weatheasy.util import get_storage
 
 
@@ -172,15 +172,15 @@ def test_public_monthly_download_resume_getter_and_cli(
     cds_client.transform = lambda ds, _request, _call: ds.rename({'time': 'valid_time'})
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
-    era5.download_era5_data(root, tmp_path / 'cache', area=area)
+    era5.download_era5_data(get_store(tmp_path / 'store'), tmp_path / 'cache', area=area)
     assert len(cds_client.calls) == 6
     assert root['era5'].attrs['last_month'] == [2000, 1]
     root['era5'].attrs['last_month'] = [1999, 12]  # crash before convenience marker
-    era5.download_era5_data(root, tmp_path / 'cache', area=area)
+    era5.download_era5_data(root.store, tmp_path / 'cache', area=area)
     assert len(cds_client.calls) == 6
     assert root['era5'].attrs['last_month'] == [2000, 1]
     values = get_era5_data(
-        root=root,
+        store=root.store,
         begin=date(2000, 1, 31),
         end=date(2000, 1, 31),
         coords=Coords(55.3, 37.2),
@@ -189,7 +189,7 @@ def test_public_monthly_download_resume_getter_and_cli(
     np.testing.assert_allclose(values, [[5], [20]], atol=1e-5)
     before = dict(root['era5'].attrs)
     with pytest.raises(StorageError, match='different requested area'):
-        era5.download_era5_data(root, area=(55.3, 38.1, 55.2, 38.3))
+        era5.download_era5_data(get_store(tmp_path / 'store'), area=(55.3, 38.1, 55.2, 38.3))
     assert dict(root['era5'].attrs) == before
     with open_dataset(root.store, 'era5/daily') as ds:
         assert ds.spatial_ref.attrs['semi_major_axis'] == 6367470
@@ -232,9 +232,9 @@ def test_failed_month_and_append_recover(
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='timestamps'):
-        era5.download_era5_data(root, area=area)
+        era5.download_era5_data(root.store, area=area)
     assert root['era5'].attrs['last_month'] == [2000, 1]
-    assert era5.available_period(root)[1] == date(2000, 1, 31)
+    assert era5.available_period(root.store)[1] == date(2000, 1, 31)
     broken = False
     original = xr.Dataset.to_zarr
 
@@ -245,11 +245,11 @@ def test_failed_month_and_append_recover(
 
     monkeypatch.setattr(xr.Dataset, 'to_zarr', fail_write)
     with pytest.raises(OSError, match='interrupted'):
-        era5.download_era5_data(root, area=area)
+        era5.download_era5_data(root.store, area=area)
     assert root['era5'].attrs['last_month'] == [2000, 1]
     monkeypatch.setattr(xr.Dataset, 'to_zarr', original)
-    era5.download_era5_data(root, area=area)
-    assert era5.available_period(root) == (date(2000, 1, 1), date(2000, 2, 29))
+    era5.download_era5_data(root.store, area=area)
+    assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
     assert root['era5/daily'].attrs['committed_length'] == 60
 
 
@@ -339,16 +339,16 @@ def test_partial_request_missing_variable_never_publishes(
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='Missing ERA5'):
-        era5.download_era5_data(root, tmp_path / 'cache', area=area)
+        era5.download_era5_data(root.store, tmp_path / 'cache', area=area)
     assert 'last_month' not in root['era5'].attrs
     assert 'daily' not in root['era5']
     assert len(list((tmp_path / 'cache/era5').glob('*.nc'))) == 1
     broken = False
-    era5.download_era5_data(root, tmp_path / 'cache', area=area)
+    era5.download_era5_data(root.store, tmp_path / 'cache', area=area)
     assert len(cds_client.calls) == 7  # six successful parts; first reused from cache after failure
     readonly = zarr.open_group(str(tmp_path / 'store'), mode='r')
     result = get_era5_data(
-        root=readonly,
+        store=readonly.store,
         begin=date(2000, 1, 1),
         end=date(2000, 1, 1),
         coords=Coords(55.3, 37.2),

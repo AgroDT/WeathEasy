@@ -7,9 +7,10 @@ import pytest
 import xarray as xr
 import zarr
 from httpx2 import Client
-from zarr.storage import StoreLike
+from zarr.abc.store import Store
 
 from weatheasy import Coords, const, download, get_cfs2_data, get_cmip6_data
+from weatheasy.storage import get_store
 from weatheasy.util import get_storage
 
 
@@ -45,17 +46,27 @@ def test_cmip6_download_getter_resume_and_cli(
 
     monkeypatch.setattr(download, '_load_cmip6_dataset', load)
     root = get_storage(str(tmp_path / 'data'))
-    download.download_cmip6_data(root)
-    download.download_cmip6_data(root)
+    download.download_cmip6_data(get_store(tmp_path / 'data'))
+    download.download_cmip6_data(root.store)
     assert calls == [2000]
     result = get_cmip6_data(
-        root=root,
+        store=root.store,
         begin=date(2000, 2, 28),
         end=date(2000, 3, 1),
         coords=Coords(55.125, 0.125),
         variables=['tas'],
     )
     np.testing.assert_allclose(result, [[283.15, 290, 283.15]])
+    np.testing.assert_allclose(
+        get_cmip6_data(
+            store=get_store(tmp_path / 'data'),
+            begin=date(2000, 2, 28),
+            end=date(2000, 3, 1),
+            coords=Coords(55.125, 0.125),
+            variables=['tas'],
+        ),
+        [[283.15, 290, 283.15]],
+    )
     from weatheasy.__main__ import main
 
     target = tmp_path / 'result.csv'
@@ -166,11 +177,11 @@ def test_cfs2_public_download_extrema_missing_and_resume(
 
     monkeypatch.setattr(download, '_download_cfs2_forecast', forecast)
     root = get_storage(str(tmp_path / 'data'))
-    download.download_cfs2_data(root)
-    download.download_cfs2_data(root)
+    download.download_cfs2_data(get_store(tmp_path / 'data'))
+    download.download_cfs2_data(root.store)
     assert calls == [date(2026, 9, 18)]
     result = get_cfs2_data(
-        root=root,
+        store=root.store,
         begin=date(2026, 9, 18),
         end=date(2026, 9, 19),
         coords=Coords(55, 0),
@@ -185,7 +196,15 @@ def test_cfs2_public_download_extrema_missing_and_resume(
         target.attrs['write_state'] = 'writing'
         with pytest.raises(StorageError, match='completed'):
             get_cfs2_data(
-                root=root,
+                store=root.store,
+                begin=date(2026, 9, 18),
+                end=date(2026, 9, 18),
+                coords=Coords(55, 0),
+                variables=['TMP'],
+            )
+        with pytest.raises(StorageError, match='completed'):
+            get_cfs2_data(
+                store=get_store(tmp_path / 'data'),
                 begin=date(2026, 9, 18),
                 end=date(2026, 9, 18),
                 coords=Coords(55, 0),
@@ -193,6 +212,17 @@ def test_cfs2_public_download_extrema_missing_and_resume(
             )
         target.attrs.clear()
     np.testing.assert_allclose(result, expected, atol=1e-4)
+    np.testing.assert_allclose(
+        get_cfs2_data(
+            store=get_store(tmp_path / 'data'),
+            begin=date(2026, 9, 18),
+            end=date(2026, 9, 19),
+            coords=Coords(55, 0),
+            variables=['TMP', 'TMIN', 'TMAX', 'RH'],
+        ),
+        expected,
+        atol=1e-4,
+    )
     check_forecast_replacement(root, monkeypatch, missing_reanalysis)
 
 
@@ -208,7 +238,7 @@ def check_forecast_replacement(
     monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 9, 23, tzinfo=UTC))
 
     def fail_second_grid(
-        store: StoreLike,
+        store: Store,
         group: str,
         dataset: xr.Dataset,
     ):
@@ -222,13 +252,13 @@ def check_forecast_replacement(
 
     monkeypatch.setattr(download, 'write_batch', fail_second_grid)
     with pytest.raises(OSError, match='second-grid'):
-        download.download_cfs2_data(root)
+        download.download_cfs2_data(root.store)
     assert const.CFS2_KEY_UPDATED not in root['cfs2'].attrs
     from weatheasy.error import CFS2Error
 
     with pytest.raises(CFS2Error):
         get_cfs2_data(
-            root=root,
+            store=root.store,
             begin=date(2026, 9, 23),
             end=date(2026, 9, 23),
             coords=Coords(55, 0),
@@ -242,7 +272,7 @@ def check_forecast_replacement(
             >= previous_reanalysis_attrs['committed_length']  # ty: ignore[unsupported-operator]
         )
     monkeypatch.setattr(download, 'write_batch', original_write)
-    download.download_cfs2_data(root)
+    download.download_cfs2_data(root.store)
     assert root['cfs2'].attrs['updated'] == '2026-09-23'
     assert set(root.get_group('cfs2/forecast').group_keys()) == {'flx', 'pgb'}
     # Direct consumers use a permanent group path; no pointer lookup is needed.
@@ -251,7 +281,7 @@ def check_forecast_replacement(
     ) as direct:
         np.testing.assert_allclose(direct.TMP.to_numpy(), 16.85, atol=1e-4)
     actual = get_cfs2_data(
-        root=root,
+        store=root.store,
         begin=date(2026, 9, 23),
         end=date(2026, 9, 23),
         coords=Coords(55, 0),
@@ -293,7 +323,9 @@ def test_http_prepared_data_uses_getter_without_prepare_imports(
     monkeypatch.setattr(
         controller,
         'get_config',
-        lambda: SimpleNamespace(storage=root, format_float=float_formatter_factory('null', 6)),
+        lambda: SimpleNamespace(
+            storage=get_store(tmp_path / 'store'), format_float=float_formatter_factory('null', 6)
+        ),
     )
     monkeypatch.setitem(sys.modules, 'cfgrib', None)
     monkeypatch.setitem(sys.modules, 'eccodes', None)

@@ -11,13 +11,14 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
-import zarr
 
 from weatheasy import Coords, get_era5_data
+from weatheasy.storage import group_exists, open_dataset, pristine_group
 
 
 if TYPE_CHECKING:
     from numpy.typing import ArrayLike, NDArray
+    from zarr.abc.store import Store
 
 
 WeatherRecord = np.dtype(
@@ -117,7 +118,7 @@ def et0_fao56(
 
 def get_weather_data(
     *,
-    root: zarr.Group,
+    store: Store,
     latitude: float,
     longitude: float,
     altitude: float,
@@ -135,16 +136,17 @@ def get_weather_data(
     precipitation threshold and nonpositive ET0 -> NaN policy are preserved.
     """
     available: set[str] = set()
-    if use_corrected and 'era5/correction' in root:
-        correction = root['era5/correction']
-        if not isinstance(correction, zarr.Group):
-            msg = 'era5/correction must be a Zarr group'
-            raise TypeError(msg)
-        available = set(correction.array_keys())
+    if (
+        use_corrected
+        and group_exists(store, 'era5/correction')
+        and not pristine_group(store, 'era5/correction')
+    ):
+        with open_dataset(store, 'era5/correction') as correction:
+            available = {str(name) for name in correction.data_vars}
     tmp_var = 'TMP_corr' if 'TMP_corr' in available else 'TMP'
     prate_var = 'PRATE_corr' if 'PRATE_corr' in available else 'PRATE'
     raw = get_era5_data(
-        root=root,
+        store=store,
         begin=start,
         end=end,
         coords=Coords(latitude, longitude),

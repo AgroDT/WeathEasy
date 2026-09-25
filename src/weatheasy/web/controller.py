@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import date
 
-    import zarr
     from numpy.typing import NDArray
+    from zarr.abc.store import Store
 
     from weatheasy.util import FormatFloat
 
@@ -38,8 +38,8 @@ async def get_data(getter: Getter, query: DataQuery) -> StreamingResponse:
     return StreamingResponse(content, media_type='application/json')
 
 
-def _exec_getter(getter: Getter, query: DataQuery, root: zarr.Group):
-    data = getter(**query, root=root)
+def _exec_getter(getter: Getter, query: DataQuery, store: Store):
+    data = getter(**query, store=store)
     return data.transpose()
 
 

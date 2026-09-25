@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from weatheasy import Coords, const, get_cfs2_data, get_cmip6_data, get_era5_data
-from weatheasy.util import float_formatter_factory, get_storage, init_parser
+from weatheasy.storage import get_store
+from weatheasy.util import float_formatter_factory, init_parser
 
 
 if TYPE_CHECKING:
@@ -100,13 +101,13 @@ def _run(args: Namespace):
         raise RuntimeError
 
     format_float = float_formatter_factory('NA', args.precision)
-    root = get_storage(args.data)
+    store = get_store(args.data)
     begin: date = args.begin
     end: date = args.end
     coords = Coords(latitude=args.latitude, longitude=args.longitude)
     variables: list[str] = args.variables
     data = func(
-        root=root,
+        store=store,
         begin=begin,
         end=end,
         coords=coords,

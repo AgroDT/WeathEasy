@@ -185,7 +185,7 @@ def test_correction_append_and_rebuild_resets_progress(
         assert ds.sizes['time'] == 2
         assert ds.PRATE_corr.attrs['units'] == 'mm/day'
     result = get_era5_data(
-        root=root,
+        store=root.store,
         begin=first,
         end=first,
         coords=Coords(55.5, 37.5),
@@ -205,7 +205,7 @@ def test_cfs_cropped_correction_has_own_grid(tmp_path: Path, monkeypatch: pytest
     stub_models(monkeypatch)
     assert apply.correct_store(CFS2, root, tmp_path, tmp_path / 'dem.nc') == 2
     inside = get_cfs2_data(
-        root=root,
+        store=root.store,
         begin=first,
         end=first,
         coords=Coords(55, 37),
@@ -213,7 +213,7 @@ def test_cfs_cropped_correction_has_own_grid(tmp_path: Path, monkeypatch: pytest
     )
     np.testing.assert_allclose(inside[:, 0], [10, 8, 5])
     outside = get_cfs2_data(
-        root=root,
+        store=root.store,
         begin=first,
         end=first,
         coords=Coords(40, 18),
@@ -222,7 +222,7 @@ def test_cfs_cropped_correction_has_own_grid(tmp_path: Path, monkeypatch: pytest
     np.testing.assert_allclose(outside, [[10]])
     with pytest.raises(CoordsError):
         get_cfs2_data(
-            root=root,
+            store=root.store,
             begin=first,
             end=first,
             coords=Coords(40, 18),
@@ -245,7 +245,7 @@ def test_cfs_correction_resumes_across_missing_calendar_day(
             [np.datetime64(first), np.datetime64(first + timedelta(days=2))],
         )
     result = get_cfs2_data(
-        root=root,
+        store=root.store,
         begin=first,
         end=first + timedelta(days=2),
         coords=Coords(55, 37),

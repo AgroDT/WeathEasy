@@ -20,12 +20,22 @@ import numpy as np
 import xarray as xr
 
 from weatheasy import const
-from weatheasy.storage import StorageError, last_date, open_dataset, prepare_dataset, write_batch
+from weatheasy.storage import (
+    StorageError,
+    group_attrs,
+    group_exists,
+    last_date,
+    open_dataset,
+    prepare_dataset,
+    set_group_attrs,
+    write_batch,
+)
 from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
-    import zarr
+    from zarr.abc.store import Store
+
 
 EXTRA = {
     'd2m': '2m_dewpoint_temperature',
@@ -68,14 +78,13 @@ def next_month(value: date) -> date:
     return date(value.year + (value.month == 12), value.month % 12 + 1, 1)
 
 
-def available_period(root: zarr.Group) -> tuple[date, date]:
+def available_period(store: Store) -> tuple[date, date]:
     """Return the committed time range, including incomplete years.
 
     last_month is a convenience marker. A crash after committing data but before
     updating that marker must neither hide data nor cause a duplicate append.
     """
-    path = '/'.join(filter(None, (root.path, const.ERA5_DIR, 'daily')))
-    with open_dataset(root.store, path) as ds:
+    with open_dataset(store, f'{const.ERA5_DIR}/daily') as ds:
         times = ds.time.to_numpy().astype('datetime64[D]')
         first = date.fromisoformat(str(times[0]))
         last = date.fromisoformat(str(times[-1]))
@@ -83,7 +92,7 @@ def available_period(root: zarr.Group) -> tuple[date, date]:
 
 
 def download_era5_data(
-    root: zarr.Group,
+    store: Store,
     download_dir: Path | None = None,
     *,
     area: tuple[float, float, float, float] | None = None,
@@ -101,18 +110,18 @@ def download_era5_data(
     ):
         msg = 'Invalid ERA5 area (north, west, south, east)'
         raise StorageError(msg)
-    if const.ERA5_DIR in root:
-        existing = root[const.ERA5_DIR]
-        if existing.attrs.get('request_area') != list(area):
-            msg = 'Existing ERA5 store has a different requested area'
-            raise StorageError(msg)
-    group = root.require_group(const.ERA5_DIR)
-    group.attrs['request_area'] = list(area)
-    previous = last_date(root.store, group.path + '/daily')
+    if group_exists(store, const.ERA5_DIR) and group_attrs(store, const.ERA5_DIR).get(
+        'request_area'
+    ) != list(area):
+        msg = 'Existing ERA5 store has a different requested area'
+        raise StorageError(msg)
+    set_group_attrs(store, const.ERA5_DIR, request_area=list(area))
+    path = f'{const.ERA5_DIR}/daily'
+    previous = last_date(store, path)
     first = next_month(previous) if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
     latest = utc_now().date() - 5 * const.ONE_DAY
     if previous:
-        group.attrs['last_month'] = [previous.year, previous.month]
+        set_group_attrs(store, const.ERA5_DIR, last_month=[previous.year, previous.month])
     if next_month(first) > latest:
         return
     try:
@@ -135,8 +144,8 @@ def download_era5_data(
             # write_batch checks exact normalized axes, CRS, fields and units
             # before changing any existing arrays, even for equal-sized regions.
             ds.attrs['request_area'] = list(area)
-            write_batch(root.store, group.path + '/daily', ds)
-            group.attrs['last_month'] = [first.year, first.month]
+            write_batch(store, path, ds)
+            set_group_attrs(store, const.ERA5_DIR, last_month=[first.year, first.month])
             first = following
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from rasterio.coords import BoundingBox
@@ -14,7 +14,13 @@ from weatheasy.error import (
     DateRangeError,
     ERA5DateRangeError,
 )
-from weatheasy.storage import StorageError, open_dataset, select_point
+from weatheasy.storage import (
+    StorageError,
+    group_attrs,
+    open_dataset,
+    pristine_group,
+    select_point,
+)
 
 
 try:
@@ -28,8 +34,8 @@ except ImportError:
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    import zarr
     from numpy.typing import NDArray
+    from zarr.abc.store import Store
 
 
 class Coords(NamedTuple):
@@ -39,7 +45,7 @@ class Coords(NamedTuple):
 
 def get_cfs2_data(  # noqa: C901
     *,
-    root: zarr.Group,
+    store: Store,
     begin: date,
     end: date,
     coords: Coords,
@@ -48,7 +54,7 @@ def get_cfs2_data(  # noqa: C901
     """Read prepared daily fields; PRATE and PRATE_corr are returned in mm/day."""
     _check_date_range(begin, end)
     try:
-        updated = root[const.CFS2_DIR].attrs[const.CFS2_KEY_UPDATED]
+        updated = group_attrs(store, const.CFS2_DIR)[const.CFS2_KEY_UPDATED]
     except KeyError as err:
         raise CFS2Error from err
     boundary = date.fromisoformat(str(updated)) - const.CFS2_REANALYSIS_LAST_DATE_OFFSET
@@ -64,14 +70,12 @@ def get_cfs2_data(  # noqa: C901
             if not selected:
                 continue
             path = f'cfs2/{kind}/{grid}'
-            if kind == 'reanalysis':
-                target = cast('zarr.Group', root[path])
-                # The loader creates empty groups before trying source files.
-                # Only pristine groups mean no data; incomplete/corrupt stores
-                # must still fail validation in open_dataset.
-                if not target.attrs and not any(target.keys()):
-                    continue
-            values = _read_point(root, path, first, last, coords, selected)
+            # The loader creates empty groups before trying source files.
+            # Only pristine groups mean no data; incomplete/corrupt stores
+            # must still fail validation in open_dataset.
+            if kind == 'reanalysis' and pristine_group(store, path):
+                continue
+            values = _read_point(store, path, first, last, coords, selected)
             offset = (first - begin).days
             for index, variable in enumerate(selected):
                 result[variables.index(variable), offset : offset + values.shape[1]] = values[index]
@@ -79,7 +83,7 @@ def get_cfs2_data(  # noqa: C901
             corrected = [var for var in variables if var in ('TMP_corr', 'PRATE_corr')]
             if corrected:
                 values = _read_point(
-                    root,
+                    store,
                     'cfs2/reanalysis/correction',
                     first,
                     last,
@@ -96,7 +100,7 @@ def get_cfs2_data(  # noqa: C901
 
 def get_cmip6_data(
     *,
-    root: zarr.Group,
+    store: Store,
     begin: date,
     end: date,
     coords: Coords,
@@ -111,7 +115,7 @@ def get_cmip6_data(
             raise CMIP6DateRangeError(value, first, last)
     result = np.stack(
         [
-            _read_point(root, f'cmip6/{variable}', begin, end, coords, [variable])[0]
+            _read_point(store, f'cmip6/{variable}', begin, end, coords, [variable])[0]
             for variable in variables
         ]
     )
@@ -120,7 +124,7 @@ def get_cmip6_data(
 
 def get_era5_data(
     *,
-    root: zarr.Group,
+    store: Store,
     begin: date,
     end: date,
     coords: Coords,
@@ -131,7 +135,7 @@ def get_era5_data(
     from weatheasy.era5 import available_period  # noqa: PLC0415
 
     _check_date_range(begin, end)
-    first, last = available_period(root)
+    first, last = available_period(store)
     for value in (begin, end):
         if not first <= value <= last:
             raise ERA5DateRangeError(value, first, last)
@@ -140,7 +144,7 @@ def get_era5_data(
     result = np.full((len(variables), (end - begin).days + 1), np.nan, np.float32)
     for group, selected in (('era5/daily', raw), ('era5/correction', corrected)):
         if selected:
-            values = _read_point(root, group, begin, end, coords, selected)
+            values = _read_point(store, group, begin, end, coords, selected)
             for index, variable in enumerate(selected):
                 result[variables.index(variable)] = values[index]
     return _daily_precipitation(result, variables, 'PRATE', 86400)
@@ -158,7 +162,7 @@ def _daily_precipitation(
 
 
 def _read_point(  # noqa: PLR0917
-    root: zarr.Group,
+    store: Store,
     group: str,
     begin: date,
     end: date,
@@ -166,7 +170,7 @@ def _read_point(  # noqa: PLR0917
     variables: Sequence[str],
 ):
     dates = np.arange(np.datetime64(begin), np.datetime64(end) + np.timedelta64(1, 'D'))
-    with open_dataset(root.store, '/'.join(filter(None, (root.path, group)))) as dataset:
+    with open_dataset(store, group) as dataset:
         try:
             point = select_point(dataset, latitude=coords.latitude, longitude=coords.longitude)
         except StorageError as err:

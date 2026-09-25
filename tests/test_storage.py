@@ -10,7 +10,7 @@ import pytest
 import xarray as xr
 import zarr
 from rasterio import CRS
-from zarr.storage import FsspecStore, MemoryStore, StoreLike
+from zarr.storage import FsspecStore, LocalStore, MemoryStore, StoreLike
 
 from weatheasy.storage import (
     StorageError,
@@ -53,7 +53,7 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
     ds = field()
     ds.TMP.data[0, 0, 0] = np.nan
     path = tmp_path / 'weather.zarr'
-    write_batch(path, 'cmip6/ACCESS-CM2/historical/r1i1p1f1', ds, tile_size=2)
+    write_batch(get_store(path), 'cmip6/ACCESS-CM2/historical/r1i1p1f1', ds, tile_size=2)
     with xr.open_zarr(
         path,
         group='cmip6/ACCESS-CM2/historical/r1i1p1f1',
@@ -187,7 +187,8 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pyt
 
 def test_zarr_read_does_not_import_grib_decoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     path = tmp_path / 'prepared.zarr'
-    write_batch(path, 'grid', field())
+    store = get_store(path)
+    write_batch(store, 'grid', field())
     original = builtins.__import__
 
     def reject_decoder(name: str, *args, **kwargs):
@@ -197,7 +198,7 @@ def test_zarr_read_does_not_import_grib_decoder(tmp_path: Path, monkeypatch: pyt
         return original(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, '__import__', reject_decoder)
-    assert open_dataset(path, 'grid').TMP.sel(latitude=55.375, longitude=0.375).item() == 3
+    assert open_dataset(store, 'grid').TMP.sel(latitude=55.375, longitude=0.375).item() == 3
 
 
 def test_local_uri_needs_no_s3_dependency(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -211,8 +212,11 @@ def test_local_uri_needs_no_s3_dependency(tmp_path: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(builtins, '__import__', reject_s3fs)
     path = tmp_path / 'prepared.zarr'
-    assert get_store(path) == path
-    assert get_store(str(path)) == str(path)
+    local = get_store(path)
+    from_string = get_store(str(path))
+    assert isinstance(local, LocalStore)
+    assert isinstance(from_string, LocalStore)
+    assert local.root == from_string.root == path
 
 
 def test_s3_uri_reuses_supplied_filesystem_without_network():
@@ -225,7 +229,6 @@ def test_s3_uri_reuses_supplied_filesystem_without_network():
     assert weather.fs is dem.fs is filesystem
     assert weather.path == 'weather-bucket/zarr'
     assert dem.path == 'weather-bucket/dem.zarr'
-    assert get_store(weather) is weather
 
 
 def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
@@ -259,7 +262,8 @@ def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
 
     monkeypatch.setattr(zarr, 'open_group', open_group)
     monkeypatch.setattr(xr, 'open_zarr', open_zarr)
-    result = open_dataset('s3://weather-bucket/zarr', 'era5/daily', filesystem=filesystem)
+    store = get_store('s3://weather-bucket/zarr', filesystem=filesystem)
+    result = open_dataset(store, 'era5/daily')
     assert result.TMP.sel(latitude=55.375, longitude=0.375).item() == 3
     assert len(seen) == 2
     assert seen[0] is seen[1]

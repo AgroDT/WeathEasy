@@ -62,7 +62,7 @@ def test_daily_getter_and_csv_units(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     root, name, _ = weather_store(tmp_path, source)
     getter = {'cfs2': get_cfs2_data, 'era5': get_era5_data, 'cmip6': get_cmip6_data}[source]
-    result = getter(root=root, begin=BEGIN, end=END, coords=Coords(55, 37), variables=[name])
+    result = getter(store=root.store, begin=BEGIN, end=END, coords=Coords(55, 37), variables=[name])
     np.testing.assert_allclose(result, [[8, np.nan, 2]])
     target = tmp_path / 'result.csv'
     argv = [
@@ -108,7 +108,9 @@ def test_http_precipitation_units_and_response_shape(
     monkeypatch.setattr(
         controller,
         'get_config',
-        lambda: SimpleNamespace(storage=root, format_float=float_formatter_factory('null', 6)),
+        lambda: SimpleNamespace(
+            storage=root.store, format_float=float_formatter_factory('null', 6)
+        ),
     )
 
     async def query():
@@ -139,7 +141,7 @@ def test_raw_and_corrected_precipitation_have_same_units(tmp_path: Path, source:
     write_batch(root.store, correction_path, corrected)
     getter = get_cfs2_data if source == 'cfs2' else get_era5_data
     values = getter(
-        root=root,
+        store=root.store,
         begin=BEGIN,
         end=BEGIN,
         coords=Coords(55, 37),
