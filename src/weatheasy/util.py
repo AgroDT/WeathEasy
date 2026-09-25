@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import zarr
+from zarr.storage import FsspecStore
 
 from weatheasy.error import S3ImportError
 
@@ -37,21 +38,21 @@ def get_storage(root: str) -> zarr.Group:
     - etc.
     """
 
-    store: str | zarr.storage.FsspecStore
+    store: str | FsspecStore
     if root.startswith('s3://'):
         try:
             import s3fs
         except ImportError as exc:
             raise S3ImportError from exc
         else:
-            store = zarr.storage.FsspecStore(s3fs.S3FileSystem(asynchronous=True), path=root[5:])
+            store = FsspecStore(s3fs.S3FileSystem(asynchronous=True), path=root[5:])
     else:
         store = root
 
     return zarr.open_group(store, mode='a', zarr_format=3)
 
 
-def init_parser(module: str = __package__) -> ArgumentParser:
+def init_parser(module: str = 'weatheasy') -> ArgumentParser:
     parser = ArgumentParser(module, formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument('-v', '--version', action='version', version=_version)
     parser.add_argument(

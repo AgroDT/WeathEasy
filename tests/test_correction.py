@@ -427,7 +427,7 @@ def test_station_terrain_enrichment_and_source_units(tmp_path):
         }
     )
     lats, lons = ERA5.grid(root)
-    dem = {
+    dem: features.Dem = {
         'lats': lats,
         'lons': lons,
         'elevation': np.full((len(lats), len(lons)), 150, np.float32),

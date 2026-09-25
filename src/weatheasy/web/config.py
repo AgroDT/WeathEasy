@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     def storage(self) -> zarr.Group:
         return get_storage(self.data_root)
 
-    @computed_field  # type: ignore[prop-decorator]
+    @computed_field
     @cached_property
     def format_float(self) -> FormatFloat:
         return float_formatter_factory('null', self.precision)
@@ -31,4 +31,4 @@ class Settings(BaseSettings):
 
 @cache
 def get_config() -> Settings:
-    return Settings()  # type: ignore[call-arg]  # Loaded from environment by BaseSettings.
+    return Settings()

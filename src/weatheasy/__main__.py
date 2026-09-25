@@ -132,7 +132,7 @@ def _run(args: Namespace):
             date_ += const.ONE_DAY
             for cell in row:
                 f.write(',')
-                f.write(format_float(cell))  # type: ignore[arg-type]
+                f.write(format_float(cell))
             f.write('\n')
 
 

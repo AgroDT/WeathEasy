@@ -1,5 +1,5 @@
-from collections.abc import Callable
 from datetime import date, timedelta
+from types import FunctionType
 from typing import NamedTuple
 
 import numpy as np
@@ -11,7 +11,7 @@ class VarInfo(NamedTuple):
 
 
 class Cfs2Variable(NamedTuple):
-    daily_stat: Callable
+    daily_stat: FunctionType
     info: VarInfo
 
 
@@ -253,7 +253,7 @@ class Era5Var(NamedTuple):
     cds_name: str  # CDS API variable name
     nc_name: str  # NetCDF short name in downloaded file
     accumulated: bool  # True: daily value = 00:00 UTC of the following day × scale
-    daily_stat: Callable | None  # for instantaneous: np.mean / np.max / np.min
+    daily_stat: FunctionType | None  # for instantaneous: np.mean / np.max / np.min
     scale: float  # unit conversion multiplier
     offset: float  # unit conversion offset (applied after scale)
     info: VarInfo

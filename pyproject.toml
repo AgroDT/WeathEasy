@@ -29,11 +29,11 @@ dependencies = [
 [dependency-groups]
 dev = [
     "joblib-stubs>=1.5.3.1.20260117",
-    "mypy~=1.11",
     "pandas-stubs>=3.0.5.260914",
     "pytest>=8.3,<9",
     "ruff~=0.7",
     "scipy-stubs>=1.18.1.1",
+    "ty>=0.0.84,<1",
     "types-requests~=2.32",
 ]
 
@@ -79,17 +79,6 @@ path = "src/weatheasy/_version.py"
 template = '''
 version = "{version}"
 '''
-
-[[tool.mypy.overrides]]
-module = [
-    "netCDF4.*",
-    "cfgrib.*",
-    "cdsapi.*",
-    "rasterio.*",
-    "s3fs.*",
-    "zarr.*",
-]
-ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py312"

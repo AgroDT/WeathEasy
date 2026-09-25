@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -6,6 +7,10 @@ import xarray as xr
 
 from weatheasy import Coords, const, download, get_cfs2_data, get_cmip6_data
 from weatheasy.util import get_storage
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterable
 
 
 @pytest.mark.parametrize('hour', [0, 12])
@@ -274,7 +279,7 @@ def test_http_prepared_data_uses_getter_without_prepare_imports(tmp_path, monkey
                 'variables': ['tas'],
             }
         )
-        chunks = [chunk async for chunk in response.body_iterator]
+        chunks = [chunk async for chunk in cast('AsyncIterable[str]', response.body_iterator)]
         return json.loads(''.join(chunks))
 
     assert asyncio.run(query()) == [{'tas': 280, 'date': '2000-01-01'}]

@@ -30,10 +30,10 @@ repos:
         entry: uv
         args: [run, --frozen, ruff, format, src]
         pass_filenames: false
-      - id: mypy
-        name: mypy
+      - id: ty
+        name: ty
         language: system
         entry: uv
-        args: [run, --frozen, mypy]
+        args: [run, --frozen, ty, check]
         files: ^src/
         types: [file, python]

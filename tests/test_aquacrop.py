@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import xarray as xr
 import zarr
+from numpy.typing import ArrayLike
 
 from weatheasy.aquacrop_adapter import (
     et0_fao56,
@@ -17,19 +18,34 @@ from weatheasy.storage import prepare_dataset, write_batch
 from weatheasy.util import get_storage
 
 
-# FAO-56 chapter 4, example 18, Uccle, July 6:
-# https://www.fao.org/4/x0490e/x0490e08.htm
-# Published ea/es are translated to equivalent RHmean (not RHmin/RHmax mean).
-UCCLE = {
-    't_min': 12.3,
-    't_max': 21.5,
-    't_mean': 16.9,
-    'rh_mean': 100 * 1.409 / 1.997,
-    'wind': 2.78,
-    'pressure': 100.1,
-    'rs': 22.07,
-    'rs0': 30.90,
-}
+def _et0_fao56_for_uccle(
+    *,
+    t_min: ArrayLike = 12.3,
+    t_max: ArrayLike = 21.5,
+    t_mean: ArrayLike = 16.9,
+    rh_mean: ArrayLike = 100 * 1.409 / 1.997,
+    wind: ArrayLike = 2.78,
+    pressure: ArrayLike = 100.1,
+    rs: ArrayLike = 22.07,
+    rs0: ArrayLike = 30.90,
+    wind_height: float = 10,
+):
+    """FAO-56 chapter 4, example 18, Uccle, July 6: https://www.fao.org/4/x0490e/x0490e08.htm.
+
+    Published ea/es are translated to equivalent RHmean (not RHmin/RHmax mean).
+    """
+
+    return et0_fao56(
+        t_min=t_min,
+        t_max=t_max,
+        t_mean=t_mean,
+        rh_mean=rh_mean,
+        wind=wind,
+        pressure=pressure,
+        rs=rs,
+        rs0=rs0,
+        wind_height=wind_height,
+    )
 
 
 def test_published_fao_examples():
@@ -37,21 +53,19 @@ def test_published_fao_examples():
     # https://www.fao.org/4/x0490e/x0490e07.htm
     assert extraterrestrial_radiation(-20, 246) == pytest.approx(32.2, abs=0.05)
     assert net_longwave_radiation(19.1, 25.1, 2.1, 14.5, 18.8) == pytest.approx(3.5, abs=0.05)
-    assert et0_fao56(**UCCLE) == pytest.approx(3.88, abs=0.02)
+    assert _et0_fao56_for_uccle() == pytest.approx(3.88, abs=0.02)
     assert extraterrestrial_radiation(50.8, 187) == pytest.approx(41.09, abs=0.02)
 
 
-def test_arrays_mean_wind_height_and_nan():
-    scalar = et0_fao56(**UCCLE)
-    result = et0_fao56(**(UCCLE | {'t_mean': [16.9, 23, np.nan]}))
+def test_arrays_mean_wind_height():
+    scalar = _et0_fao56_for_uccle()
+    result = _et0_fao56_for_uccle(t_mean=[16.9, 23, np.nan])
     assert result.shape == (3,)
     assert result[0] == scalar
     assert result[1] != scalar
     assert np.isnan(result[2])
     # FAO example 18 explicitly gives 2.078 m/s at 2 m from 2.78 m/s at 10 m.
-    assert et0_fao56(**(UCCLE | {'wind': 2.078}), wind_height=2) == pytest.approx(scalar, abs=0.002)
-    for key in UCCLE:
-        assert np.isnan(et0_fao56(**(UCCLE | {key: np.nan})))
+    assert _et0_fao56_for_uccle(wind=2.078, wind_height=2) == pytest.approx(scalar, abs=0.002)
 
 
 def test_cloud_factor_and_polar_radiation():
@@ -62,8 +76,8 @@ def test_cloud_factor_and_polar_radiation():
     np.testing.assert_allclose(extraterrestrial_radiation(90, [1, 355]), 0)
     assert extraterrestrial_radiation(90, 172) > 0
     assert extraterrestrial_radiation(-90, 172) == 0
-    assert np.isfinite(et0_fao56(**(UCCLE | {'rs0': 0, 'rs': 0})))
-    assert np.isfinite(et0_fao56(**(UCCLE | {'rs0': 1e-15})))
+    assert np.isfinite(_et0_fao56_for_uccle(rs0=0, rs=0))
+    assert np.isfinite(_et0_fao56_for_uccle(rs0=1e-15))
 
 
 def weather_store(tmp_path, correction=()):
@@ -150,22 +164,16 @@ def test_adapter_units_independent_fallback_and_readonly(tmp_path, correction):
     np.testing.assert_allclose(actual.tmax, 21.5)
     assert actual.dtype.names == ('tmin', 'tmax', 'pr', 'et0')
     if 'TMP_corr' in correction:
-        corrected_et0 = et0_fao56(
-            **(UCCLE | {'t_mean': 23, 'rs0': 0.752 * extraterrestrial_radiation(50.8, 59)})
+        corrected_et0 = _et0_fao56_for_uccle(
+            t_mean=23,
+            rs0=0.752 * extraterrestrial_radiation(50.8, 59),
         )
         assert actual.et0[0] == pytest.approx(corrected_et0)
         assert np.isnan(actual.et0[1])  # Existing corrected NaN never falls back to raw.
     else:
         np.testing.assert_allclose(actual.et0, raw.et0)
     # Verify pressure/radiation conversions and leap/month day ordering through real getter.
-    expected = et0_fao56(
-        **(
-            UCCLE
-            | {
-                'rs0': 0.752 * extraterrestrial_radiation(50.8, [59, 60, 61, 62]),
-            }
-        )
-    )
+    expected = _et0_fao56_for_uccle(rs0=0.752 * extraterrestrial_radiation(50.8, [59, 60, 61, 62]))
     np.testing.assert_allclose(raw.et0, np.where(expected > 0, expected, np.nan), rtol=1e-6)
 
 

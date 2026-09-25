@@ -21,16 +21,19 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import rioxarray
 import xarray as xr
 import zarr
+from xarray.coding.times import decode_cf_datetime
 
 
 if TYPE_CHECKING:
-    from rasterio.crs import CRS
+    from collections.abc import Hashable
+
+    from rasterio import CRS
     from zarr.core.metadata import ArrayV3Metadata
     from zarr.storage import StoreLike
 
@@ -190,8 +193,8 @@ def write_batch(store: StoreLike, group: str, dataset: xr.Dataset, *, tile_size:
             raise StorageError(msg)
         if count:
             # Validate incoming dates before any recovery/mutation.
-            time_array = cast('zarr.Array', target['time'])
-            last = xr.coding.times.decode_cf_datetime(
+            time_array = target.get_array('time')
+            last = decode_cf_datetime(
                 time_array[count - 1 : count],
                 cast('str', time_array.attrs['units']),
                 cast('str', time_array.attrs['calendar']),
@@ -218,7 +221,7 @@ def write_batch(store: StoreLike, group: str, dataset: xr.Dataset, *, tile_size:
             write_empty_chunks=False,
         )
     else:
-        encoding = {
+        encoding: dict[Hashable, dict[str, Any]] = {
             name: {
                 'chunks': (
                     1,
@@ -248,14 +251,14 @@ def write_batch(store: StoreLike, group: str, dataset: xr.Dataset, *, tile_size:
             consolidated=False,
             write_empty_chunks=False,
         )
-    target = cast('zarr.Group', root[group])
+    target = root.get_group(group)
     target.attrs.update(committed_length=count + ds.sizes['time'], write_state='complete')
 
 
 def open_dataset(store: StoreLike, group: str) -> xr.Dataset:
     """Open a fully committed group without GRIB ingestion dependencies or Dask."""
     root = zarr.open_group(store, mode='r', zarr_format=3)
-    target = cast('zarr.Group', root[group])
+    target = root.get_group(group)
     if (
         target.attrs.get('storage_schema') != SCHEMA
         or target.attrs.get('write_state') != 'complete'
@@ -277,12 +280,12 @@ def last_date(store: StoreLike, group: str) -> date | None:
     root = zarr.open_group(store, mode='a', zarr_format=3)
     if group not in root:
         return None
-    target = cast('zarr.Group', root[group])
+    target = root.get_group(group)
     count = int(cast('int', target.attrs.get('committed_length', 0)))
     if not count:
         return None
-    times = cast('zarr.Array', target['time'])
-    value = xr.coding.times.decode_cf_datetime(
+    times = target.get_array('time')
+    value = decode_cf_datetime(
         times[count - 1 : count],
         cast('str', times.attrs['units']),
         cast('str', times.attrs['calendar']),

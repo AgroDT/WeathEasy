@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import date
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -12,6 +13,10 @@ import xarray as xr
 from weatheasy import Coords, get_cfs2_data, get_cmip6_data, get_era5_data
 from weatheasy.storage import open_dataset, prepare_dataset, write_batch
 from weatheasy.util import float_formatter_factory, get_storage
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterable
 
 
 BEGIN, END = date(2020, 2, 28), date(2020, 3, 1)
@@ -105,7 +110,8 @@ def test_http_precipitation_units_and_response_shape(tmp_path, monkeypatch, sour
         response = await controller.get_data(
             getter, {'begin': BEGIN, 'end': END, 'coords': Coords(55, 37), 'variables': [name]}
         )
-        return json.loads(''.join([chunk async for chunk in response.body_iterator]))
+        chunks = [chunk async for chunk in cast('AsyncIterable[str]', response.body_iterator)]
+        return json.loads(''.join(chunks))
 
     assert asyncio.run(query()) == [
         {name: 8, 'date': '2020-02-28'},

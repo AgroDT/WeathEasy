@@ -128,7 +128,7 @@ def download_cmip6_data(root: zarr.Group, download_dir: Path | None = None) -> N
                 write_batch(root.store, path, dataset)
 
 
-_MODULE_NAME = __package__ + '.download'
+_MODULE_NAME = 'weatheasy.download'
 _LAST = 'last'
 _LOG = logging.getLogger(_MODULE_NAME)
 _CFS2_DOWNLOADED_FILENAME_TEMPLATE = '{}{}{}.grb2'

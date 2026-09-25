@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import xarray as xr
 import zarr
-from rasterio.crs import CRS
+from rasterio import CRS
 from zarr.storage import MemoryStore
 
 from weatheasy.storage import (
@@ -63,7 +63,7 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path):
         np.testing.assert_array_equal(result.longitude, ds.longitude)
         np.testing.assert_array_equal(result.TMP, ds.TMP)
     root = zarr.open_group(path)
-    arr = root['cmip6/ACCESS-CM2/historical/r1i1p1f1/TMP']
+    arr = root.get_array('cmip6/ACCESS-CM2/historical/r1i1p1f1/TMP')
     assert arr.metadata.zarr_format == 3
     assert arr.metadata.dimension_names == ('time', 'latitude', 'longitude')
     assert arr.chunks == (1, 2, 2)
@@ -152,9 +152,10 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch):
     real_write = xr.Dataset.to_zarr
 
     def fail_after_partial_write(_self, *_args, **_kwargs):
-        target = zarr.open_group(store)['grid']
-        target['TMP'].resize((2, 2, 2))
-        target['TMP'][1] = 999
+        target = zarr.open_group(store).get_group('grid')
+        array = target.get_array('TMP')
+        array.resize((2, 2, 2))
+        array[1] = 999
         msg = 'Simulated interrupted upload'
         raise OSError(msg)
 

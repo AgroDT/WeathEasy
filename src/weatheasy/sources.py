@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import xarray as xr
-from rasterio.crs import CRS
+from rasterio import CRS
 
 from weatheasy.storage import StorageError, prepare_dataset
 
