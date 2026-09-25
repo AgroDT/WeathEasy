@@ -1,4 +1,5 @@
-from collections.abc import Mapping
+import sys
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,31 @@ def source(month: date, *, boundary: bool = False):
     return xr.Dataset(
         values, coords={'time': times, 'latitude': [55.3, 55.2], 'longitude': [37.1, 37.2, 37.3]}
     )
+
+
+class FakeCDSClient:
+    __slots__ = ('calls', 'transform')
+
+    def __init__(self) -> None:
+        self.calls = []
+        self.transform: Callable[[xr.Dataset, Mapping, int], xr.Dataset] | None = None
+
+    def retrieve(self, _dataset: xr.Dataset, request: Mapping):
+        assert len(request['variable']) <= 8
+        assert len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
+        self.calls.append(request)
+        month = date(int(request['year']), int(request['month']), 1)
+        ds = requested_source(month, request)
+        assert self.transform is not None
+        ds = self.transform(ds, request, len(self.calls))
+        return SimpleNamespace(download=ds.to_netcdf)
+
+
+@pytest.fixture
+def cds_client(monkeypatch: pytest.MonkeyPatch):
+    client = FakeCDSClient()
+    monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=lambda: client))
+    return client
 
 
 @pytest.mark.parametrize('month', [date(2000, 2, 1), date(2000, 12, 1)])
@@ -138,35 +164,19 @@ def test_boundary_and_timestamp_validation():
 def test_public_monthly_download_resume_getter_and_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cds_client: FakeCDSClient,
 ):
-    import sys
-
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
-    calls = []
-
-    class Client:
-        def retrieve(self, _dataset, request):  # noqa: ANN001
-            assert len(request['variable']) <= 8
-            assert (
-                len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
-            )
-            calls.append(request)
-            month = date(int(request['year']), int(request['month']), 1)
-            ds = requested_source(month, request)
-            return SimpleNamespace(
-                download=lambda path: ds.rename({'time': 'valid_time'}).to_netcdf(path)
-            )
-
-    monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=Client))
+    cds_client.transform = lambda ds, _request, _call: ds.rename({'time': 'valid_time'})
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
     era5.download_era5_data(root, tmp_path / 'cache', area=area)
-    assert len(calls) == 6
+    assert len(cds_client.calls) == 6
     assert root['era5'].attrs['last_month'] == [2000, 1]
     root['era5'].attrs['last_month'] = [1999, 12]  # crash before convenience marker
     era5.download_era5_data(root, tmp_path / 'cache', area=area)
-    assert len(calls) == 6
+    assert len(cds_client.calls) == 6
     assert root['era5'].attrs['last_month'] == [2000, 1]
     values = get_era5_data(
         root=root,
@@ -207,19 +217,17 @@ def test_public_monthly_download_resume_getter_and_cli(
     assert output.read_text() == 'DATE,WIND\n2000-01-31,5\n'
 
 
-def test_failed_month_and_append_recover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import sys
-
+def test_failed_month_and_append_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient
+):
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 3, 10, tzinfo=UTC))
-    monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=lambda: None))
     broken = True
 
-    def retrieve(_self, month, *, boundary):  # noqa: ANN001
-        ds = source(month, boundary=boundary)
-        return ds.isel(time=slice(0, 0)) if broken and month.month == 3 else ds
+    def corrupt_march(ds: xr.Dataset, request: Mapping, _call: int) -> xr.Dataset:
+        return ds.isel(time=slice(0, 0)) if broken and request['month'] == '03' else ds
 
-    monkeypatch.setattr(era5._Downloader, 'retrieve', retrieve)
+    cds_client.transform = corrupt_march
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='timestamps'):
@@ -245,22 +253,10 @@ def test_failed_month_and_append_recover(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_cache_includes_area(tmp_path: Path):
-    calls = []
-
-    class Client:
-        def retrieve(self, _dataset, request):  # noqa: ANN001
-            assert len(request['variable']) <= 8
-            assert (
-                len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
-            )
-            calls.append(request)
-            return SimpleNamespace(
-                download=lambda path: requested_source(date(2000, 1, 1), request).to_netcdf(path)
-            )
-
+    client = FakeCDSClient()
     for area in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
-        era5._Downloader(Client(), tmp_path, area).retrieve(date(2000, 1, 1), boundary=False)
-    assert len(calls) == 6
+        era5._Downloader(client, tmp_path, area).retrieve(date(2000, 1, 1), boundary=False)
+    assert len(client.calls) == 6
     assert len(list(tmp_path.glob('*.nc'))) == 6
 
 
@@ -327,27 +323,18 @@ def requested_source(month: date, request: Mapping):
 def test_partial_request_missing_variable_never_publishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cds_client: FakeCDSClient,
 ):
-    import sys
-
     import zarr
 
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
     broken = True
-    calls = []
 
-    class Client:
-        def retrieve(self, _dataset, request):  # noqa: ANN001
-            assert len(request['variable']) <= 8
-            calls.append(request)
-            month = date(int(request['year']), int(request['month']), 1)
-            ds = requested_source(month, request)
-            if broken and len(calls) == 2:
-                ds = ds.drop_vars(next(iter(ds.data_vars)))
-            return SimpleNamespace(download=ds.to_netcdf)
+    def drop_variable(ds: xr.Dataset, _request: Mapping, call: int) -> xr.Dataset:
+        return ds.drop_vars(next(iter(ds.data_vars))) if broken and call == 2 else ds
 
-    monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=Client))
+    cds_client.transform = drop_variable
     root = get_storage(str(tmp_path / 'store'))
     area = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='Missing ERA5'):
@@ -357,7 +344,7 @@ def test_partial_request_missing_variable_never_publishes(
     assert len(list((tmp_path / 'cache/era5').glob('*.nc'))) == 1
     broken = False
     era5.download_era5_data(root, tmp_path / 'cache', area=area)
-    assert len(calls) == 7  # six successful parts; first reused from cache after failure
+    assert len(cds_client.calls) == 7  # six successful parts; first reused from cache after failure
     readonly = zarr.open_group(str(tmp_path / 'store'), mode='r')
     result = get_era5_data(
         root=readonly,
