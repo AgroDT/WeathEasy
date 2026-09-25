@@ -41,9 +41,10 @@ s3 = [
     "s3fs~=2024.6",
 ]
 web = [
-    "fastapi-slim~=0.111",
-    "pydantic-settings~=2.3",
-    "uvicorn~=0.30",
+    "fastapi>=0.141",
+    "pydantic-settings~=2.15",
+    "uvicorn>=0.54",
+    "uvloop>=0.22.1; sys_platform != 'win32' and (sys_platform != 'cygwin' and platform_python_implementation != 'PyPy')",
 ]
 prepare = [
     "cdsapi>=0.7.7,<0.8",
