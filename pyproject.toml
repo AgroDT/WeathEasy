@@ -53,12 +53,12 @@ prepare = [
 ]
 correction = [
     "joblib>=1.4,<2",
-    "pandas>=2.2,<3",
+    "pandas>=3.0.6,<4",
     "scikit-learn>=1.5,<2",
     "xgboost>=2,<4",
 ]
 emdna = [
-    "pandas>=2.2,<3",
+    "pandas>=3.0.6,<4",
     "scipy>=1.14,<2",
 ]
 

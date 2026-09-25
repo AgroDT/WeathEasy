@@ -220,6 +220,7 @@ def build_temp_artifacts(
     joblib.dump(model, out / 'model.joblib')
     np.savez_compressed(
         out / 'seasonal_bias_grid.npz',
+        allow_pickle=False,
         **{f'month_{m}': seasonal[m] for m in range(1, 13)},
     )
     np.save(out / 'lats.npy', lats)

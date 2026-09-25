@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import StringIO
 from typing import TYPE_CHECKING
 
+import numpy as np
 from anyio import to_thread
 from fastapi.responses import StreamingResponse
 
@@ -15,7 +16,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import date
 
-    import numpy as np
     import zarr
     from numpy.typing import NDArray
 
@@ -67,7 +67,7 @@ def _row_formatter_factory(sio: StringIO, variables: Sequence[str], format_float
         sio.write('{')
         for var, val in zip(variables, row, strict=False):
             sio.write(f'"{var}":')
-            sio.write(format_float(val))
+            sio.write(format_float(np.float32(val)))
             sio.write(',')
         sio.write(f'"date":"{date_}"}}')
 

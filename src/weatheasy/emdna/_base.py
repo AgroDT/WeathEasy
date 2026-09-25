@@ -156,14 +156,17 @@ class EMDNABase(ABC):
         min_std: float = 0.1,
         chunk_size: int = 8000,
     ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-        target_pts = np.column_stack([self.grid_lats.ravel(), self.grid_lons.ravel()])
+        target_pts = np.column_stack([self.grid_lats.ravel(), self.grid_lons.ravel()]).astype(
+            np.float64
+        )
         n = len(target_pts)
         result = np.zeros(n, dtype=np.float32)
         uncertainty = np.full(n, 2.0, dtype=np.float32)
 
         for i in range(0, n, chunk_size):
             j = min(i + chunk_size, n)
-            for k, pt in enumerate(target_pts[i:j]):
+            for k in range(j - i):
+                pt = target_pts[i + k, :]
                 mask = self._select_stations(pt, coords)
                 dist = self._distances(pt, coords)[mask]
                 sel_y = anomalies[mask]
@@ -196,14 +199,17 @@ class EMDNABase(ABC):
     ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
         """Interpolate scalar values via locally weighted average; also returns uncertainty."""
         default = float(np.nanmean(values))
-        target_pts = np.column_stack([self.grid_lats.ravel(), self.grid_lons.ravel()])
+        target_pts = np.column_stack([self.grid_lats.ravel(), self.grid_lons.ravel()]).astype(
+            np.float64
+        )
         n = len(target_pts)
         result = np.full(n, default, dtype=np.float32)
         uncertainty = np.full(n, 0.2, dtype=np.float32)
 
         for i in range(0, n, chunk_size):
             j = min(i + chunk_size, n)
-            for k, pt in enumerate(target_pts[i:j]):
+            for k in range(j - i):
+                pt = target_pts[i + k, :]
                 mask = self._select_stations(pt, coords)
                 dist = self._distances(pt, coords)[mask]
                 sel = values[mask]
