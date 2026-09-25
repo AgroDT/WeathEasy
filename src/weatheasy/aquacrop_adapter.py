@@ -131,7 +131,7 @@ def get_weather_data(
     radiation. WIND is the prepared mean hourly speed at 10 m. Corrected mean
     temperature/precipitation are selected independently when their arrays exist;
     missing days in an existing corrected array remain NaN. Raw precipitation is
-    converted from kg/m²/s; PRATE_corr already contains mm/day. The donor's 1 mm
+    returned by the getter in mm/day, like PRATE_corr. The donor's 1 mm
     precipitation threshold and nonpositive ET0 -> NaN policy are preserved.
     """
     available: set[str] = set()
@@ -151,8 +151,6 @@ def get_weather_data(
         variables=['TMIN', 'TMAX', 'WIND', 'PRES', 'RH', 'DSWRF', tmp_var, prate_var],
     ).astype(np.float64)
     t_min, t_max, wind, pressure, humidity, solar, mean, precip = raw
-    if prate_var == 'PRATE':
-        precip = precip * 86400
     days = np.array(
         [(start + timedelta(days=index)).timetuple().tm_yday for index in range(raw.shape[1])]
     )

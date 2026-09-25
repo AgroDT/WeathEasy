@@ -83,8 +83,8 @@ CFS2_FLX_BANDS = {
         ru='Поток скрытого тепла, Вт/м²',
     )),
     'PRATE': Cfs2Variable(np.sum, VarInfo(
-        en='Precipitation Rate, kg/m²/s',
-        ru='Интенсивность осадков, кг/м²/с',
+        en='Daily precipitation, mm/day',
+        ru='Суточные осадки, мм/сутки',
     )),
     'PRES': Cfs2Variable(np.mean, VarInfo(
         en='Atmospheric Pressure, Pa',
@@ -213,7 +213,7 @@ CMIP6_VARS = {
         ru='',
     ),
     'pr': VarInfo(
-        en='Precipitation (mean of the daily precipitation rate), kg/m²/s',
+        en='Daily precipitation, mm/day',
         ru='',
     ),
     'rlds': VarInfo(
@@ -516,4 +516,5 @@ ERA5_DERIVED_INFO: dict[str, VarInfo] = {
 ERA5_ALL_VARS: dict[str, VarInfo] = {
     **{k: v.info for k, v in ERA5_VARS.items()},
     **ERA5_DERIVED_INFO,
+    'PRATE': VarInfo(en='Daily precipitation, mm/day', ru='Суточные осадки, мм/сутки'),
 }

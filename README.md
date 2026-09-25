@@ -345,3 +345,52 @@ and slopes remain zero pending DEM integration. The donor precipitation
 cross-correlation formula is preserved (including its reuse of prior state when
 `trange_scrf` is supplied); the CLI does not supply that optional field. Processing
 the full grid and ensemble holds arrays in memory; no Dask execution is provided.
+
+### Daily retrieval and precipitation units
+
+A date interval returns one row for **each day**, including both endpoints.
+Unavailable days remain missing (`NA` in CSV, `null` in JSON, `NaN` in Python).
+Hourly interpolation and weekly, monthly, yearly, or full-period weather
+aggregation are not provided in this version.
+
+The public Python getters, CLI CSV, and HTTP responses return precipitation in
+**mm/day** for every source: CFS2/ERA5 `PRATE`, CMIP6 `pr`, and `PRATE_corr`.
+This changes the numeric units of uncorrected precipitation returned by earlier
+versions. Consumers must no longer multiply getter results by 86400 or 21600.
+Column names, requested column order, and response shapes are unchanged.
+
+Native Zarr arrays retain their source units: CFS2 `PRATE` is the sum of four
+six-hour rates (multiply by 21600 for mm/day); ERA5 `PRATE` and CMIP6 `pr` are
+rates (multiply by 86400). Corrected precipitation is already mm/day. Direct
+xarray/Zarr consumers must account for this difference from public retrieval.
+Other units retain their existing source contracts: CMIP6 temperature is K,
+CFS2/ERA5 temperature is °C; CFS2 pressure is Pa, ERA5 pressure is hPa.
+
+### Agroclimate summaries
+
+`AgroClimateCalculator` is a separate Python library interface for summarizing an
+already selected daily interval. It reports mean actual evapotranspiration and
+potential-minus-actual evaporation (both mm/day), mean soil moisture (%), mean
+temperature (°C) and humidity (%), total and maximum daily rainfall (mm), and the
+longest confirmed dry spell (days, daily precipitation below 1 mm).
+
+```python
+from weatheasy import Coords, get_era5_data
+from weatheasy.agro_clim import AgroClimateCalculator, format_results
+
+variables = ['LHTFL', 'PEVPR', 'SOILW_0-0.1m', 'TMP', 'RH', 'PRATE']
+values = get_era5_data(
+    root=root, begin=begin, end=end, coords=Coords(55.0, 37.0), variables=variables,
+)
+data = dict(zip(variables, values, strict=True))
+results = AgroClimateCalculator(data).calculate_all_parameters(begin, end)
+print(format_results(results))
+```
+
+The calculator expects daily precipitation and potential evaporation in mm/day,
+latent heat flux in W/m² (positive upward), soil moisture as a fraction, temperature
+in °C, and relative humidity in %. ERA5 and CFS2 getter results follow these
+contracts. The date arguments describe the interval selected by the caller; they
+do not slice arrays without a time index. NaN propagates through numeric
+summaries. A missing day interrupts a confirmed dry spell. These summaries do
+not change the daily weather retrieval interface.

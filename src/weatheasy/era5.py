@@ -300,7 +300,10 @@ def process_month(main: xr.Dataset, boundary: xr.Dataset, month: date) -> xr.Dat
     )
     fields = {}
     for name, value in values.items():
-        attrs = {'units': UNITS[name], 'long_name': const.ERA5_ALL_VARS[name].en}
+        info = (
+            const.ERA5_VARS[name].info if name in const.ERA5_VARS else const.ERA5_DERIVED_INFO[name]
+        )
+        attrs = {'units': UNITS[name], 'long_name': info.en}
         attrs['cell_methods'] = 'time: mean'
         if name in const.ERA5_VARS:
             spec = const.ERA5_VARS[name]

@@ -39,7 +39,7 @@ def get_cfs2_data(  # noqa: C901
     coords: Coords,
     variables: Sequence[str],
 ) -> NDArray[np.float32]:
-    """Read prepared daily fields, using each field's actual grid coordinates."""
+    """Read prepared daily fields; PRATE and PRATE_corr are returned in mm/day."""
     _check_date_range(begin, end)
     try:
         updated = root[const.CFS2_DIR].attrs[const.CFS2_KEY_UPDATED]
@@ -85,7 +85,7 @@ def get_cfs2_data(  # noqa: C901
                     result[variables.index(variable), offset : offset + values.shape[1]] = values[
                         index
                     ]
-    return result
+    return _daily_precipitation(result, variables, 'PRATE', 21600)
 
 
 def get_cmip6_data(
@@ -96,18 +96,20 @@ def get_cmip6_data(
     coords: Coords,
     variables: Sequence[str],
 ) -> NDArray[np.float32]:
+    """Read daily CMIP6 fields; precipitation pr is returned in mm/day."""
     _check_date_range(begin, end)
     first = date(const.CMIP6_FIRST_YEAR, 1, 1)
     last = date(const.CMIP6_LAST_YEAR, 12, 31)
     for value in (begin, end):
         if not first <= value <= last:
             raise CMIP6DateRangeError(value, first, last)
-    return np.stack(
+    result = np.stack(
         [
             _read_point(root, f'cmip6/{variable}', begin, end, coords, [variable])[0]
             for variable in variables
         ]
     )
+    return _daily_precipitation(result, variables, 'pr', 86400)
 
 
 def get_era5_data(
@@ -118,7 +120,7 @@ def get_era5_data(
     coords: Coords,
     variables: Sequence[str],
 ) -> NDArray[np.float32]:
-    """Read completed ERA5 months, including the current incomplete year."""
+    """Read completed ERA5 months; PRATE and PRATE_corr are returned in mm/day."""
     from weatheasy.era5 import available_period
     from weatheasy.error import ERA5DateRangeError
 
@@ -135,6 +137,17 @@ def get_era5_data(
             values = _read_point(root, group, begin, end, coords, selected)
             for index, variable in enumerate(selected):
                 result[variables.index(variable)] = values[index]
+    return _daily_precipitation(result, variables, 'PRATE', 86400)
+
+
+def _daily_precipitation(
+    result: NDArray[np.float32], variables: Sequence[str], name: str, factor: int
+) -> NDArray[np.float32]:
+    # CFS2 stores the sum of four six-hour rates; ERA5/CMIP6 store a daily rate.
+    # Corrected precipitation is already mm/day and never enters this conversion.
+    for index, variable in enumerate(variables):
+        if variable == name:
+            result[index] *= factor
     return result
 
 
