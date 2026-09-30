@@ -35,17 +35,15 @@ class PrecipitationProcessor(EMDNABase):
     _CROSS_CORR: ClassVar[float] = 0.3
     _PRECIP_THRESHOLD: ClassVar[float] = 0.1
 
-    def _load_stations(self) -> None:
-        _LOG.info('Loading stations from %s', self.station_file)
-        sample = pd.read_csv(self.station_file, nrows=1)
-        available = sample.columns.tolist()
+    def _prepare_stations(self) -> None:
+        available = self.stations.columns.tolist()
 
         precip_col = next(
             (c for c in available if any(k in c.lower() for k in _PRECIP_KEYWORDS)),
             None,
         )
         if precip_col is None:
-            msg = 'Precipitation column not found in station file'
+            msg = 'Precipitation column not found in station observations'
             raise ValueError(msg)
 
         temp_col = next(
@@ -53,7 +51,7 @@ class PrecipitationProcessor(EMDNABase):
             None,
         )
 
-        base_cols = ['station_id', 'lat', 'lon', 'year', 'month', 'day', precip_col]
+        base_cols = ['station_id', 'lat', 'lon', 'date', 'year', 'month', 'day', precip_col]
         if temp_col:
             base_cols.append(temp_col)
         extra_cols = [
@@ -66,12 +64,15 @@ class PrecipitationProcessor(EMDNABase):
         ]
         use_cols = [c for c in base_cols + extra_cols if c in available]
 
-        observations = pd.read_csv(self.station_file, usecols=use_cols)
+        observations = self.stations.loc[:, use_cols].copy()
         observations = observations.rename(columns={precip_col: 'precipitation'})
         if temp_col:
             observations = observations.rename(columns={temp_col: 'temperature'})
         observations['date'] = pd.to_datetime(
-            observations[['year', 'month', 'day']], errors='coerce'
+            observations['date']
+            if 'date' in observations
+            else observations[['year', 'month', 'day']],
+            errors='coerce',
         )
 
         mask = (
@@ -196,36 +197,28 @@ class PrecipitationProcessor(EMDNABase):
     def _load_era5(
         self, date_str: str
     ) -> tuple[NDArray[np.float32] | None, NDArray[np.float32] | None]:
-        if self.era5_dir is None:
+        if self.era5 is None:
             return None, None
         try:
-            # Missing ERA5 days intentionally use stations. This broad handler also
-            # treats broken NetCDF files as missing; narrow it when that policy changes.
-            import xarray as xr  # noqa: PLC0415
-
-            files = sorted(self.era5_dir.glob(f'*{date_str[:7].replace("-", "")}*daily.nc'))
-            if not files:
-                _LOG.warning('No daily ERA5 file for %s; using stations', date_str)
+            # Missing ERA5 days intentionally use stations; retain the broad fallback.
+            ds = self.era5
+            ts = pd.Timestamp(date_str)
+            if 'tp' in ds.variables:
+                era5_raw = ds.sel(date=ts)['tp'] * 1000.0
+            elif 'precipitation' in ds.variables:
+                era5_raw = ds.sel(date=ts)['precipitation']
+            else:
                 return None, None
-            with xr.open_dataset(files[0]) as ds:
-                ts = pd.Timestamp(date_str)
-                if 'tp' in ds.variables:
-                    era5_raw = ds.sel(date=ts)['tp'] * 1000.0
-                elif 'precipitation' in ds.variables:
-                    era5_raw = ds.sel(date=ts)['precipitation']
-                else:
-                    return None, None
-                regridded = era5_raw.interp(
-                    longitude=self.lons, latitude=self.lats, method='linear'
-                )
-                precip = np.maximum(regridded.to_numpy().astype(np.float32), 0.0)
-                pop = np.where(np.isnan(precip), np.nan, precip > self._PRECIP_THRESHOLD).astype(
-                    np.float32
-                )
-                return precip, pop
+            regridded = era5_raw.interp(longitude=self.lons, latitude=self.lats, method='linear')
+            precip = np.maximum(regridded.to_numpy().astype(np.float32), 0.0)
+            pop = np.where(np.isnan(precip), np.nan, precip > self._PRECIP_THRESHOLD).astype(
+                np.float32
+            )
         except Exception as exc:
             _LOG.warning('ERA5 load failed for %s: %s', date_str, exc)
             return None, None
+        else:
+            return precip, pop
 
     def _generate_ensemble(
         self,
@@ -268,10 +261,13 @@ class PrecipitationProcessor(EMDNABase):
         return ensemble
 
     def _process_day(self, date_str: str, trange_scrf: NDArray[np.float32] | None = None) -> dict:
-        out_file = self.output_dir / f'emdna_precip_{date_str.replace("-", "")}.npz'
-        if out_file.exists():
-            _LOG.info('%s already exists, skipping', out_file.name)
-            return {'status': 'exists', 'file': out_file}
+        out_file = f'emdna_precip_{date_str.replace("-", "")}.npz'
+        if self.output_dir.exists(out_file):
+            _LOG.info('%s already exists, skipping', out_file)
+            return {
+                'status': 'exists',
+                'file': self.output_dir.fs.unstrip_protocol(self.output_dir.child(out_file).root),
+            }
 
         target_date = pd.Timestamp(date_str)
         day_stations = self.stations[self.stations['date'] == target_date]
@@ -333,11 +329,11 @@ class PrecipitationProcessor(EMDNABase):
             if era5_precip is not None:
                 payload['era5_precipitation'] = era5_precip
             self._save_result(out_file, payload)
-            _LOG.info('Saved %s', out_file.name)
+            _LOG.info('Saved %s', out_file)
 
             return {
                 'status': 'success',
-                'file': out_file,
+                'file': self.output_dir.fs.unstrip_protocol(self.output_dir.child(out_file).root),
                 'n_stations': len(day_stations),
                 'n_stations_wet': n_wet,
                 'precip_range': (float(np.nanmin(final)), float(np.nanmax(final))),

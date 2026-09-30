@@ -5,11 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from fsspec.implementations.local import LocalFileSystem
 
 from weatheasy.storage import open_dataset
 
@@ -18,8 +16,8 @@ if TYPE_CHECKING:
     import zarr
     from numpy.typing import NDArray
 
-    from .artifacts import Artifacts
     from .sources import Source
+    from weatheasy.file_storage import FileStore
 
 
 SCHEMA = 'cell_month_v1'
@@ -37,7 +35,7 @@ PRECIP_FILES = (
 )
 
 
-def _digest(directory: Artifacts, name: str) -> str:
+def _digest(directory: FileStore, name: str) -> str:
     digest = hashlib.sha256()
     with directory.open(name) as stream:
         while chunk := stream.read(1024 * 1024):
@@ -45,24 +43,17 @@ def _digest(directory: Artifacts, name: str) -> str:
     return digest.hexdigest()
 
 
-def write_manifest(directory: Artifacts, files: tuple[str, ...]) -> None:
+def write_manifest(directory: FileStore, files: tuple[str, ...]) -> None:
     """Publish hashes last, so interrupted retraining cannot mix old and new files."""
     manifest = {
         'schema': SCHEMA,
         'files': {name: _digest(directory, name) for name in files},
     }
-    if isinstance(directory.fs, LocalFileSystem):
-        # fsspec local transactions stage in /tmp, which may be another filesystem.
-        # Keep replacement atomic by staging alongside the published manifest.
-        with directory.open('manifest.json.tmp', 'wb') as stream:
-            stream.write(json.dumps(manifest, sort_keys=True).encode('utf-8'))
-        (Path(directory.root) / 'manifest.json.tmp').replace(Path(directory.root) / 'manifest.json')
-    else:
-        with directory.fs.transaction, directory.open('manifest.json', 'wb') as stream:
-            stream.write(json.dumps(manifest, sort_keys=True).encode('utf-8'))
+    with directory.write_atomic('manifest.json') as stream:
+        stream.write(json.dumps(manifest, sort_keys=True).encode('utf-8'))
 
 
-def verify_manifest(directory: Artifacts, files: tuple[str, ...]) -> None:
+def verify_manifest(directory: FileStore, files: tuple[str, ...]) -> None:
     if not directory.exists('manifest.json'):
         msg = f'{directory.root}: old or incomplete correction artifacts; retrain'
         raise ValueError(msg)
@@ -89,7 +80,7 @@ class Climatology:
     lons: NDArray[np.float32]
     metadata: dict[str, str | int | float]
 
-    def save(self, directory: Artifacts) -> None:
+    def save(self, directory: FileStore) -> None:
         values: dict[str, Any] = {
             'mean': self.mean,
             'lats': self.lats,
@@ -102,7 +93,7 @@ class Climatology:
             np.savez_compressed(stream, **values)
 
     @classmethod
-    def load(cls, directory: Artifacts, source: Source, variable: str) -> Climatology:
+    def load(cls, directory: FileStore, source: Source, variable: str) -> Climatology:
         if not directory.exists('climatology.npz'):
             msg = f'{directory.root}: old correction artifacts have no cell/month climatology; '
             msg += 'retrain'

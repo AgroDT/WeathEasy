@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     import zarr
     from zarr.abc.store import Store
 
-    from .artifacts import Artifacts
     from .sources import Source
+    from weatheasy.file_storage import FileStore
 
 
 _LOG = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ _FIELDS = {'TMP_corr', 'PRATE_corr'}
 def correct_store(  # noqa: C901, PLR0912, PLR0915
     source: Source,
     root: zarr.Group,
-    artifacts: Artifacts,
+    artifacts: FileStore,
     dem_store: Store,
     *,
     begin: date | None = None,

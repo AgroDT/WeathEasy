@@ -1,3 +1,4 @@
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,7 +79,7 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
     monkeypatch: pytest.MonkeyPatch, action: str, *, remote_weather: bool
 ):
     from weatheasy.correction import __main__ as cli, apply, training
-    from weatheasy.correction.artifacts import get_artifacts
+    from weatheasy.file_storage import FileStore, get_file_store
 
     s3fs = pytest.importorskip('s3fs')
     filesystem = s3fs.S3FileSystem()
@@ -87,10 +88,12 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
     weather_uri = 's3://weather/prepared' if remote_weather else './weather'
 
     def artifacts_for_uri(uri, *, filesystem=None):  # noqa: ANN001
-        return get_artifacts(uri, filesystem=filesystem or shared_filesystem)
+        return get_file_store(
+            uri, filesystem=(filesystem or shared_filesystem) if uri.startswith('s3://') else None
+        )
 
     shared_filesystem = filesystem
-    monkeypatch.setattr(cli, 'get_artifacts', artifacts_for_uri)
+    monkeypatch.setattr(cli, 'get_file_store', artifacts_for_uri)
 
     def open_weather(uri, *, filesystem):  # noqa: ANN001
         assert uri == weather_uri
@@ -102,7 +105,19 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
 
     monkeypatch.setattr(cli, 'get_storage', open_weather)
 
+    def open_station_file(self: FileStore, name: str = '', mode: str = 'rb') -> BytesIO:
+        assert self.fs is shared_filesystem
+        assert self.root == 'observations/stations.csv'
+        assert name == ''
+        assert mode == 'rb'
+        return BytesIO(b'station_id,lat,lon,date,temperature\n1,55,37,2026-01-01,8\n')
+
+    monkeypatch.setattr(FileStore, 'open', open_station_file)
+
     def build_artifacts(source, root, stations, terrain, artifacts, *, only):  # noqa: ANN001, ARG001
+        assert stations.to_dict('records') == [
+            {'station_id': 1, 'lat': 55, 'lon': 37, 'date': '2026-01-01', 'temperature': 8}
+        ]
         received.append((root, terrain, artifacts))
 
     def correct_store(source, root, artifacts, terrain, *, begin, end):  # noqa: ANN001, ARG001
@@ -122,7 +137,7 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
         's3://models/correction',
     ]
     if action == 'train':
-        arguments.extend(['--stations', 'stations.csv'])
+        arguments.extend(['--stations', 's3://observations/stations.csv'])
     cli.main(arguments)
     assert len(received) == 1
     root, terrain, artifacts = received[0]

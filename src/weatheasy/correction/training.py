@@ -34,14 +34,13 @@ from weatheasy.storage import StorageError, select_point
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     import zarr
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
-    from .artifacts import Artifacts
     from .sources import Source
+    from weatheasy.file_storage import FileStore
 
 
 _LOG = logging.getLogger(__name__)
@@ -65,9 +64,9 @@ _XGB_PARAMS = {
 # ── Data preparation ────────────────────────────────────────────────────────
 
 
-def load_stations(csv_path: Path, value_cols: Sequence[str]) -> pd.DataFrame:
-    """Read a station-observation CSV into a tidy frame (station_id, lat, lon, date, values)."""
-    stations = pd.read_csv(csv_path)
+def prepare_stations(observations: pd.DataFrame, value_cols: Sequence[str]) -> pd.DataFrame:
+    """Normalize station observations without changing the caller's table."""
+    stations = observations.copy()
     if 'date' in stations.columns:
         stations['date'] = pd.to_datetime(stations['date'])
     else:
@@ -75,7 +74,7 @@ def load_stations(csv_path: Path, value_cols: Sequence[str]) -> pd.DataFrame:
     keep = ['station_id', 'lat', 'lon', 'date', *value_cols]
     missing = set(keep) - set(stations.columns)
     if missing:
-        msg = f'Station CSV is missing required columns: {sorted(missing)}'
+        msg = f'Station observations are missing required columns: {sorted(missing)}'
         raise ValueError(msg)
     stations = stations[keep]
     stations = stations.dropna(subset=keep)
@@ -201,13 +200,13 @@ def sample_reanalysis(
 def build_temp_artifacts(
     source: Source,
     root: zarr.Group,
-    stations_csv: Path,
+    observations: pd.DataFrame,
     dem_store: Store,
-    artifacts: Artifacts,
+    artifacts: FileStore,
 ) -> None:
     """Train the temperature corrector for ``source`` and write its artifacts."""
     dem = features.load_dem(dem_store)
-    stations = enrich_stations(load_stations(stations_csv, ['temperature']), dem)
+    stations = enrich_stations(prepare_stations(observations, ['temperature']), dem)
     sampled = sample_reanalysis(source, root, stations, source.temp_var, 1.0)
     climate = build_climatology(source, root, source.temp_var, 1.0)
     dataset = _temp_features(sampled, climate)
@@ -302,13 +301,13 @@ _PRECIP_SEASONAL = ['era5_seasonal_log_ratio', 'precip_wet_bias']
 def build_precip_artifacts(
     source: Source,
     root: zarr.Group,
-    stations_csv: Path,
+    observations: pd.DataFrame,
     dem_store: Store,
-    artifacts: Artifacts,
+    artifacts: FileStore,
 ) -> None:
     """Train the two-stage precipitation corrector for ``source`` and write its artifacts."""
     dem = features.load_dem(dem_store)
-    stations = enrich_stations(load_stations(stations_csv, ['precipitation']), dem)
+    stations = enrich_stations(prepare_stations(observations, ['precipitation']), dem)
     sampled = sample_reanalysis(source, root, stations, source.precip_var, source.precip_to_mm)
     climate = build_climatology(
         source, root, source.precip_var, source.precip_to_mm, wet_threshold=WET_THRESHOLD
@@ -426,14 +425,14 @@ def _tune_threshold(clf: Any, dataset: pd.DataFrame) -> float:
 def build_artifacts(
     source: Source,
     root: zarr.Group,
-    stations_csv: Path,
+    observations: pd.DataFrame,
     dem_store: Store,
-    artifacts: Artifacts,
+    artifacts: FileStore,
     *,
     only: str | None = None,
 ) -> None:
     """Train and write both correctors' artifacts for ``source`` (or just one)."""
     if only in (None, 'temp'):
-        build_temp_artifacts(source, root, stations_csv, dem_store, artifacts)
+        build_temp_artifacts(source, root, observations, dem_store, artifacts)
     if only in (None, 'precip'):
-        build_precip_artifacts(source, root, stations_csv, dem_store, artifacts)
+        build_precip_artifacts(source, root, observations, dem_store, artifacts)

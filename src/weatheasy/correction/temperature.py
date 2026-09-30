@@ -26,8 +26,8 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
-    from .artifacts import Artifacts
     from .sources import Source
+    from weatheasy.file_storage import FileStore
 
 
 _LOG = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ CORRECTION_THRESHOLD = 0.3  # deg C; below this seasonal bias we leave the value
 class TemperatureCorrector:
     """Load per-source artifacts and bias-correct a daily temperature grid."""
 
-    def __init__(self, source: Source, artifacts: Artifacts, dem_store: Store) -> None:
+    def __init__(self, source: Source, artifacts: FileStore, dem_store: Store) -> None:
         self.source = source
         self.dir = artifacts.child(source.name, 'temp')
         self.dem_store = dem_store

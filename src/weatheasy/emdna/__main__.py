@@ -4,8 +4,9 @@ import logging
 import sys
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from datetime import date
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+from weatheasy.file_storage import get_file_store
 
 
 if TYPE_CHECKING:
@@ -31,9 +32,7 @@ def main(*, configure_logging: bool = True) -> None:
 
     for name in ('temperature', 'precipitation'):
         sub = subparsers.add_parser(name, formatter_class=ArgumentDefaultsHelpFormatter)
-        sub.add_argument(
-            'stations', type=Path, metavar='STATIONS', help='CSV file with station observations'
-        )
+        sub.add_argument('stations', metavar='STATIONS', help='CSV file with station observations')
         sub.add_argument(
             'begin',
             nargs='?',
@@ -47,14 +46,12 @@ def main(*, configure_logging: bool = True) -> None:
         sub.add_argument(
             '-o',
             '--output',
-            type=Path,
-            default=Path.cwd() / f'emdna_{name}_results',
+            default=f'emdna_{name}_results',
             metavar='DIR',
             help='output directory for .npz files',
         )
         sub.add_argument(
             '--era5',
-            type=Path,
             metavar='DIR',
             help='directory with ERA5-Land daily NetCDF files (optional)',
         )
@@ -85,16 +82,33 @@ def main(*, configure_logging: bool = True) -> None:
 
     args = parser.parse_args()
 
+    locations = [args.stations, args.output, args.era5]
+    s3_uri = next((value for value in locations if value and value.startswith('s3://')), None)
+    filesystem = get_file_store(s3_uri).fs if s3_uri is not None else None
+    station_file = get_file_store(
+        args.stations, filesystem=filesystem if args.stations.startswith('s3://') else None
+    )
+    output_dir = get_file_store(
+        args.output, filesystem=filesystem if args.output.startswith('s3://') else None
+    )
+    era5_dir = (
+        get_file_store(args.era5, filesystem=filesystem if args.era5.startswith('s3://') else None)
+        if args.era5 is not None
+        else None
+    )
+
     processor: EMDNABase
     try:
+        from ._inputs import process_period, read_stations  # noqa: PLC0415
+
+        observations = read_stations(station_file)
         if args.kind == 'temperature':
             # Keep the selected processor import inside the CLI error handler.
             from .temperature import TemperatureProcessor  # noqa: PLC0415
 
             processor = TemperatureProcessor(
-                station_file=args.stations,
-                output_dir=args.output,
-                era5_dir=args.era5,
+                stations=observations,
+                output_dir=output_dir,
                 n_ensemble=args.n_ensemble,
                 min_stations=args.min_stations,
                 max_stations=args.max_stations,
@@ -105,9 +119,8 @@ def main(*, configure_logging: bool = True) -> None:
             from .precipitation import PrecipitationProcessor  # noqa: PLC0415
 
             processor = PrecipitationProcessor(
-                station_file=args.stations,
-                output_dir=args.output,
-                era5_dir=args.era5,
+                stations=observations,
+                output_dir=output_dir,
                 n_ensemble=args.n_ensemble,
                 min_stations=args.min_stations,
                 max_stations=args.max_stations,
@@ -117,7 +130,7 @@ def main(*, configure_logging: bool = True) -> None:
         _LOG.exception('EMDNA requires scipy and xarray: pip install weatheasy[emdna]')
         sys.exit(1)
 
-    results = processor.process_period(args.begin, args.end)
+    results = process_period(processor, era5_dir, args.begin, args.end)
 
     n_ok = sum(1 for r in results if r['status'] in ('success', 'exists'))
     n_err = sum(1 for r in results if r['status'] not in ('success', 'exists'))

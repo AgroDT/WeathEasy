@@ -267,10 +267,13 @@ NumPy and manifest files under `<source>/temp` and `<source>/precip`. Applicatio
 reads these files directly through a filesystem; a downloaded local model bundle
 is unnecessary. Manifests are published after all files and validate their hashes
 before correction starts. Coordinate retraining and application to avoid reading
-a model while its files are being replaced. The station CSV remains local.
+a model while its files are being replaced. The station CSV also accepts a local
+path or S3 URI.
 
-Library callers create a prepared `Artifacts` object with
-`weatheasy.correction.artifacts.get_artifacts` and pass it to training or correction.
+Library training receives station observations as a `pandas.DataFrame`; reading
+the CSV belongs to the CLI. Create a prepared `FileStore` with
+`weatheasy.file_storage.get_file_store` for model artifacts and pass it to training
+or correction.
 The correction CLI shares one synchronous S3 filesystem with an asynchronous
 adapter for weather and DEM Zarr access, reusing the same S3 client. Other callers
 can supply their filesystem when resolving S3 artifact directories.
@@ -363,10 +366,25 @@ python -m weatheasy.emdna temperature stations.csv -o temperature-results
 python -m weatheasy.emdna precipitation stations.csv -o precipitation-results
 ```
 
+Station CSV, ERA5 input directory, and output directory accept local paths or
+`s3://` URIs. S3 locations share one filesystem client within the command. For example:
+
+```sh
+python -m weatheasy.emdna temperature s3://weather/stations.csv \
+    -o s3://weather/emdna-temperature --era5 s3://weather/era5-daily
+```
+
+Library processors receive station observations as a `pandas.DataFrame`, optional
+ERA5 data as an `xarray.Dataset`, and a prepared `FileStore` for the output directory.
+Observations accept `date` or the `year`/`month`/`day` columns; inputs remain owned
+by the caller. The CLI reads CSV and processes one ERA5 month at a time.
+Remote NetCDF inputs are staged on the job's local temporary disk for reading;
+each monthly file is reused across its dates and removed when the month finishes.
+
 Optional positional `BEGIN END` dates (ISO format) limit the period. Without them,
 the command processes new observation dates after the latest completed output.
-The CSV requires `station_id`, `lat`, `lon`, `year`, `month`, `day`, and either
-`temperature` (°C) or `precipitation` (mm/day). Optional elevation and slope columns
+The observations require `station_id`, `lat`, `lon`, `date` (or `year`, `month`,
+`day`), and either `temperature` (°C) or `precipitation` (mm/day). Optional elevation and slope columns
 retain the donor's name matching. The output grid covers 19–180° E, 41–82° N at
 0.1° resolution; observations outside this region are excluded.
 
@@ -379,10 +397,11 @@ results; missing ERA5 cells preserve the station estimate and precipitation
 probability. Available cells retain the donor's station/ERA5 blend.
 
 Each completed day's NPZ contains the donor output fields plus each ensemble
-member's random-field state and the random-generator state. A temporary local
-file is replaced after writing finishes; restart state and results are published
-together. Repeating the command skips completed dates and resumes with their
-state. A failed write or insufficient station count stops the sequence, so the
+member's random-field state and the random-generator state. A local result uses
+a temporary file in the output directory and atomic replacement. S3 publishes
+the complete object after writing finishes; restart state and results are
+published together. Repeating the command skips completed dates and resumes
+with their state. A failed write or insufficient station count stops the sequence, so the
 unfinished day remains retryable. Old donor NPZ files without restart state
 cannot resume a new sequence; use a fresh output directory. Use a single writer
 per output directory and keep its grid and ensemble size unchanged.

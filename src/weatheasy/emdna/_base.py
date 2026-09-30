@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import tempfile
 from abc import ABC, abstractmethod
 from datetime import date
 from pathlib import Path
@@ -16,7 +15,10 @@ from scipy.ndimage import gaussian_filter
 
 
 if TYPE_CHECKING:
+    import xarray as xr
     from numpy.typing import NDArray
+
+    from weatheasy.file_storage import FileStore
 
 
 _LOG = logging.getLogger(__name__)
@@ -36,19 +38,18 @@ class EMDNABase(ABC):
 
     def __init__(
         self,
-        station_file: str | Path,
-        output_dir: str | Path,
+        stations: pd.DataFrame,
+        output_dir: FileStore,
         *,
-        era5_dir: str | Path | None = None,
+        era5: xr.Dataset | None = None,
         max_stations: int = 30,
         min_stations: int = 20,
         search_radius_km: float = 400.0,
         n_ensemble: int = 100,
     ) -> None:
-        self.station_file = Path(station_file)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.era5_dir = Path(era5_dir) if era5_dir else None
+        self.stations = stations.copy(deep=True)
+        self.output_dir = output_dir
+        self.era5 = era5
 
         if not 1 <= min_stations <= max_stations or n_ensemble < 1 or search_radius_km <= 0:
             msg = 'Require positive ensemble/radius and 1 <= min_stations <= max_stations'
@@ -64,7 +65,7 @@ class EMDNABase(ABC):
         self._last_date: date | None = None
 
         self._setup_grid()
-        self._load_stations()
+        self._prepare_stations()
         self._build_climatology()
         self._interpolate_climatology_to_grid()
 
@@ -79,7 +80,7 @@ class EMDNABase(ABC):
     # --- Abstract methods ---
 
     @abstractmethod
-    def _load_stations(self) -> None: ...
+    def _prepare_stations(self) -> None: ...
 
     @abstractmethod
     def _build_climatology(self) -> None: ...
@@ -325,29 +326,22 @@ class EMDNABase(ABC):
         delta_lon = (coords[:, 1] - target[1] + 180.0) % 360.0 - 180.0
         return np.hypot(delta_lat, delta_lon * np.cos(np.deg2rad(target[0]))) * KM_PER_DEG
 
-    def _save_result(self, path: Path, payload: dict[str, Any]) -> None:
+    def _save_result(self, name: str, payload: dict[str, Any]) -> None:
         # Results and restart state become visible together, only after a complete write.
         payload['scrf_state'] = np.stack([self._previous_scrf[i] for i in range(self.n_ensemble)])
         payload['rng_state'] = json.dumps(self._rng.bit_generator.state)
-        with tempfile.NamedTemporaryFile(
-            dir=self.output_dir, suffix='.npz', delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-        try:
-            np.savez_compressed(temporary, **payload)
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with self.output_dir.write_atomic(name) as stream:
+            np.savez_compressed(stream, **payload)
 
-    def _restore_result(self, path: Path) -> None:
-        with np.load(path, allow_pickle=False) as result:
+    def _restore_result(self, name: str) -> None:
+        with self.output_dir.open(name) as stream, np.load(stream, allow_pickle=False) as result:
             states = result['scrf_state']
             if (
                 states.shape != (self.n_ensemble, *self.grid_lats.shape)
                 or not np.array_equal(result['lats'], self.lats)
                 or not np.array_equal(result['lons'], self.lons)
             ):
-                msg = f'Incompatible ensemble or grid in {path}'
+                msg = f'Incompatible ensemble or grid in {name}'
                 raise ValueError(msg)
             self._previous_scrf = {i: states[i].copy() for i in range(self.n_ensemble)}
             self._rng.bit_generator.state = json.loads(str(result['rng_state']))
@@ -355,14 +349,17 @@ class EMDNABase(ABC):
 
     def process_day(self, date_str: str, **kwargs: Any) -> dict:
         current = date.fromisoformat(date_str)
-        path = self.output_dir / f'{self._OUTPUT_PREFIX}{current:%Y%m%d}.npz'
-        if path.exists():
+        path = f'{self._OUTPUT_PREFIX}{current:%Y%m%d}.npz'
+        if self.output_dir.exists(path):
             self._restore_result(path)
-            return {'status': 'exists', 'file': path}
+            return {
+                'status': 'exists',
+                'file': self.output_dir.fs.unstrip_protocol(self.output_dir.child(path).root),
+            }
         previous = sorted(self.output_dir.glob(f'{self._OUTPUT_PREFIX}????????.npz'))
         if previous:
-            latest = previous[-1]
-            latest_date = date.fromisoformat(latest.stem.removeprefix(self._OUTPUT_PREFIX))
+            latest = Path(previous[-1]).name
+            latest_date = date.fromisoformat(Path(latest).stem.removeprefix(self._OUTPUT_PREFIX))
             if current <= latest_date:
                 msg = 'Cannot insert earlier dates into an existing ensemble sequence'
                 raise ValueError(msg)
@@ -378,7 +375,8 @@ class EMDNABase(ABC):
             self._rng.bit_generator.state = rng_state
         return result
 
-    def process_period(self, start: date | None = None, end: date | None = None) -> list[dict]:
+    def pending_dates(self, start: date | None = None, end: date | None = None) -> list[date]:
+        """Restore the latest checkpoint and select remaining observation dates."""
         if start is not None and end is not None and start > end:
             msg = 'Start date must not follow end date'
             raise ValueError(msg)
@@ -386,14 +384,19 @@ class EMDNABase(ABC):
         previous = sorted(self.output_dir.glob(f'{self._OUTPUT_PREFIX}????????.npz'))
         last = None
         if previous:
-            self._restore_result(previous[-1])
+            self._restore_result(Path(previous[-1]).name)
             last = self._last_date
+        return [
+            day
+            for day in dates
+            if (start is None or day >= start)
+            and (end is None or day <= end)
+            and (last is None or day > last)
+        ]
+
+    def process_period(self, start: date | None = None, end: date | None = None) -> list[dict]:
         results = []
-        for day in dates:
-            if (start is not None and day < start) or (end is not None and day > end):
-                continue
-            if last is not None and day <= last:
-                continue
+        for day in self.pending_dates(start, end):
             result = self.process_day(day.isoformat())
             results.append(result)
             if result['status'] != 'success':

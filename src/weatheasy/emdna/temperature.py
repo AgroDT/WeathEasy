@@ -27,12 +27,10 @@ class TemperatureProcessor(EMDNABase):
     _SPATIAL_CORR_KM: ClassVar[float] = 150.0
     _TEMPORAL_CORR: ClassVar[float] = 0.8
 
-    def _load_stations(self) -> None:
-        _LOG.info('Loading stations from %s', self.station_file)
-        sample = pd.read_csv(self.station_file, nrows=1)
-        available = sample.columns.tolist()
+    def _prepare_stations(self) -> None:
+        available = self.stations.columns.tolist()
 
-        base_cols = ['station_id', 'lat', 'lon', 'year', 'month', 'day', 'temperature']
+        base_cols = ['station_id', 'lat', 'lon', 'date', 'year', 'month', 'day', 'temperature']
         extra_cols = [
             c
             for c in available
@@ -43,9 +41,12 @@ class TemperatureProcessor(EMDNABase):
         ]
         use_cols = [c for c in base_cols + extra_cols if c in available]
 
-        observations = pd.read_csv(self.station_file, usecols=use_cols)
+        observations = self.stations.loc[:, use_cols].copy()
         observations['date'] = pd.to_datetime(
-            observations[['year', 'month', 'day']], errors='coerce'
+            observations['date']
+            if 'date' in observations
+            else observations[['year', 'month', 'day']],
+            errors='coerce',
         )
 
         mask = (
@@ -127,21 +128,14 @@ class TemperatureProcessor(EMDNABase):
         return grid_clim + interp, unc
 
     def _load_era5(self, date_str: str) -> NDArray[np.float32] | None:
-        if self.era5_dir is None:
+        if self.era5 is None:
             return None
         try:
-            # Missing ERA5 days intentionally use stations. This broad handler also
-            # treats broken NetCDF files as missing; narrow it when that policy changes.
-            import xarray as xr  # noqa: PLC0415
-
-            files = sorted(self.era5_dir.glob(f'*{date_str[:7].replace("-", "")}*daily.nc'))
-            if not files:
-                _LOG.warning('No daily ERA5 file for %s; using stations', date_str)
-                return None
-            with xr.open_dataset(files[0]) as ds:
-                day = ds.sel(date=pd.Timestamp(date_str))['t2m_mean']
-                regridded = day.interp(longitude=self.lons, latitude=self.lats, method='linear')
-                return regridded.to_numpy().astype(np.float32)
+            # Missing ERA5 days intentionally use stations; retain the broad fallback.
+            ds = self.era5
+            day = ds.sel(date=pd.Timestamp(date_str))['t2m_mean']
+            regridded = day.interp(longitude=self.lons, latitude=self.lats, method='linear')
+            return regridded.to_numpy().astype(np.float32)
         except Exception as exc:
             _LOG.warning('ERA5 load failed for %s: %s', date_str, exc)
             return None
@@ -159,10 +153,13 @@ class TemperatureProcessor(EMDNABase):
         return ensemble
 
     def _process_day(self, date_str: str) -> dict:
-        out_file = self.output_dir / f'emdna_temp_{date_str.replace("-", "")}.npz'
-        if out_file.exists():
-            _LOG.info('%s already exists, skipping', out_file.name)
-            return {'status': 'exists', 'file': out_file}
+        out_file = f'emdna_temp_{date_str.replace("-", "")}.npz'
+        if self.output_dir.exists(out_file):
+            _LOG.info('%s already exists, skipping', out_file)
+            return {
+                'status': 'exists',
+                'file': self.output_dir.fs.unstrip_protocol(self.output_dir.child(out_file).root),
+            }
 
         target_date = pd.Timestamp(date_str)
         day_stations = self.stations[self.stations['date'] == target_date]
@@ -209,11 +206,11 @@ class TemperatureProcessor(EMDNABase):
             if era5 is not None:
                 payload['era5'] = era5
             self._save_result(out_file, payload)
-            _LOG.info('Saved %s', out_file.name)
+            _LOG.info('Saved %s', out_file)
 
             return {
                 'status': 'success',
-                'file': out_file,
+                'file': self.output_dir.fs.unstrip_protocol(self.output_dir.child(out_file).root),
                 'n_stations': len(day_stations),
                 'temp_range': (float(np.nanmin(final)), float(np.nanmax(final))),
                 'uncertainty_range': (float(np.nanmin(uncertainty)), float(np.nanmax(uncertainty))),
