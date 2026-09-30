@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 import zarr
+from zarr.abc.store import Store
 
 from weatheasy import Coords, get_cfs2_data, get_era5_data
 from weatheasy.build_copdem import _slopes
@@ -18,7 +19,7 @@ from weatheasy.correction.precip import WET_FEAT, PrecipCorrector
 from weatheasy.correction.sources import CFS2, ERA5
 from weatheasy.correction.temperature import FEATURE_COLS, TemperatureCorrector
 from weatheasy.error import CoordsError
-from weatheasy.storage import open_dataset, prepare_dataset, write_batch
+from weatheasy.storage import get_store, open_dataset, prepare_dataset, write_batch
 from weatheasy.util import get_storage
 
 
@@ -47,8 +48,9 @@ class RecordWet(AlwaysWet):
         return super().predict_proba(x)
 
 
-def dem_file(path: Path, lats: np.ndarray, lons: np.ndarray) -> Path:
+def dem_store(path: Path, lats: np.ndarray, lons: np.ndarray) -> Store:
     shape = (len(lats), len(lons))
+    store = get_store(path)
     xr.Dataset(
         {
             'elevation': (('latitude', 'longitude'), np.full(shape, 150, np.float32)),
@@ -56,8 +58,8 @@ def dem_file(path: Path, lats: np.ndarray, lons: np.ndarray) -> Path:
             'slope_sn': (('latitude', 'longitude'), np.zeros(shape, np.float32)),
         },
         coords={'latitude': lats, 'longitude': lons},
-    ).to_netcdf(path)
-    return path
+    ).to_zarr(store, zarr_format=3, consolidated=False)
+    return store
 
 
 def raw_store(
@@ -152,7 +154,7 @@ def stub_models(monkeypatch: pytest.MonkeyPatch):
         artifact_id = 'test-artifact'
         climatology = None
 
-        def __init__(self, source: Source, _artifacts_dir, _dem_path) -> None:  # noqa: ANN001
+        def __init__(self, source: Source, _artifacts_dir, _dem_store) -> None:  # noqa: ANN001
             self.source = source
 
         def load_artifacts(self):
@@ -177,7 +179,7 @@ def test_correction_append_and_rebuild_resets_progress(
 ):
     root, first = raw_store(tmp_path)
     stub_models(monkeypatch)
-    args = (ERA5, root, tmp_path / 'artifacts', tmp_path / 'dem.nc')
+    args = (ERA5, root, tmp_path / 'artifacts', get_store(tmp_path / 'dem.zarr'))
     assert apply.correct_store(*args, end=first) == 1
     assert apply.correct_store(*args) == 1
     assert apply.correct_store(*args) == 0
@@ -203,7 +205,7 @@ def test_correction_append_and_rebuild_resets_progress(
 def test_cfs_cropped_correction_has_own_grid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path, CFS2)
     stub_models(monkeypatch)
-    assert apply.correct_store(CFS2, root, tmp_path, tmp_path / 'dem.nc') == 2
+    assert apply.correct_store(CFS2, root, tmp_path, get_store(tmp_path / 'dem.zarr')) == 2
     inside = get_cfs2_data(
         store=root.store,
         begin=first,
@@ -235,7 +237,7 @@ def test_cfs_correction_resumes_across_missing_calendar_day(
 ):
     root, first = raw_store(tmp_path, CFS2, day_offsets=(0, 2))
     stub_models(monkeypatch)
-    args = (CFS2, root, tmp_path, tmp_path / 'dem.nc')
+    args = (CFS2, root, tmp_path, get_store(tmp_path / 'dem.zarr'))
     assert apply.correct_store(*args, end=first) == 1
     assert apply.correct_store(*args) == 1
     assert apply.correct_store(*args) == 0
@@ -258,7 +260,7 @@ def test_cfs_correction_resumes_across_missing_calendar_day(
 def test_correction_rejects_skipping_prepared_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path, days=3)
     stub_models(monkeypatch)
-    args = (ERA5, root, tmp_path, tmp_path / 'dem.nc')
+    args = (ERA5, root, tmp_path, get_store(tmp_path / 'dem.zarr'))
     assert apply.correct_store(*args, end=first) == 1
     with pytest.raises(ValueError, match='cannot skip prepared day 2020-01-02'):
         apply.correct_store(*args, begin=first + timedelta(days=2))
@@ -267,7 +269,7 @@ def test_correction_rejects_skipping_prepared_day(tmp_path: Path, monkeypatch: p
 def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
-    corrector = PrecipCorrector(ERA5, tmp_path, dem_file(tmp_path / 'dem.nc', lats, lons))
+    corrector = PrecipCorrector(ERA5, tmp_path, dem_store(tmp_path / 'dem.zarr', lats, lons))
     corrector.clf = corrector.fallback_clf = AlwaysWet()
     corrector.reg = corrector.fallback_reg = Constant(np.log1p(8))
     corrector.train_coords = np.array([[55.5, 37.5]], np.float32)
@@ -297,7 +299,7 @@ def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest
 def test_temperature_corrector_applies_and_suppresses_small_bias(tmp_path: Path):
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
-    corrector = TemperatureCorrector(ERA5, tmp_path, dem_file(tmp_path / 'dem.nc', lats, lons))
+    corrector = TemperatureCorrector(ERA5, tmp_path, dem_store(tmp_path / 'dem.zarr', lats, lons))
     corrector.model = Constant(1.5)
     corrector.grid_lats, corrector.grid_lons = lats, lons
     corrector.climatology = build_climatology(ERA5, root, ERA5.temp_var, 1.0)
@@ -336,8 +338,8 @@ def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path: Path, 
 
     temp_model = RecordTemperature()
     lats, lons = source.grid(root)
-    dem_path = dem_file(tmp_path / 'dem.nc', lats, lons)
-    temp = TemperatureCorrector(source, tmp_path, dem_path)
+    terrain = dem_store(tmp_path / 'dem.zarr', lats, lons)
+    temp = TemperatureCorrector(source, tmp_path, terrain)
     temp.model = temp_model
     temp.climatology = temp_climate
     temp.grid_lats, temp.grid_lons = source.grid(root)
@@ -347,7 +349,7 @@ def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path: Path, 
     assert temp_model.captured[0, index] == pytest.approx(temp_rows.era5_anomaly.iloc[0])
 
     wet_model = RecordWet()
-    precip = PrecipCorrector(source, tmp_path, dem_path)
+    precip = PrecipCorrector(source, tmp_path, terrain)
     precip.clf = precip.fallback_clf = wet_model
     precip.reg = precip.fallback_reg = Constant(np.log1p(8))
     precip.climatology = precip_climate
@@ -523,7 +525,8 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
     from weatheasy.correction.__main__ import main
 
     root, first = raw_store(tmp_path)
-    dem_path = dem_file(tmp_path / 'dem.nc', *ERA5.grid(root))
+    dem_path = tmp_path / 'dem.zarr'
+    dem_store(dem_path, *ERA5.grid(root))
     stations = tmp_path / 'stations.csv'
     rows = [
         (
@@ -572,7 +575,7 @@ def test_old_artifacts_are_rejected_before_correction_is_deleted(tmp_path: Path)
     old_dir = artifacts / ERA5.name / 'temp'
     old_dir.mkdir(parents=True)
     with pytest.raises(ValueError, match='old or incomplete correction artifacts; retrain'):
-        apply.correct_store(ERA5, root, artifacts, tmp_path / 'missing.nc', end=first)
+        apply.correct_store(ERA5, root, artifacts, get_store(tmp_path / 'missing.zarr'), end=first)
     assert ERA5.correction_path not in root
 
 

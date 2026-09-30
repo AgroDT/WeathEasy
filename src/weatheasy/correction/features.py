@@ -1,7 +1,7 @@
 """Shared terrain / geography features for the bias-correction models.
 
 Ported from the production scripts; Russia-scoped (coast reference points and the
-Copernicus DEM file both cover Russia). Used by both the temperature and the
+Copernicus DEM dataset both cover Russia). Used by both the temperature and the
 precipitation correctors, at training and inference time, so training-time station
 enrichment and inference-time grid resampling read identical terrain features.
 """
@@ -15,9 +15,8 @@ import xarray as xr
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from numpy.typing import NDArray
+    from zarr.abc.store import Store
 
 
 class Dem(TypedDict):
@@ -114,9 +113,9 @@ def point_distances_km(target: NDArray, reference: NDArray) -> NDArray[np.float6
     )
 
 
-def load_dem(path: Path) -> Dem:
-    """Load the required Copernicus DEM terrain file (elevation + slopes)."""
-    with xr.open_dataset(path) as ds:
+def load_dem(store: Store) -> Dem:
+    """Load terrain features from a prepared local or S3 Zarr store."""
+    with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
         dem: Dem = {
             'lats': ds['latitude'].to_numpy().astype(np.float32),
             'lons': ds['longitude'].to_numpy().astype(np.float32),

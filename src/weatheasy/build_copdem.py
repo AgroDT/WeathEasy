@@ -1,18 +1,18 @@
-"""Build a Copernicus DEM (GLO-90) terrain file for the bias-correction models.
+"""Build a Copernicus DEM (GLO-90) terrain dataset for the bias-correction models.
 
 Downloads Copernicus DEM GLO-90 tiles (1°x1° COGs) anonymously from the AWS Open
 Data bucket, aggregates them to a coarse regular grid (default 0.1°) and writes a
-NetCDF with ``elevation``, ``slope_we`` and ``slope_sn`` — the same schema the
-correctors previously read from the FABDEM file, so it is a drop-in replacement.
+spatial Zarr v3 dataset with ``elevation``, ``slope_we`` and ``slope_sn``.
+The published store can be local or in S3; downloaded tiles stay local.
 
 This is a one-off build step (terrain is static); it is NOT part of the realtime
 download path.
 
 Example (full Russia, 0.1°):
-    python -m weatheasy.build_copdem --area 82 19 41 180 -o copdem_russia_01deg.nc
+    python -m weatheasy.build_copdem --area 82 19 41 180 -o copdem_russia_01deg.zarr
 
 Smoke test (single tile near Moscow):
-    python -m weatheasy.build_copdem --area 56 37 55 38 -o copdem_moscow.nc
+    python -m weatheasy.build_copdem --area 56 37 55 38 -o copdem_moscow.zarr
 """
 
 from __future__ import annotations
@@ -22,12 +22,20 @@ import math
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from itertools import product
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import netCDF4 as nc
 import numpy as np
 import rasterio
+import rioxarray
+import xarray as xr
 from httpx2 import Client, HTTPTransport
 from rasterio.enums import Resampling
+
+from weatheasy.storage import get_store
+
+
+if TYPE_CHECKING:
+    from zarr.abc.store import Store
 
 
 _LOG = logging.getLogger('build_copdem')
@@ -95,7 +103,7 @@ def _read_tile_block(path: Path, cells_per_degree: int) -> np.ndarray:
 def build_copdem(
     area: tuple[int, int, int, int],
     resolution: float,
-    output: Path,
+    output: Store,
     cache_dir: Path,
 ) -> None:
     north, west, south, east = area
@@ -147,7 +155,7 @@ def build_copdem(
         )
     elev = np.nan_to_num(elev, nan=0.0)
     slope_we, slope_sn = _slopes(elev, lats, resolution)
-    _write_netcdf(output, lats, lons, elev, slope_we, slope_sn)
+    _write_zarr(output, lats, lons, elev, slope_we, slope_sn)
     _LOG.info(
         'Wrote %s  grid=%dx%d  tiles=%d  elev[min=%.0f max=%.0f]',
         output,
@@ -173,28 +181,32 @@ def _slopes(
     return np.nan_to_num(slope_we), np.nan_to_num(slope_sn)
 
 
-def _write_netcdf(  # noqa: PLR0917
-    output: Path,
+def _write_zarr(  # noqa: PLR0917
+    output: Store,
     lats: np.ndarray,
     lons: np.ndarray,
     elev: np.ndarray,
     slope_we: np.ndarray,
     slope_sn: np.ndarray,
 ) -> None:
-    with nc.Dataset(output, 'w') as ds:
-        ds.createDimension('latitude', len(lats))
-        ds.createDimension('longitude', len(lons))
-        for name, dims, data in (
-            ('latitude', ('latitude',), lats),
-            ('longitude', ('longitude',), lons),
-            ('elevation', ('latitude', 'longitude'), elev),
-            ('slope_we', ('latitude', 'longitude'), slope_we),
-            ('slope_sn', ('latitude', 'longitude'), slope_sn),
-        ):
-            var = ds.createVariable(name, 'f4', dims, zlib=True, complevel=4)
-            var[:] = data
-        ds.source = f'Copernicus DEM GLO-90 ({_HOST})'
-        ds.title = 'Terrain features for bias correction (elevation, slope_we, slope_sn)'
+    dims = ('latitude', 'longitude')
+    ds = xr.Dataset(
+        {
+            'elevation': (dims, elev, {'units': 'm', 'long_name': 'Elevation'}),
+            'slope_we': (dims, slope_we, {'units': '1', 'long_name': 'West-east terrain slope'}),
+            'slope_sn': (dims, slope_sn, {'units': '1', 'long_name': 'South-north terrain slope'}),
+        },
+        coords={'latitude': lats, 'longitude': lons},
+        attrs={
+            'source': f'Copernicus DEM GLO-90 ({_HOST})',
+            'title': 'Terrain features for bias correction (elevation, slope_we, slope_sn)',
+            'Conventions': 'CF-1.8',
+        },
+    )
+    ds = ds.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude')
+    with rioxarray.set_options(export_grid_mapping=True):
+        ds = ds.rio.write_crs('EPSG:4326').rio.write_coordinate_system().rio.write_transform()
+    ds.to_zarr(output, mode='w', zarr_format=3, consolidated=False)
 
 
 def main() -> None:
@@ -215,9 +227,8 @@ def main() -> None:
     parser.add_argument(
         '-o',
         '--output',
-        type=Path,
-        default=Path('copdem_russia_01deg.nc'),
-        help='output NetCDF path',
+        default='copdem_russia_01deg.zarr',
+        help='output Zarr path or s3:// URI',
     )
     parser.add_argument(
         '--cache-dir',
@@ -226,7 +237,7 @@ def main() -> None:
         help='directory for downloaded tiles (enables resume)',
     )
     args = parser.parse_args()
-    build_copdem(tuple(args.area), args.resolution, args.output, args.cache_dir)
+    build_copdem(tuple(args.area), args.resolution, get_store(args.output), args.cache_dir)
 
 
 if __name__ == '__main__':

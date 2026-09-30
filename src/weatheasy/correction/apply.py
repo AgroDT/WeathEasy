@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import zarr
+    from zarr.abc.store import Store
 
     from .sources import Source
 
@@ -31,7 +32,7 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
     source: Source,
     root: zarr.Group,
     artifacts_dir: Path,
-    dem_path: Path,
+    dem_store: Store,
     *,
     begin: date | None = None,
     end: date | None = None,
@@ -58,8 +59,8 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
         raise ValueError(msg)
 
     lats, lons = source.grid(root)
-    temp = TemperatureCorrector(source, artifacts_dir, dem_path).load_artifacts()
-    precip = PrecipCorrector(source, artifacts_dir, dem_path).load_artifacts()
+    temp = TemperatureCorrector(source, artifacts_dir, dem_store).load_artifacts()
+    precip = PrecipCorrector(source, artifacts_dir, dem_store).load_artifacts()
     temp_climate = temp.climatology
     precip_climate = precip.climatology
     if temp_climate is not None and precip_climate is not None:

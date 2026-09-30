@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     import zarr
     from numpy.typing import NDArray
+    from zarr.abc.store import Store
 
     from .sources import Source
 
@@ -200,11 +201,11 @@ def build_temp_artifacts(
     source: Source,
     root: zarr.Group,
     stations_csv: Path,
-    dem_path: Path,
+    dem_store: Store,
     artifacts_dir: Path,
 ) -> None:
     """Train the temperature corrector for ``source`` and write its artifacts."""
-    dem = features.load_dem(dem_path)
+    dem = features.load_dem(dem_store)
     stations = enrich_stations(load_stations(stations_csv, ['temperature']), dem)
     sampled = sample_reanalysis(source, root, stations, source.temp_var, 1.0)
     climate = build_climatology(source, root, source.temp_var, 1.0)
@@ -299,11 +300,11 @@ def build_precip_artifacts(
     source: Source,
     root: zarr.Group,
     stations_csv: Path,
-    dem_path: Path,
+    dem_store: Store,
     artifacts_dir: Path,
 ) -> None:
     """Train the two-stage precipitation corrector for ``source`` and write its artifacts."""
-    dem = features.load_dem(dem_path)
+    dem = features.load_dem(dem_store)
     stations = enrich_stations(load_stations(stations_csv, ['precipitation']), dem)
     sampled = sample_reanalysis(source, root, stations, source.precip_var, source.precip_to_mm)
     climate = build_climatology(
@@ -415,13 +416,13 @@ def build_artifacts(
     source: Source,
     root: zarr.Group,
     stations_csv: Path,
-    dem_path: Path,
+    dem_store: Store,
     artifacts_dir: Path,
     *,
     only: str | None = None,
 ) -> None:
     """Train and write both correctors' artifacts for ``source`` (or just one)."""
     if only in (None, 'temp'):
-        build_temp_artifacts(source, root, stations_csv, dem_path, artifacts_dir)
+        build_temp_artifacts(source, root, stations_csv, dem_store, artifacts_dir)
     if only in (None, 'precip'):
-        build_precip_artifacts(source, root, stations_csv, dem_path, artifacts_dir)
+        build_precip_artifacts(source, root, stations_csv, dem_store, artifacts_dir)

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     import zarr
     from numpy.typing import NDArray
+    from zarr.abc.store import Store
 
     from .sources import Source
 
@@ -50,10 +51,10 @@ CORRECTION_THRESHOLD = 0.3  # deg C; below this seasonal bias we leave the value
 class TemperatureCorrector:
     """Load per-source artifacts and bias-correct a daily temperature grid."""
 
-    def __init__(self, source: Source, artifacts_dir: Path, dem_path: Path) -> None:
+    def __init__(self, source: Source, artifacts_dir: Path, dem_store: Store) -> None:
         self.source = source
         self.dir = Path(artifacts_dir) / source.name / 'temp'
-        self.dem_path = Path(dem_path)
+        self.dem_store = dem_store
         self.model: Any = None
         self.climatology: Climatology | None = None
         self.seasonal_bias: dict[int, NDArray[np.float32]] | None = None
@@ -150,6 +151,6 @@ class TemperatureCorrector:
     ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
         key = (len(lats), len(lons))
         if key not in self._dem_cache:
-            dem = features.load_dem(self.dem_path)
+            dem = features.load_dem(self.dem_store)
             self._dem_cache[key] = features.resample_dem(dem, lats, lons)
         return features.flat_dem(self._dem_cache[key])

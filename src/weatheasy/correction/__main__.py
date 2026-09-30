@@ -8,7 +8,10 @@ from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from datetime import date
 from pathlib import Path
 
+from zarr.storage import FsspecStore
+
 from .sources import SOURCES
+from weatheasy.storage import get_store
 from weatheasy.util import get_storage
 
 
@@ -27,7 +30,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument('source', choices=sorted(SOURCES))
     parser.add_argument('--store', required=True, help='prepared Zarr v3 store')
-    parser.add_argument('--dem', type=Path, required=True, help='Copernicus DEM NetCDF')
+    parser.add_argument('--dem', required=True, help='Copernicus DEM Zarr path or s3:// URI')
     parser.add_argument('--artifacts', type=Path, default=Path('artifacts'))
     if action == 'train':
         parser.add_argument('--stations', type=Path, required=True)
@@ -37,12 +40,18 @@ def main(argv: list[str] | None = None) -> None:
         parser.add_argument('--end', type=date.fromisoformat)
     args = parser.parse_args(args_list)
     root = get_storage(args.store)
+    filesystem = (
+        root.store.fs
+        if isinstance(root.store, FsspecStore) and args.dem.startswith('s3://')
+        else None
+    )
+    dem_store = get_store(args.dem, filesystem=filesystem)
     source = SOURCES[args.source]
     if action == 'train':
         # Load the training pipeline only for the train command.
         from .training import build_artifacts  # noqa: PLC0415
 
-        build_artifacts(source, root, args.stations, args.dem, args.artifacts, only=args.only)
+        build_artifacts(source, root, args.stations, dem_store, args.artifacts, only=args.only)
     else:
         # Load the application pipeline only for the apply command.
         from .apply import correct_store  # noqa: PLC0415
@@ -51,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
             source,
             root,
             args.artifacts,
-            args.dem,
+            dem_store,
             begin=args.begin,
             end=args.end,
         )

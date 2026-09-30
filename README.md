@@ -235,6 +235,38 @@ xarray datasets are not protected against concurrent replacement. Coordinate
 external jobs and direct readers to avoid this window; publication is not an
 atomic multi-object transaction on S3.
 
+## Terrain for bias correction
+
+Build the static Copernicus DEM once and publish it as a spatial Zarr v3 dataset:
+
+```sh
+python -m weatheasy.build_copdem --area 56 37 55 38 -o ./copdem.zarr
+# Publish directly to S3 using the same command:
+python -m weatheasy.build_copdem --area 56 37 55 38 -o s3://weatheasy/copdem.zarr
+```
+
+Downloaded source tiles stay in the local `--cache-dir` and can be reused after
+an interrupted build. The published dataset contains `latitude`, `longitude`,
+`elevation` (metres), `slope_we` and `slope_sn` (m/m), with EPSG:4326 and CF metadata
+written through rioxarray. The output is replaced when the build runs again;
+coordinate writers and readers so that training or correction starts after it
+finishes. The dataset does not depend on the tile cache.
+
+Both training and application read the same prepared DEM. Their `--dem` argument
+accepts a local Zarr path or S3 URI:
+
+```sh
+python -m weatheasy.correction train era5 --store s3://weatheasy/weather \
+    --stations ./stations.csv --dem s3://weatheasy/copdem.zarr --artifacts ./artifacts
+python -m weatheasy.correction apply era5 --store s3://weatheasy/weather \
+    --dem s3://weatheasy/copdem.zarr --artifacts ./artifacts
+```
+
+Model artifacts and station CSV remain local in these commands. Library callers
+create a prepared DEM `Store` with `weatheasy.storage.get_store` and pass it to
+`build_copdem`, training or correction. Direct xarray consumers can open the DEM
+with `xr.open_zarr(store, consolidated=False, chunks=None, decode_coords="all")`.
+
 ## AquaCrop weather
 
 Read prepared ERA5-Land data and calculate daily reference evapotranspiration:
