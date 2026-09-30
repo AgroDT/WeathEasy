@@ -16,11 +16,10 @@ from weatheasy.storage import last_date, open_dataset, prepare_dataset, write_ba
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import zarr
     from zarr.abc.store import Store
 
+    from .artifacts import Artifacts
     from .sources import Source
 
 
@@ -31,7 +30,7 @@ _FIELDS = {'TMP_corr', 'PRATE_corr'}
 def correct_store(  # noqa: C901, PLR0912, PLR0915
     source: Source,
     root: zarr.Group,
-    artifacts_dir: Path,
+    artifacts: Artifacts,
     dem_store: Store,
     *,
     begin: date | None = None,
@@ -59,8 +58,8 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
         raise ValueError(msg)
 
     lats, lons = source.grid(root)
-    temp = TemperatureCorrector(source, artifacts_dir, dem_store).load_artifacts()
-    precip = PrecipCorrector(source, artifacts_dir, dem_store).load_artifacts()
+    temp = TemperatureCorrector(source, artifacts, dem_store).load_artifacts()
+    precip = PrecipCorrector(source, artifacts, dem_store).load_artifacts()
     temp_climate = temp.climatology
     precip_climate = precip.climatology
     if temp_climate is not None and precip_climate is not None:

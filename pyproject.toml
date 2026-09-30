@@ -17,6 +17,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "fsspec>=2024.12",
     "httpx2>=2.13,<3",
     "netcdf4~=1.7",
     "numpy>=2,<3",

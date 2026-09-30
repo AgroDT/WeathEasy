@@ -10,7 +10,6 @@ wet threshold is calibrated so the wet-cell fraction matches the source climatol
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import joblib
@@ -28,6 +27,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
+    from .artifacts import Artifacts
     from .sources import Source
 
 
@@ -62,9 +62,9 @@ _CALIB_SAMPLE = 50_000
 class PrecipCorrector:
     """Load per-source artifacts and bias-correct a daily precipitation grid (mm/day)."""
 
-    def __init__(self, source: Source, artifacts_dir: Path, dem_store: Store) -> None:
+    def __init__(self, source: Source, artifacts: Artifacts, dem_store: Store) -> None:
         self.source = source
-        self.dir = Path(artifacts_dir) / source.name / 'precip'
+        self.dir = artifacts.child(source.name, 'precip')
         self.dem_store = dem_store
         self.clf: Any = None
         self.climatology: Climatology | None = None
@@ -81,24 +81,29 @@ class PrecipCorrector:
 
     def load_artifacts(self) -> PrecipCorrector:
         verify_manifest(self.dir, PRECIP_FILES)
-        self.climatology = Climatology.load(
-            self.dir / 'climatology.npz', self.source, self.source.precip_var
-        )
-        self.clf = joblib.load(self.dir / 'clf.joblib')
-        self.reg = joblib.load(self.dir / 'reg.joblib')
-        self.fallback_clf = joblib.load(self.dir / 'fallback_clf.joblib')
-        self.fallback_reg = joblib.load(self.dir / 'fallback_reg.joblib')
-        self.train_coords = np.load(self.dir / 'train_coords.npy')
-        self.grid_lats = np.load(self.dir / 'lats.npy')
-        self.grid_lons = np.load(self.dir / 'lons.npy')
-        data = np.load(self.dir / 'seasonal.npz')
-        self.threshold = float(data['threshold'])
-        self.fallback_threshold = float(data['fallback_threshold'])
-        self.seasonal = {
-            'log_ratio': {m: data[f'log_ratio_m{m}'] for m in range(1, 13)},
-            'wet_bias': {m: data[f'wet_bias_m{m}'] for m in range(1, 13)},
-        }
-        _LOG.info('Loaded %s precip artifacts from %s', self.source.name, self.dir)
+        self.climatology = Climatology.load(self.dir, self.source, self.source.precip_var)
+        with self.dir.open('clf.joblib') as stream:
+            self.clf = joblib.load(stream)
+        with self.dir.open('reg.joblib') as stream:
+            self.reg = joblib.load(stream)
+        with self.dir.open('fallback_clf.joblib') as stream:
+            self.fallback_clf = joblib.load(stream)
+        with self.dir.open('fallback_reg.joblib') as stream:
+            self.fallback_reg = joblib.load(stream)
+        with self.dir.open('train_coords.npy') as stream:
+            self.train_coords = np.load(stream, allow_pickle=False)
+        with self.dir.open('lats.npy') as stream:
+            self.grid_lats = np.load(stream, allow_pickle=False)
+        with self.dir.open('lons.npy') as stream:
+            self.grid_lons = np.load(stream, allow_pickle=False)
+        with self.dir.open('seasonal.npz') as stream, np.load(stream, allow_pickle=False) as data:
+            self.threshold = float(data['threshold'])
+            self.fallback_threshold = float(data['fallback_threshold'])
+            self.seasonal = {
+                'log_ratio': {m: data[f'log_ratio_m{m}'] for m in range(1, 13)},
+                'wet_bias': {m: data[f'wet_bias_m{m}'] for m in range(1, 13)},
+            }
+        _LOG.info('Loaded %s precip artifacts from %s', self.source.name, self.dir.root)
         return self
 
     @property

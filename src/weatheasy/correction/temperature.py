@@ -9,7 +9,6 @@ features; the prediction is suppressed where the seasonal bias is small.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import joblib
@@ -27,6 +26,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
+    from .artifacts import Artifacts
     from .sources import Source
 
 
@@ -51,9 +51,9 @@ CORRECTION_THRESHOLD = 0.3  # deg C; below this seasonal bias we leave the value
 class TemperatureCorrector:
     """Load per-source artifacts and bias-correct a daily temperature grid."""
 
-    def __init__(self, source: Source, artifacts_dir: Path, dem_store: Store) -> None:
+    def __init__(self, source: Source, artifacts: Artifacts, dem_store: Store) -> None:
         self.source = source
-        self.dir = Path(artifacts_dir) / source.name / 'temp'
+        self.dir = artifacts.child(source.name, 'temp')
         self.dem_store = dem_store
         self.model: Any = None
         self.climatology: Climatology | None = None
@@ -64,15 +64,19 @@ class TemperatureCorrector:
 
     def load_artifacts(self) -> TemperatureCorrector:
         verify_manifest(self.dir, TEMP_FILES)
-        self.climatology = Climatology.load(
-            self.dir / 'climatology.npz', self.source, self.source.temp_var
-        )
-        self.model = joblib.load(self.dir / 'model.joblib')
-        data = np.load(self.dir / 'seasonal_bias_grid.npz')
-        self.seasonal_bias = {m: data[f'month_{m}'] for m in range(1, 13)}
-        self.grid_lats = np.load(self.dir / 'lats.npy')
-        self.grid_lons = np.load(self.dir / 'lons.npy')
-        _LOG.info('Loaded %s temperature artifacts from %s', self.source.name, self.dir)
+        self.climatology = Climatology.load(self.dir, self.source, self.source.temp_var)
+        with self.dir.open('model.joblib') as stream:
+            self.model = joblib.load(stream)
+        with (
+            self.dir.open('seasonal_bias_grid.npz') as stream,
+            np.load(stream, allow_pickle=False) as data,
+        ):
+            self.seasonal_bias = {m: data[f'month_{m}'] for m in range(1, 13)}
+        with self.dir.open('lats.npy') as stream:
+            self.grid_lats = np.load(stream, allow_pickle=False)
+        with self.dir.open('lons.npy') as stream:
+            self.grid_lons = np.load(stream, allow_pickle=False)
+        _LOG.info('Loaded %s temperature artifacts from %s', self.source.name, self.dir.root)
         return self
 
     @property

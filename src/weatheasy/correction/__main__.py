@@ -8,8 +8,9 @@ from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from datetime import date
 from pathlib import Path
 
-from zarr.storage import FsspecStore
+from fsspec.implementations.asyn_wrapper import AsyncFileSystemWrapper
 
+from .artifacts import get_artifacts
 from .sources import SOURCES
 from weatheasy.storage import get_store
 from weatheasy.util import get_storage
@@ -31,7 +32,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('source', choices=sorted(SOURCES))
     parser.add_argument('--store', required=True, help='prepared Zarr v3 store')
     parser.add_argument('--dem', required=True, help='Copernicus DEM Zarr path or s3:// URI')
-    parser.add_argument('--artifacts', type=Path, default=Path('artifacts'))
+    parser.add_argument('--artifacts', default='artifacts', help='model directory or s3:// URI')
     if action == 'train':
         parser.add_argument('--stations', type=Path, required=True)
         parser.add_argument('--only', choices=('temp', 'precip'))
@@ -39,19 +40,26 @@ def main(argv: list[str] | None = None) -> None:
         parser.add_argument('--begin', type=date.fromisoformat)
         parser.add_argument('--end', type=date.fromisoformat)
     args = parser.parse_args(args_list)
-    root = get_storage(args.store)
-    filesystem = (
-        root.store.fs
-        if isinstance(root.store, FsspecStore) and args.dem.startswith('s3://')
-        else None
+    s3_uri = next(
+        (uri for uri in (args.store, args.dem, args.artifacts) if uri.startswith('s3://')),
+        None,
     )
-    dem_store = get_store(args.dem, filesystem=filesystem)
+    filesystem = get_artifacts(s3_uri).fs if s3_uri is not None else None
+    # Wrap the synchronous client for Zarr, keeping the same filesystem for model streams.
+    async_fs = (
+        AsyncFileSystemWrapper(fs=filesystem, asynchronous=True) if filesystem is not None else None
+    )
+    root = get_storage(args.store, filesystem=async_fs if args.store.startswith('s3://') else None)
+    dem_store = get_store(args.dem, filesystem=async_fs if args.dem.startswith('s3://') else None)
+    artifacts = get_artifacts(
+        args.artifacts, filesystem=filesystem if args.artifacts.startswith('s3://') else None
+    )
     source = SOURCES[args.source]
     if action == 'train':
         # Load the training pipeline only for the train command.
         from .training import build_artifacts  # noqa: PLC0415
 
-        build_artifacts(source, root, args.stations, dem_store, args.artifacts, only=args.only)
+        build_artifacts(source, root, args.stations, dem_store, artifacts, only=args.only)
     else:
         # Load the application pipeline only for the apply command.
         from .apply import correct_store  # noqa: PLC0415
@@ -59,7 +67,7 @@ def main(argv: list[str] | None = None) -> None:
         days = correct_store(
             source,
             root,
-            args.artifacts,
+            artifacts,
             dem_store,
             begin=args.begin,
             end=args.end,

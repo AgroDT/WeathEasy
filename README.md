@@ -257,13 +257,25 @@ accepts a local Zarr path or S3 URI:
 
 ```sh
 python -m weatheasy.correction train era5 --store s3://weatheasy/weather \
-    --stations ./stations.csv --dem s3://weatheasy/copdem.zarr --artifacts ./artifacts
+    --stations ./stations.csv --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
 python -m weatheasy.correction apply era5 --store s3://weatheasy/weather \
-    --dem s3://weatheasy/copdem.zarr --artifacts ./artifacts
+    --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
 ```
 
-Model artifacts and station CSV remain local in these commands. Library callers
-create a prepared DEM `Store` with `weatheasy.storage.get_store` and pass it to
+The model directory accepts a local path or S3 URI. It contains separate joblib,
+NumPy and manifest files under `<source>/temp` and `<source>/precip`. Application
+reads these files directly through a filesystem; a downloaded local model bundle
+is unnecessary. Manifests are published after all files and validate their hashes
+before correction starts. Coordinate retraining and application to avoid reading
+a model while its files are being replaced. The station CSV remains local.
+
+Library callers create a prepared `Artifacts` object with
+`weatheasy.correction.artifacts.get_artifacts` and pass it to training or correction.
+The correction CLI shares one synchronous S3 filesystem with an asynchronous
+adapter for weather and DEM Zarr access, reusing the same S3 client. Other callers
+can supply their filesystem when resolving S3 artifact directories.
+
+Create a prepared DEM `Store` with `weatheasy.storage.get_store` and pass it to
 `build_copdem`, training or correction. Direct xarray consumers can open the DEM
 with `xr.open_zarr(store, consolidated=False, chunks=None, decode_coords="all")`.
 

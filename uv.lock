@@ -1783,6 +1783,7 @@ wheels = [
 name = "weatheasy"
 source = { editable = "." }
 dependencies = [
+    { name = "fsspec" },
     { name = "httpx2" },
     { name = "netcdf4" },
     { name = "numpy" },
@@ -1836,6 +1837,7 @@ requires-dist = [
     { name = "eccodes", marker = "extra == 'prepare'", specifier = ">=2.43,<3" },
     { name = "eccodeslib", marker = "sys_platform != 'win32' and extra == 'prepare'", specifier = ">=2.43" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.141" },
+    { name = "fsspec", specifier = ">=2024.12" },
     { name = "httpx2", specifier = ">=2.13,<3" },
     { name = "joblib", marker = "extra == 'correction'", specifier = ">=1.4,<2" },
     { name = "netcdf4", specifier = "~=1.7" },

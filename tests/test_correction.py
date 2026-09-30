@@ -1,5 +1,7 @@
 """Offline correction on coordinate-aware Zarr groups."""
 
+import hashlib
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -9,11 +11,13 @@ import pandas as pd
 import pytest
 import xarray as xr
 import zarr
+from fsspec.implementations.memory import MemoryFileSystem
 from zarr.abc.store import Store
 
 from weatheasy import Coords, get_cfs2_data, get_era5_data
 from weatheasy.build_copdem import _slopes
 from weatheasy.correction import Source, apply, features, training
+from weatheasy.correction.artifacts import Artifacts, get_artifacts
 from weatheasy.correction.climatology import build_climatology
 from weatheasy.correction.precip import WET_FEAT, PrecipCorrector
 from weatheasy.correction.sources import CFS2, ERA5
@@ -179,7 +183,7 @@ def test_correction_append_and_rebuild_resets_progress(
 ):
     root, first = raw_store(tmp_path)
     stub_models(monkeypatch)
-    args = (ERA5, root, tmp_path / 'artifacts', get_store(tmp_path / 'dem.zarr'))
+    args = (ERA5, root, get_artifacts(tmp_path / 'artifacts'), get_store(tmp_path / 'dem.zarr'))
     assert apply.correct_store(*args, end=first) == 1
     assert apply.correct_store(*args) == 1
     assert apply.correct_store(*args) == 0
@@ -205,7 +209,10 @@ def test_correction_append_and_rebuild_resets_progress(
 def test_cfs_cropped_correction_has_own_grid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path, CFS2)
     stub_models(monkeypatch)
-    assert apply.correct_store(CFS2, root, tmp_path, get_store(tmp_path / 'dem.zarr')) == 2
+    assert (
+        apply.correct_store(CFS2, root, get_artifacts(tmp_path), get_store(tmp_path / 'dem.zarr'))
+        == 2
+    )
     inside = get_cfs2_data(
         store=root.store,
         begin=first,
@@ -237,7 +244,7 @@ def test_cfs_correction_resumes_across_missing_calendar_day(
 ):
     root, first = raw_store(tmp_path, CFS2, day_offsets=(0, 2))
     stub_models(monkeypatch)
-    args = (CFS2, root, tmp_path, get_store(tmp_path / 'dem.zarr'))
+    args = (CFS2, root, get_artifacts(tmp_path), get_store(tmp_path / 'dem.zarr'))
     assert apply.correct_store(*args, end=first) == 1
     assert apply.correct_store(*args) == 1
     assert apply.correct_store(*args) == 0
@@ -260,7 +267,7 @@ def test_cfs_correction_resumes_across_missing_calendar_day(
 def test_correction_rejects_skipping_prepared_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path, days=3)
     stub_models(monkeypatch)
-    args = (ERA5, root, tmp_path, get_store(tmp_path / 'dem.zarr'))
+    args = (ERA5, root, get_artifacts(tmp_path), get_store(tmp_path / 'dem.zarr'))
     assert apply.correct_store(*args, end=first) == 1
     with pytest.raises(ValueError, match='cannot skip prepared day 2020-01-02'):
         apply.correct_store(*args, begin=first + timedelta(days=2))
@@ -269,7 +276,9 @@ def test_correction_rejects_skipping_prepared_day(tmp_path: Path, monkeypatch: p
 def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
-    corrector = PrecipCorrector(ERA5, tmp_path, dem_store(tmp_path / 'dem.zarr', lats, lons))
+    corrector = PrecipCorrector(
+        ERA5, get_artifacts(tmp_path), dem_store(tmp_path / 'dem.zarr', lats, lons)
+    )
     corrector.clf = corrector.fallback_clf = AlwaysWet()
     corrector.reg = corrector.fallback_reg = Constant(np.log1p(8))
     corrector.train_coords = np.array([[55.5, 37.5]], np.float32)
@@ -299,7 +308,9 @@ def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest
 def test_temperature_corrector_applies_and_suppresses_small_bias(tmp_path: Path):
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
-    corrector = TemperatureCorrector(ERA5, tmp_path, dem_store(tmp_path / 'dem.zarr', lats, lons))
+    corrector = TemperatureCorrector(
+        ERA5, get_artifacts(tmp_path), dem_store(tmp_path / 'dem.zarr', lats, lons)
+    )
     corrector.model = Constant(1.5)
     corrector.grid_lats, corrector.grid_lons = lats, lons
     corrector.climatology = build_climatology(ERA5, root, ERA5.temp_var, 1.0)
@@ -339,7 +350,7 @@ def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path: Path, 
     temp_model = RecordTemperature()
     lats, lons = source.grid(root)
     terrain = dem_store(tmp_path / 'dem.zarr', lats, lons)
-    temp = TemperatureCorrector(source, tmp_path, terrain)
+    temp = TemperatureCorrector(source, get_artifacts(tmp_path), terrain)
     temp.model = temp_model
     temp.climatology = temp_climate
     temp.grid_lats, temp.grid_lons = source.grid(root)
@@ -349,7 +360,7 @@ def test_training_and_apply_use_same_frozen_cell_month_features(tmp_path: Path, 
     assert temp_model.captured[0, index] == pytest.approx(temp_rows.era5_anomaly.iloc[0])
 
     wet_model = RecordWet()
-    precip = PrecipCorrector(source, tmp_path, terrain)
+    precip = PrecipCorrector(source, get_artifacts(tmp_path), terrain)
     precip.clf = precip.fallback_clf = wet_model
     precip.reg = precip.fallback_reg = Constant(np.log1p(8))
     precip.climatology = precip_climate
@@ -575,7 +586,9 @@ def test_old_artifacts_are_rejected_before_correction_is_deleted(tmp_path: Path)
     old_dir = artifacts / ERA5.name / 'temp'
     old_dir.mkdir(parents=True)
     with pytest.raises(ValueError, match='old or incomplete correction artifacts; retrain'):
-        apply.correct_store(ERA5, root, artifacts, get_store(tmp_path / 'missing.zarr'), end=first)
+        apply.correct_store(
+            ERA5, root, get_artifacts(artifacts), get_store(tmp_path / 'missing.zarr'), end=first
+        )
     assert ERA5.correction_path not in root
 
 
@@ -586,8 +599,126 @@ def test_interrupted_retraining_artifacts_are_rejected(tmp_path: Path):
     directory.mkdir()
     for name in TEMP_FILES:
         (directory / name).write_bytes(b'original')
-    write_manifest(directory, TEMP_FILES)
-    verify_manifest(directory, TEMP_FILES)
+    write_manifest(get_artifacts(directory), TEMP_FILES)
+    verify_manifest(get_artifacts(directory), TEMP_FILES)
     (directory / 'model.joblib').write_bytes(b'interrupted replacement')
     with pytest.raises(ValueError, match='incomplete or modified correction artifacts'):
-        verify_manifest(directory, TEMP_FILES)
+        verify_manifest(get_artifacts(directory), TEMP_FILES)
+
+
+@pytest.fixture(params=['local', 'memory'])
+def artifact_directory(request: pytest.FixtureRequest, tmp_path: Path) -> Artifacts:
+    if request.param == 'local':
+        return get_artifacts(tmp_path / 'models')
+    return Artifacts(MemoryFileSystem(), f'/models/{tmp_path.name}')
+
+
+def test_filesystem_model_training_application_and_resume(
+    artifact_directory: Artifacts, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root, first = raw_store(tmp_path)
+    terrain = dem_store(tmp_path / 'dem.zarr', *ERA5.grid(root))
+    stations = tmp_path / 'stations.csv'
+    pd.DataFrame(
+        [
+            (
+                station,
+                55.1 + station * 0.1,
+                37.1 + station * 0.1,
+                (first + timedelta(days=day)).isoformat(),
+                8.0,
+                3.0 if station % 2 else 0.0,
+            )
+            for station in range(6)
+            for day in range(2)
+        ],
+        columns=['station_id', 'lat', 'lon', 'date', 'temperature', 'precipitation'],
+    ).to_csv(stations, index=False)
+    monkeypatch.setitem(training._XGB_PARAMS, 'n_estimators', 8)
+    training.build_artifacts(ERA5, root, stations, terrain, artifact_directory)
+    # A fresh reader has no handles or in-memory model state from training.
+    fresh = Artifacts(artifact_directory.fs, artifact_directory.root)
+    assert apply.correct_store(ERA5, root, fresh, terrain, end=first) == 1
+    assert apply.correct_store(ERA5, root, fresh, terrain) == 1
+    assert apply.correct_store(ERA5, root, fresh, terrain) == 0
+    with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
+        corrected = ds.TMP_corr.to_numpy()
+        assert ds.sizes['time'] == 2
+        assert np.isfinite(ds.TMP_corr[0, 0, 0])
+        assert float(ds.TMP_corr[0, 0, 0]) < 10
+        assert np.isnan(ds.PRATE_corr[0, 1, 1])
+    with fresh.child(ERA5.name, 'temp').open('model.joblib', 'wb') as stream:
+        stream.write(b'interrupted retraining')
+    with pytest.raises(ValueError, match='incomplete or modified correction artifacts'):
+        apply.correct_store(ERA5, root, fresh, terrain)
+    with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
+        np.testing.assert_array_equal(ds.TMP_corr.to_numpy(), corrected)
+
+
+@pytest.mark.parametrize('damage', ['missing-manifest', 'missing-file', 'hash', 'schema'])
+def test_manifest_validates_filesystem_bundle(artifact_directory: Artifacts, damage: str):
+    from weatheasy.correction.climatology import verify_manifest, write_manifest
+
+    directory = artifact_directory
+    directory.fs.makedirs(directory.root, exist_ok=True)
+    for name, contents in [('a.joblib', b'first'), ('b.npz', b'second')]:
+        with directory.open(name, 'wb') as stream:
+            stream.write(contents)
+    files = ('a.joblib', 'b.npz')
+    write_manifest(directory, files)
+    with directory.open('manifest.json') as stream:
+        manifest = json.load(stream)
+    assert manifest == {
+        'schema': 'cell_month_v1',
+        'files': {
+            'a.joblib': hashlib.sha256(b'first').hexdigest(),
+            'b.npz': hashlib.sha256(b'second').hexdigest(),
+        },
+    }
+    verify_manifest(directory, files)
+    if damage == 'missing-manifest':
+        directory.fs.rm(directory.child('manifest.json').root)
+        message = 'old or incomplete correction artifacts'
+    elif damage == 'missing-file':
+        directory.fs.rm(directory.child('b.npz').root)
+        message = 'incomplete or modified correction artifacts'
+    elif damage == 'hash':
+        with directory.open('a.joblib', 'wb') as stream:
+            stream.write(b'replaced')
+        message = 'incomplete or modified correction artifacts'
+    else:
+        manifest['schema'] = 'incompatible'
+        with directory.open('manifest.json', 'wb') as stream:
+            stream.write(json.dumps(manifest).encode())
+        message = 'incompatible correction artifacts'
+    with pytest.raises(ValueError, match=message):
+        verify_manifest(directory, files)
+
+
+def test_failed_manifest_publication_keeps_previous_manifest(
+    artifact_directory: Artifacts, monkeypatch: pytest.MonkeyPatch
+):
+    from weatheasy.correction import climatology
+
+    directory = artifact_directory
+    directory.fs.makedirs(directory.root, exist_ok=True)
+    with directory.open('model.joblib', 'wb') as stream:
+        stream.write(b'original')
+    climatology.write_manifest(directory, ('model.joblib',))
+    with directory.open('manifest.json') as stream:
+        previous = stream.read()
+    with directory.open('model.joblib', 'wb') as stream:
+        stream.write(b'retrained')
+
+    def failed_serialization(*_args, **_kwargs):
+        msg = 'interrupted publication'
+        raise RuntimeError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(climatology.json, 'dumps', failed_serialization)
+        with pytest.raises(RuntimeError, match='interrupted publication'):
+            climatology.write_manifest(directory, ('model.joblib',))
+    with directory.open('manifest.json') as stream:
+        assert stream.read() == previous
+    with pytest.raises(ValueError, match='incomplete or modified correction artifacts'):
+        climatology.verify_manifest(directory, ('model.joblib',))

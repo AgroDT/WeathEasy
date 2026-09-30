@@ -72,36 +72,63 @@ def test_build_publishes_spatial_terrain_store(
     np.testing.assert_array_equal(terrain['lons'], [10.25, 10.75, 11.25, 11.75])
 
 
+@pytest.mark.parametrize('action', ['train', 'apply'])
+@pytest.mark.parametrize('remote_weather', [True, False])
 def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, action: str, *, remote_weather: bool
 ):
-    from weatheasy.correction import __main__ as cli, training
+    from weatheasy.correction import __main__ as cli, apply, training
+    from weatheasy.correction.artifacts import get_artifacts
 
     s3fs = pytest.importorskip('s3fs')
-    filesystem = s3fs.S3FileSystem(asynchronous=True)
-    weather = SimpleNamespace(store=get_store('s3://weather/prepared', filesystem=filesystem))
-    monkeypatch.setattr(cli, 'get_storage', lambda _uri: weather)
+    filesystem = s3fs.S3FileSystem()
+    weather = SimpleNamespace()
     received = []
+    weather_uri = 's3://weather/prepared' if remote_weather else './weather'
+
+    def artifacts_for_uri(uri, *, filesystem=None):  # noqa: ANN001
+        return get_artifacts(uri, filesystem=filesystem or shared_filesystem)
+
+    shared_filesystem = filesystem
+    monkeypatch.setattr(cli, 'get_artifacts', artifacts_for_uri)
+
+    def open_weather(uri, *, filesystem):  # noqa: ANN001
+        assert uri == weather_uri
+        if remote_weather:
+            assert filesystem.sync_fs is shared_filesystem
+        else:
+            assert filesystem is None
+        return weather
+
+    monkeypatch.setattr(cli, 'get_storage', open_weather)
 
     def build_artifacts(source, root, stations, terrain, artifacts, *, only):  # noqa: ANN001, ARG001
-        received.append((root, terrain))
+        received.append((root, terrain, artifacts))
+
+    def correct_store(source, root, artifacts, terrain, *, begin, end):  # noqa: ANN001, ARG001
+        received.append((root, terrain, artifacts))
+        return 0
 
     monkeypatch.setattr(training, 'build_artifacts', build_artifacts)
-    cli.main(
-        [
-            'train',
-            'era5',
-            '--store',
-            's3://weather/prepared',
-            '--dem',
-            's3://terrain/copdem.zarr',
-            '--stations',
-            'stations.csv',
-        ],
-    )
+    monkeypatch.setattr(apply, 'correct_store', correct_store)
+    arguments = [
+        action,
+        'era5',
+        '--store',
+        weather_uri,
+        '--dem',
+        's3://terrain/copdem.zarr',
+        '--artifacts',
+        's3://models/correction',
+    ]
+    if action == 'train':
+        arguments.extend(['--stations', 'stations.csv'])
+    cli.main(arguments)
     assert len(received) == 1
-    root, terrain = received[0]
+    root, terrain, artifacts = received[0]
     assert root is weather
     assert isinstance(terrain, FsspecStore)
     assert terrain.path == 'terrain/copdem.zarr'
-    assert terrain.fs is filesystem
+    assert terrain.fs.sync_fs is shared_filesystem
+    assert artifacts.fs is shared_filesystem
+    assert artifacts.root == 'models/correction'

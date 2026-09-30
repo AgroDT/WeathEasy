@@ -11,7 +11,6 @@ import logging
 import uuid
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import joblib
@@ -35,11 +34,13 @@ from weatheasy.storage import StorageError, select_point
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     import zarr
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
+    from .artifacts import Artifacts
     from .sources import Source
 
 
@@ -202,7 +203,7 @@ def build_temp_artifacts(
     root: zarr.Group,
     stations_csv: Path,
     dem_store: Store,
-    artifacts_dir: Path,
+    artifacts: Artifacts,
 ) -> None:
     """Train the temperature corrector for ``source`` and write its artifacts."""
     dem = features.load_dem(dem_store)
@@ -214,20 +215,22 @@ def build_temp_artifacts(
     lats, lons = source.grid(root)
     seasonal = idw_seasonal(dataset, 'era5_seasonal_bias', lats, lons)
 
-    out = Path(artifacts_dir) / source.name / 'temp'
-    out.mkdir(parents=True, exist_ok=True)
+    out = artifacts.child(source.name, 'temp')
+    out.fs.makedirs(out.root, exist_ok=True)
     climate.metadata['training_id'] = uuid.uuid4().hex
-    climate.save(out / 'climatology.npz')
-    joblib.dump(model, out / 'model.joblib')
-    np.savez_compressed(
-        out / 'seasonal_bias_grid.npz',
-        allow_pickle=False,
-        **{f'month_{m}': seasonal[m] for m in range(1, 13)},
-    )
-    np.save(out / 'lats.npy', lats)
-    np.save(out / 'lons.npy', lons)
+    climate.save(out)
+    with out.open('model.joblib', 'wb') as stream:
+        joblib.dump(model, stream)
+    with out.open('seasonal_bias_grid.npz', 'wb') as stream:
+        np.savez_compressed(
+            stream, allow_pickle=False, **{f'month_{m}': seasonal[m] for m in range(1, 13)}
+        )
+    with out.open('lats.npy', 'wb') as stream:
+        np.save(stream, lats)
+    with out.open('lons.npy', 'wb') as stream:
+        np.save(stream, lons)
     write_manifest(out, TEMP_FILES)
-    _LOG.info('Wrote temperature artifacts for %s to %s', source.name, out)
+    _LOG.info('Wrote temperature artifacts for %s to %s', source.name, out.root)
 
 
 def _temp_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
@@ -301,7 +304,7 @@ def build_precip_artifacts(
     root: zarr.Group,
     stations_csv: Path,
     dem_store: Store,
-    artifacts_dir: Path,
+    artifacts: Artifacts,
 ) -> None:
     """Train the two-stage precipitation corrector for ``source`` and write its artifacts."""
     dem = features.load_dem(dem_store)
@@ -324,24 +327,32 @@ def build_precip_artifacts(
     wet_bias = idw_seasonal(dataset, 'precip_wet_bias', lats, lons)
     train_coords = dataset[['lat', 'lon']].drop_duplicates().to_numpy().astype(np.float32)
 
-    out = Path(artifacts_dir) / source.name / 'precip'
-    out.mkdir(parents=True, exist_ok=True)
+    out = artifacts.child(source.name, 'precip')
+    out.fs.makedirs(out.root, exist_ok=True)
     climate.metadata['training_id'] = uuid.uuid4().hex
-    climate.save(out / 'climatology.npz')
-    joblib.dump(clf, out / 'clf.joblib')
-    joblib.dump(reg, out / 'reg.joblib')
-    joblib.dump(fallback_clf, out / 'fallback_clf.joblib')
-    joblib.dump(fallback_reg, out / 'fallback_reg.joblib')
-    np.save(out / 'train_coords.npy', train_coords)
-    np.save(out / 'lats.npy', lats)
-    np.save(out / 'lons.npy', lons)
+    climate.save(out)
+    with out.open('clf.joblib', 'wb') as stream:
+        joblib.dump(clf, stream)
+    with out.open('reg.joblib', 'wb') as stream:
+        joblib.dump(reg, stream)
+    with out.open('fallback_clf.joblib', 'wb') as stream:
+        joblib.dump(fallback_clf, stream)
+    with out.open('fallback_reg.joblib', 'wb') as stream:
+        joblib.dump(fallback_reg, stream)
+    with out.open('train_coords.npy', 'wb') as stream:
+        np.save(stream, train_coords)
+    with out.open('lats.npy', 'wb') as stream:
+        np.save(stream, lats)
+    with out.open('lons.npy', 'wb') as stream:
+        np.save(stream, lons)
     seasonal: dict[str, Any] = {'threshold': threshold, 'fallback_threshold': fallback_threshold}
     for month in range(1, 13):
         seasonal[f'log_ratio_m{month}'] = log_ratio[month]
         seasonal[f'wet_bias_m{month}'] = wet_bias[month]
-    np.savez_compressed(out / 'seasonal.npz', **seasonal)
+    with out.open('seasonal.npz', 'wb') as stream:
+        np.savez_compressed(stream, **seasonal)
     write_manifest(out, PRECIP_FILES)
-    _LOG.info('Wrote precip artifacts for %s to %s', source.name, out)
+    _LOG.info('Wrote precip artifacts for %s to %s', source.name, out.root)
 
 
 def _precip_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
@@ -417,12 +428,12 @@ def build_artifacts(
     root: zarr.Group,
     stations_csv: Path,
     dem_store: Store,
-    artifacts_dir: Path,
+    artifacts: Artifacts,
     *,
     only: str | None = None,
 ) -> None:
     """Train and write both correctors' artifacts for ``source`` (or just one)."""
     if only in (None, 'temp'):
-        build_temp_artifacts(source, root, stations_csv, dem_store, artifacts_dir)
+        build_temp_artifacts(source, root, stations_csv, dem_store, artifacts)
     if only in (None, 'precip'):
-        build_precip_artifacts(source, root, stations_csv, dem_store, artifacts_dir)
+        build_precip_artifacts(source, root, stations_csv, dem_store, artifacts)
