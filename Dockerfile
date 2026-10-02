@@ -12,13 +12,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends libgdal-dev
+    && apt-get install -y -qq --no-install-recommends \
+        libeccodes-dev \
+        libgdal-dev \
+        proj-bin
 WORKDIR /usr/src/weatheasy
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --all-extras --no-install-project --no-dev \
-        --no-binary-package rasterio \
-        --no-binary-package netcdf4
+        --no-install-package eccodeslib \
+        --no-install-package eckitlib \
+        --no-binary-package eccodes \
+        --no-binary-package netcdf4 \
+        --no-binary-package pyproj \
+        --no-binary-package rasterio
 COPY . .
 ARG UV_DYNAMIC_VERSIONING_BYPASS='0.0.0'
 RUN . "$VENV_DIR/bin/activate" \
@@ -26,13 +33,16 @@ RUN . "$VENV_DIR/bin/activate" \
 
 FROM python:${PYVERSION}-slim-${FLAVOUR}
 ARG VENV_DIR
-ENV PATH="$VENV_DIR/bin:$PATH"
+ENV PATH="$VENV_DIR/bin:$PATH" \
+    ECCODES_PYTHON_USE_FINDLIBS=1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends "$(apt-cache depends libgdal-dev | awk '$1 == "Depends:" && $2 ~ /^libgdal[0-9]/ { print $2 }')"
-COPY --from=builder $VENV_DIR $VENV_DIR
+    && apt-get install -y -qq --no-install-recommends \
+        "$(apt-cache depends libeccodes-dev | awk '$1 == "Depends:" && $2 ~ /^libeccodes[0-9]/ { print $2 }')" \
+        "$(apt-cache depends libgdal-dev | awk '$1 == "Depends:" && $2 ~ /^libgdal[0-9]/ { print $2 }')"
+    COPY --from=builder $VENV_DIR $VENV_DIR
 RUN groupadd --gid 1000 weatheasy \
     && useradd --uid 1000 --gid weatheasy --home-dir /var/lib/weatheasy --create-home weatheasy
 WORKDIR /var/lib/weatheasy
