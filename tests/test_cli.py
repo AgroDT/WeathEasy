@@ -65,23 +65,35 @@ runpy.run_module('weatheasy', run_name='__main__')
         assert result.stdout
 
 
-def test_query_local_store_without_optional_imports(tmp_path: Path):
+@pytest.mark.parametrize(
+    ('source', 'group', 'variable', 'units'),
+    [
+        ('cmip6', 'cmip6/tas', 'tas', 'K'),
+        ('cfs2', 'cfs2/reanalysis/flx', 'TMP', 'degC'),
+        ('era5', 'era5/daily', 'TMP', 'degC'),
+    ],
+)
+def test_query_local_store_without_optional_imports(
+    tmp_path: Path, source: str, group: str, variable: str, units: str
+):
     import numpy as np
     import xarray as xr
 
-    from weatheasy.storage import get_store, prepare_dataset, write_batch
+    from weatheasy.storage import get_store, prepare_dataset, set_group_attrs, write_batch
 
     store = tmp_path / 'weather.zarr'
+    if source == 'cfs2':
+        set_group_attrs(get_store(store), 'cfs2', updated='2000-01-05')
     write_batch(
         get_store(store),
-        'cmip6/tas',
+        group,
         prepare_dataset(
             xr.Dataset(
                 {
-                    'tas': (
+                    variable: (
                         ('time', 'latitude', 'longitude'),
                         np.array([[[280.25, 290.0], [310.0, 320.0]]]),
-                        {'units': 'K'},
+                        {'units': units},
                     )
                 },
                 coords={
@@ -114,21 +126,21 @@ print('stdout-still-open')
             '-c',
             script,
             'query',
-            'cmip6',
+            source,
             '--store',
             str(store),
             '2000-01-01',
             '2000-01-01',
             '55',
             '37',
-            'tas',
+            variable,
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout == 'DATE,tas\n2000-01-01,280.25\nstdout-still-open\n'
+    assert result.stdout == f'DATE,{variable}\n2000-01-01,280.25\nstdout-still-open\n'
 
 
 def test_download_rejects_era5_area_for_other_sources():

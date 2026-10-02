@@ -18,8 +18,7 @@ RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
         --no-binary-package netcdf4
 COPY . .
 ARG UV_DYNAMIC_VERSIONING_BYPASS='0.0.0'
-RUN --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uv,target=/bin/uv \
-    --mount=from=ghcr.io/astral-sh/uv:0.5.4,source=/uvx,target=/bin/uvx \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
     . "$VENV_DIR/bin/activate" \
     && UV_DYNAMIC_VERSIONING_BYPASS=$UV_DYNAMIC_VERSIONING_BYPASS uv pip install --no-cache --no-deps .
 

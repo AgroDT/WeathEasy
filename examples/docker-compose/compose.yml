@@ -28,6 +28,8 @@ services:
       context: .
       # Custom Dockerfile with cron installed.
       dockerfile: cfs2-updater.dockerfile
+      args:
+        WEATHEASY_TAG: ${WEATHEASY_TAG:-latest}
     restart: on-failure
     environment: *common-environment
     volumes:

@@ -7,7 +7,10 @@ solutions in production, such as [swarm-cronjob](https://crazymax.dev/swarm-cron
 for Docker Swarm and [CronJob](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/)
 for Kubernetes.
 
-See [compose.yml](./compose.yml) file for details.
+See [compose.yml](./compose.yml) file for details. API and download services
+use the same `WEATHEASY_TAG` (default: `latest`). The image includes all extras;
+the API runs uvicorn, while scheduled and one-off downloads use the `weatheasy`
+CLI. The cron file sets `PATH` to include the image's virtual environment.
 
 ## Configuration
 

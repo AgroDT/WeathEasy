@@ -39,17 +39,29 @@ python3 -m weatheasy -v
 
 ## Extras
 
-By default WeathEasy is only available from command line interface with local
-storage. The following extras are available to extend its functionality:
+The base package supports local queries of prepared weather data, CMIP6
+preparation, and DEM preparation. Install extras for the workflows you use:
 
-- `s3` - enables support for S3-compatible storage for WeathEasy data
-- `web` - enables web API endpoint
+| Extra | Enables |
+| --- | --- |
+| `s3` | S3 access for weather data, DEM, model artifacts, station inputs and results |
+| `web` | The API launched with `uvicorn weatheasy.web:app` |
+| `prepare` | CFS2 GRIB decoding and ERA5 downloads through CDS |
+| `correction` | Training and applying bias correction models |
+| `emdna` | Interpolation of station observations |
 
-To install WeathEasy with extras run
+For example, querying S3 through the web API needs `s3,web`, while downloading
+CFS2 or ERA5 into S3 needs `s3,prepare`:
 
 ```sh
-python3 -m pip install weatheasy[s3,web]
+python3 -m pip install 'weatheasy[s3,web]'
+python3 -m pip install 'weatheasy[s3,prepare]'
 ```
+
+Reading prepared CFS2 and ERA5 data does not require `prepare`. Applying an
+existing model requires `correction`, but does not require `prepare`. Add `s3`
+to any workflow that reads or writes an S3 URI. Command help and `--version`
+are available with the base package.
 
 ## Configuration
 
@@ -76,6 +88,13 @@ forecast if necessary. See [below](#download-cli) for details.
 ‼️ The initial download of data may take a long time: from several days to
 several weeks, depending on network bandwidth, the state of the source data
 servers, and (possibly) star positions.
+
+| Command | Required extra for local data |
+| --- | --- |
+| `query`, `list-vars`, `dem`, `download cmip6` | Base package |
+| `download cfs2`, `download era5` | `prepare` |
+| `correction train`, `correction apply` | `correction` |
+| `emdna temperature`, `emdna precipitation` | `emdna` |
 
 All CLI commands can be invoked as `weatheasy ...` or `python -m weatheasy ...`.
 The web application is launched separately with `uvicorn weatheasy.web:app`.
@@ -186,9 +205,9 @@ example, to download CFSv2 data with docker run:
 
 ```sh
 docker run --rm -it \
-    --entrypoint python \
+    --entrypoint weatheasy \
     ghcr.io/agrodt/weatheasy \
-    -m weatheasy download cfs2 \
+    download cfs2 \
     --store s3://weatheasy/zarr
 ```
 
@@ -214,6 +233,7 @@ S3 prefix such as `s3://weatheasy/zarr`. For example, direct xarray consumers ca
 open the FLX grid with:
 
 ```python
+import rioxarray  # Registers the .rio accessor.
 import xarray as xr
 
 forecast = xr.open_zarr(
