@@ -33,13 +33,13 @@ services:
     restart: on-failure
     environment: *common-environment
     volumes:
-      - weatheasy-data:/data
+      - weatheasy-data:/var/lib/weatheasy
 
   # Downloads CMIP6 data (runs once).
   downloader-cmip6:
     image: ghcr.io/agrodt/weatheasy:${WEATHEASY_TAG:-latest}
     restart: on-failure
-    entrypoint: ["weatheasy", "download", "cmip6", "--store", "$WEATHEASY__DATA_ROOT", "--download-dir", "/data"]
+    entrypoint: ["weatheasy", "download", "cmip6", "--store", "$WEATHEASY__DATA_ROOT", "--download-dir", "/var/lib/weatheasy"]
     environment: *common-environment
     volumes:
-      - weatheasy-data:/data
+      - weatheasy-data:/var/lib/weatheasy

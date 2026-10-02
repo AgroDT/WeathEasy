@@ -33,4 +33,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends "$(apt-cache depends libgdal-dev | awk '$1 == "Depends:" && $2 ~ /^libgdal[0-9]/ { print $2 }')"
 COPY --from=builder $VENV_DIR $VENV_DIR
+RUN groupadd --gid 1000 weatheasy \
+    && useradd --uid 1000 --gid weatheasy --home-dir /var/lib/weatheasy --create-home weatheasy
+WORKDIR /var/lib/weatheasy
+USER 1000:1000
 ENTRYPOINT ["uvicorn", "weatheasy.web:app", "--host", "0.0.0.0"]

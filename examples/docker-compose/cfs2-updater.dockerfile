@@ -1,6 +1,7 @@
 ARG WEATHEASY_TAG=latest
 
 FROM ghcr.io/agrodt/weatheasy:$WEATHEASY_TAG
+USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cron \
     && rm -rf /etc/cron.*/* \

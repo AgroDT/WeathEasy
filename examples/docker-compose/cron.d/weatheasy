@@ -1,3 +1,3 @@
 PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin
 
-0 5 * * *	root	flock -n /tmp/cfs.lock weatheasy download cfs2 --store "$WEATHEASY__DATA_ROOT" --download-dir /data
+0 5 * * *	weatheasy	flock -n /tmp/cfs.lock weatheasy download cfs2 --store "$WEATHEASY__DATA_ROOT" --download-dir /var/lib/weatheasy
