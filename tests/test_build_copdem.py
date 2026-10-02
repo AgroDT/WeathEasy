@@ -78,7 +78,9 @@ def test_build_publishes_spatial_terrain_store(
 def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
     monkeypatch: pytest.MonkeyPatch, action: str, *, remote_weather: bool
 ):
-    from weatheasy.correction import __main__ as cli, apply, training
+    from weatheasy import _cli as cli
+    from weatheasy._cli import _storage
+    from weatheasy.correction import apply, training
     from weatheasy.file_storage import FileStore, get_file_store
 
     s3fs = pytest.importorskip('s3fs')
@@ -93,7 +95,7 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
         )
 
     shared_filesystem = filesystem
-    monkeypatch.setattr(cli, 'get_file_store', artifacts_for_uri)
+    monkeypatch.setattr(_storage, 'get_file_store', artifacts_for_uri)
 
     def open_weather(uri, *, filesystem):  # noqa: ANN001
         assert uri == weather_uri
@@ -103,7 +105,7 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
             assert filesystem is None
         return weather
 
-    monkeypatch.setattr(cli, 'get_storage', open_weather)
+    monkeypatch.setattr(_storage, 'get_storage', open_weather)
 
     def open_station_file(self: FileStore, name: str = '', mode: str = 'rb') -> BytesIO:
         assert self.fs is shared_filesystem
@@ -127,6 +129,7 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
     monkeypatch.setattr(training, 'build_artifacts', build_artifacts)
     monkeypatch.setattr(apply, 'correct_store', correct_store)
     arguments = [
+        'correction',
         action,
         'era5',
         '--store',

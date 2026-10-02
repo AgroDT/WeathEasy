@@ -14,7 +14,6 @@ import zarr
 from fsspec.implementations.memory import MemoryFileSystem
 from zarr.abc.store import Store
 
-from weatheasy import Coords, get_cfs2_data, get_era5_data
 from weatheasy.build_copdem import _slopes
 from weatheasy.correction import Source, apply, features, training
 from weatheasy.correction.climatology import build_climatology
@@ -23,6 +22,7 @@ from weatheasy.correction.sources import CFS2, ERA5
 from weatheasy.correction.temperature import FEATURE_COLS, TemperatureCorrector
 from weatheasy.error import CoordsError
 from weatheasy.file_storage import FileStore, get_file_store
+from weatheasy.query import Coords, get_cfs2_data, get_era5_data
 from weatheasy.storage import get_store, open_dataset, prepare_dataset, write_batch
 from weatheasy.util import get_storage
 
@@ -533,7 +533,7 @@ def test_dem_slope_uses_longitude_scale_at_60_degrees():
 
 
 def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from weatheasy.correction.__main__ import main
+    from weatheasy._cli import main
 
     root, first = raw_store(tmp_path)
     dem_path = tmp_path / 'dem.zarr'
@@ -565,16 +565,16 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
         '--artifacts',
         str(tmp_path / 'artifacts'),
     ]
-    main(['train', *common, '--stations', str(stations)])
-    main(['apply', *common, '--end', first.isoformat()])
+    main(['correction', 'train', *common, '--stations', str(stations)])
+    main(['correction', 'apply', *common, '--end', first.isoformat()])
     old_id = root[ERA5.correction_path].attrs['correction_artifact_id']
     with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
         assert ds.sizes['time'] == 1
         assert np.isfinite(ds.TMP_corr).all()
         assert float(ds.TMP_corr.mean()) < 10
         assert np.isnan(ds.PRATE_corr[0, 1, 1])
-    main(['train', *common, '--stations', str(stations), '--only', 'temp'])
-    main(['apply', *common])
+    main(['correction', 'train', *common, '--stations', str(stations), '--only', 'temp'])
+    main(['correction', 'apply', *common])
     assert root[ERA5.correction_path].attrs['correction_artifact_id'] != old_id
     with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
         assert ds.sizes['time'] == 2  # Rebuilt from the first day with the new model pair.

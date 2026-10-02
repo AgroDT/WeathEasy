@@ -9,19 +9,17 @@ This is a one-off build step (terrain is static); it is NOT part of the realtime
 download path.
 
 Example (full Russia, 0.1°):
-    python -m weatheasy.build_copdem --area 82 19 41 180 -o copdem_russia_01deg.zarr
+    weatheasy dem --area 82 19 41 180 -o copdem_russia_01deg.zarr
 
 Smoke test (single tile near Moscow):
-    python -m weatheasy.build_copdem --area 56 37 55 38 -o copdem_moscow.zarr
+    weatheasy dem --area 56 37 55 38 -o copdem_moscow.zarr
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from itertools import product
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -31,10 +29,10 @@ import xarray as xr
 from httpx2 import Client, HTTPTransport
 from rasterio.enums import Resampling
 
-from weatheasy.storage import get_store
-
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from zarr.abc.store import Store
 
 
@@ -207,38 +205,3 @@ def _write_zarr(  # noqa: PLR0917
     with rioxarray.set_options(export_grid_mapping=True):
         ds = ds.rio.write_crs('EPSG:4326').rio.write_coordinate_system().rio.write_transform()
     ds.to_zarr(output, mode='w', zarr_format=3, consolidated=False)
-
-
-def main() -> None:
-    logging.basicConfig(
-        format='%(asctime)s %(name)s [%(levelname)s] %(message)s',
-        level=logging.INFO,
-    )
-    parser = ArgumentParser('build_copdem', formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        '--area',
-        type=int,
-        nargs=4,
-        metavar=('N', 'W', 'S', 'E'),
-        default=[82, 19, 41, 180],
-        help='bounding box in whole degrees (Russia by default)',
-    )
-    parser.add_argument('--resolution', type=float, default=0.1, help='output grid step in degrees')
-    parser.add_argument(
-        '-o',
-        '--output',
-        default='copdem_russia_01deg.zarr',
-        help='output Zarr path or s3:// URI',
-    )
-    parser.add_argument(
-        '--cache-dir',
-        type=Path,
-        default=Path('copdem-cache'),
-        help='directory for downloaded tiles (enables resume)',
-    )
-    args = parser.parse_args()
-    build_copdem(tuple(args.area), args.resolution, get_store(args.output), args.cache_dir)
-
-
-if __name__ == '__main__':
-    main()

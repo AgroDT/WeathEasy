@@ -77,12 +77,15 @@ forecast if necessary. See [below](#download-cli) for details.
 several weeks, depending on network bandwidth, the state of the source data
 servers, and (possibly) star positions.
 
+All CLI commands can be invoked as `weatheasy ...` or `python -m weatheasy ...`.
+The web application is launched separately with `uvicorn weatheasy.web:app`.
+
 ### Download CLI
 
 To download weather and climate data run:
 
 ```sh
-python3 -m weatheasy.download -d STORE {cfs2,cmip6}
+weatheasy download {cfs2,cmip6,era5} --store STORE
 ```
 
 Where `STORE` can be a local path or an S3 link in format
@@ -99,13 +102,13 @@ original downloaded files (GRIB2 for CFSv2 and NetCDF for CMIP6).
 A full example for CFSv2:
 
 ```sh
-python3 -m weatheasy.download -d s3://weatheasy/zarr --download-dir ./downloads cfs2
+weatheasy download cfs2 --store s3://weatheasy/zarr --download-dir ./downloads
 ```
 
 To display the full help message, run:
 
 ```sh
-python3 -m weatheasy.download -h
+weatheasy download -h
 ```
 
 ### Query CLI
@@ -113,7 +116,7 @@ python3 -m weatheasy.download -h
 To query downloaded data run:
 
 ```sh
-python3 -m weatheasy -d STORE -o PATH {cfs2,cmip6} begin end latitude longitude var [var ...]
+weatheasy query {cfs2,cmip6,era5} --store STORE -o PATH begin end latitude longitude var [var ...]
 ```
 
 Where:
@@ -135,7 +138,7 @@ python3 -m weatheasy list-vars
 A full example for CFSv2, Moscow:
 
 ```sh
-python3 -m weatheasy -d s3://weatheasy/zarr cfs2 \
+weatheasy query cfs2 --store s3://weatheasy/zarr \
     2024-01-01 2024-01-31 \
     55.75222 37.61556 \
     TMIN TMAX TMP
@@ -145,8 +148,8 @@ To display the full help message, run:
 
 ```sh
 python3 -m weatheasy -h
-python3 -m weatheasy cfs2 -h
-python3 -m weatheasy cmip6 -h
+weatheasy query cfs2 -h
+weatheasy query cmip6 -h
 ```
 
 ### Web API
@@ -185,9 +188,8 @@ example, to download CFSv2 data with docker run:
 docker run --rm -it \
     --entrypoint python \
     ghcr.io/agrodt/weatheasy \
-    -m weatheasy.download \
-    -d s3://weatheasy/zarr \
-    cfs2
+    -m weatheasy download cfs2 \
+    --store s3://weatheasy/zarr
 ```
 
 Find an example for Docker Compose at [examples/docker-compose](examples/docker-compose).
@@ -240,9 +242,9 @@ atomic multi-object transaction on S3.
 Build the static Copernicus DEM once and publish it as a spatial Zarr v3 dataset:
 
 ```sh
-python -m weatheasy.build_copdem --area 56 37 55 38 -o ./copdem.zarr
+weatheasy dem --area 56 37 55 38 -o ./copdem.zarr
 # Publish directly to S3 using the same command:
-python -m weatheasy.build_copdem --area 56 37 55 38 -o s3://weatheasy/copdem.zarr
+weatheasy dem --area 56 37 55 38 -o s3://weatheasy/copdem.zarr
 ```
 
 Downloaded source tiles stay in the local `--cache-dir` and can be reused after
@@ -256,9 +258,9 @@ Both training and application read the same prepared DEM. Their `--dem` argument
 accepts a local Zarr path or S3 URI:
 
 ```sh
-python -m weatheasy.correction train era5 --store s3://weatheasy/weather \
+weatheasy correction train era5 --store s3://weatheasy/weather \
     --stations ./stations.csv --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
-python -m weatheasy.correction apply era5 --store s3://weatheasy/weather \
+weatheasy correction apply era5 --store s3://weatheasy/weather \
     --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
 ```
 
@@ -362,15 +364,15 @@ export AWS_SECRET_ACCESS_KEY=minioadmin
 Install `weatheasy[emdna]` and run either processor independently:
 
 ```sh
-python -m weatheasy.emdna temperature stations.csv -o temperature-results
-python -m weatheasy.emdna precipitation stations.csv -o precipitation-results
+weatheasy emdna temperature stations.csv -o temperature-results
+weatheasy emdna precipitation stations.csv -o precipitation-results
 ```
 
 Station CSV, ERA5 input directory, and output directory accept local paths or
 `s3://` URIs. S3 locations share one filesystem client within the command. For example:
 
 ```sh
-python -m weatheasy.emdna temperature s3://weather/stations.csv \
+weatheasy emdna temperature s3://weather/stations.csv \
     -o s3://weather/emdna-temperature --era5 s3://weather/era5-daily
 ```
 
@@ -443,7 +445,7 @@ temperature (°C) and humidity (%), total and maximum daily rainfall (mm), and t
 longest confirmed dry spell (days, daily precipitation below 1 mm).
 
 ```python
-from weatheasy import Coords, get_era5_data
+from weatheasy.query import Coords, get_era5_data
 from weatheasy.agro_clim import AgroClimateCalculator, format_results
 
 variables = ['LHTFL', 'PEVPR', 'SOILW_0-0.1m', 'TMP', 'RH', 'PRATE']

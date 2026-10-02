@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from weatheasy import Coords, const, era5, get_era5_data
+from weatheasy import const, era5
+from weatheasy.query import Coords, get_era5_data
 from weatheasy.storage import StorageError, get_store, open_dataset
 from weatheasy.util import get_storage
 
@@ -202,11 +203,12 @@ def test_public_monthly_download_resume_getter_and_cli(
         'argv',
         [
             'weatheasy',
+            'query',
+            'era5',
             '-d',
             str(tmp_path / 'store'),
             '-o',
             str(output),
-            'era5',
             '2000-01-31',
             '2000-01-31',
             '55.3',
@@ -288,20 +290,21 @@ def test_split_netcdf_response_preserves_explicit_crs(tmp_path: Path):
 def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import sys
 
-    from weatheasy import download
+    from weatheasy._cli import main
 
     calls = []
     monkeypatch.setattr(
-        download, 'download_era5_data', lambda *args, **kwargs: calls.append((args, kwargs))
+        era5, 'download_era5_data', lambda *args, **kwargs: calls.append((args, kwargs))
     )
     monkeypatch.setattr(
         sys,
         'argv',
         [
-            'weatheasy.download',
+            'weatheasy',
+            'download',
+            'era5',
             '-d',
             str(tmp_path / 'store'),
-            'era5',
             '--area',
             '55.3',
             '37.1',
@@ -309,7 +312,7 @@ def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             '37.3',
         ],
     )
-    download.main(configure_logging=False)
+    main(configure_logging=False)
     assert calls[0][1]['area'] == (55.3, 37.1, 55.2, 37.3)
 
 

@@ -5,7 +5,8 @@ from typing import Annotated, TypedDict
 from fastapi import Depends, Query
 from pydantic import BaseModel, Field, create_model
 
-from weatheasy import Coords, const
+from weatheasy import const
+from weatheasy.query import Coords
 
 
 CFS2Var = Enum('CFS2Var', {k: k for k in const.CFS2_BANDS})  # type: ignore[misc]

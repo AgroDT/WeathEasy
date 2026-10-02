@@ -1,1 +1,1 @@
-0 5 * * *	root	flock -n /tmp/cfs.lock python -m weatheasy.download -d $WEATHEASY__DATA_ROOT --download-dir /data cfs2
+0 5 * * *	root	flock -n /tmp/cfs.lock weatheasy download cfs2 --store "$WEATHEASY__DATA_ROOT" --download-dir /data

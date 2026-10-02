@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from weatheasy import Coords, get_cfs2_data, get_cmip6_data, get_era5_data
+from weatheasy.query import Coords, get_cfs2_data, get_cmip6_data, get_era5_data
 from weatheasy.storage import open_dataset, prepare_dataset, write_batch
 from weatheasy.util import float_formatter_factory, get_storage
 
@@ -67,11 +67,12 @@ def test_daily_getter_and_csv_units(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     target = tmp_path / 'result.csv'
     argv = [
         'weatheasy',
+        'query',
+        source,
         '-d',
         str(tmp_path / source),
         '-o',
         str(target),
-        source,
         BEGIN.isoformat(),
         END.isoformat(),
         '55',
@@ -83,14 +84,11 @@ def test_daily_getter_and_csv_units(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     expected = f'DATE,{name}\n2020-02-28,8\n2020-02-29,NA\n2020-03-01,2\n'
     assert target.read_text() == expected
 
-    class Output(io.StringIO):
-        def close(self):
-            pass
-
-    stdout = Output()
+    stdout = io.StringIO()
     monkeypatch.setattr(sys, 'stdout', stdout)
-    argv[4] = 'stdout'
+    argv[6] = 'stdout'
     main(configure_logging=False)
+    assert not stdout.closed
     assert stdout.getvalue() == expected
 
 

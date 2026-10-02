@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
     from rasterio.coords import BoundingBox
 
-    from weatheasy import Coords
+    from weatheasy.query import Coords
 
 
 class S3ImportError(ImportError):

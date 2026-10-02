@@ -15,11 +15,9 @@ import xarray as xr
 from httpx2 import Client, HTTPTransport
 
 from weatheasy import const
-from weatheasy.era5 import download_era5_data
 from weatheasy.sources import read_cfs2, read_netcdf
 from weatheasy.storage import (
     delete_group,
-    get_store,
     group_attrs,
     last_date,
     prepare_dataset,
@@ -27,54 +25,11 @@ from weatheasy.storage import (
     set_group_attrs,
     write_batch,
 )
-from weatheasy.util import init_parser, utc_now
+from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
     from zarr.abc.store import Store
-
-
-def main(*, configure_logging: bool = True) -> None:
-    if configure_logging:
-        logging.basicConfig(
-            format='%(asctime)s %(name)s [%(levelname)s] %(message)s',
-            level=logging.INFO,
-        )
-    parser = init_parser(_MODULE_NAME)
-    parser.add_argument(
-        '--download-dir',
-        type=Path,
-        metavar='PATH',
-        help='optional local path for persisted downloaded files',
-    )
-    parser.add_argument(
-        'kind',
-        choices=('cfs2', 'cmip6', 'era5'),
-    )
-    parser.add_argument(
-        '--area',
-        type=float,
-        nargs=4,
-        metavar=('NORTH', 'WEST', 'SOUTH', 'EAST'),
-        help='ERA5-Land geographic area',
-    )
-    args = parser.parse_args()
-    if args.kind == 'era5':
-        download_era5_data(
-            get_store(args.data), args.download_dir, area=tuple(args.area) if args.area else None
-        )
-        return
-    if args.area is not None:
-        parser.error('--area is only available for era5')
-    match args.kind:
-        case 'cfs2':
-            download = download_cfs2_data
-        case 'cmip6':
-            download = download_cmip6_data
-        case _:
-            raise NotImplementedError
-    store = get_store(args.data)
-    download(store, args.download_dir)
 
 
 def download_cfs2_data(store: Store, download_dir: Path | None = None) -> None:
@@ -390,7 +345,3 @@ def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Client)
         path.write_bytes(response.content)
 
     return filename, response.content
-
-
-if __name__ == '__main__':
-    main()

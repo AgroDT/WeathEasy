@@ -27,6 +27,9 @@ dependencies = [
     "zarr>=3.1,<4",
 ]
 
+[project.scripts]
+weatheasy = "weatheasy._cli:main"
+
 [dependency-groups]
 dev = [
     "joblib-stubs>=1.5.3.1.20260117",

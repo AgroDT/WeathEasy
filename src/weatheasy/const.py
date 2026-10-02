@@ -10,6 +10,18 @@ class VarInfo(NamedTuple):
     ru: str
 
 
+CORRECTION_INFO = {
+    'TMP_corr': VarInfo(
+        en='Bias-corrected daily temperature, °C',
+        ru='Скорректированная температура, °C',
+    ),
+    'PRATE_corr': VarInfo(
+        en='Bias-corrected daily precipitation, mm/day',
+        ru='Скорректированные осадки, мм/сутки',
+    ),
+}
+
+
 class Cfs2Variable(NamedTuple):
     daily_stat: FunctionType
     info: VarInfo
@@ -253,7 +265,7 @@ class Era5Var(NamedTuple):
     cds_name: str  # CDS API variable name
     nc_name: str  # NetCDF short name in downloaded file
     accumulated: bool  # True: daily value = 00:00 UTC of the following day × scale
-    daily_stat: FunctionType | None  # for instantaneous: np.mean / np.max / np.min
+    daily_stat: FunctionType | None  # Instantaneous variables require a daily reducer.
     scale: float  # unit conversion multiplier
     offset: float  # unit conversion offset (applied after scale)
     info: VarInfo

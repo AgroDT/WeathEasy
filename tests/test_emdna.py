@@ -12,9 +12,10 @@ import xarray as xr
 from fsspec import AbstractFileSystem
 from fsspec.implementations.memory import MemoryFileSystem
 
-from weatheasy.emdna import PrecipitationProcessor, TemperatureProcessor, __main__ as cli
+from weatheasy import _cli as cli
+from weatheasy._cli._inputs import process_period as process_file_period, read_stations
+from weatheasy.emdna import PrecipitationProcessor, TemperatureProcessor
 from weatheasy.emdna._base import EMDNABase
-from weatheasy.emdna._inputs import process_period as process_file_period, read_stations
 from weatheasy.file_storage import FileStore, get_file_store
 
 
@@ -257,7 +258,8 @@ def test_cli_discovers_dates_and_noops(
     monkeypatch.setattr(
         'sys.argv',
         [
-            'weatheasy.emdna',
+            'weatheasy',
+            'emdna',
             kind,
             str(stations),
             '-o',
@@ -422,12 +424,15 @@ def test_cli_preserves_s3_uris_and_shares_filesystem(monkeypatch: pytest.MonkeyP
         def process_period(self, _start: date | None, _end: date | None):
             return []
 
-    monkeypatch.setattr(cli, 'get_file_store', resolve)
+    from weatheasy._cli import _storage
+
+    monkeypatch.setattr(_storage, 'get_file_store', resolve)
     monkeypatch.setattr('weatheasy.emdna.temperature.TemperatureProcessor', Processor)
     monkeypatch.setattr(
         'sys.argv',
         [
-            'weatheasy.emdna',
+            'weatheasy',
+            'emdna',
             'temperature',
             's3://bucket/stations.csv',
             '-o',
@@ -495,7 +500,8 @@ def test_cli_monthly_batches_stop_after_failure_and_restart(
     monkeypatch.setattr(
         'sys.argv',
         [
-            'weatheasy.emdna',
+            'weatheasy',
+            'emdna',
             'temperature',
             str(stations),
             '-o',

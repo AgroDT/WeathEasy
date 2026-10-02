@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,13 +9,9 @@ import zarr
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fsspec.asyn import AsyncFileSystem
-
-
-try:
-    from weatheasy._version import version as _version
-except ImportError:
-    _version = 'unknown version'
 
 
 type FormatFloat = Callable[[np.floating], str]
@@ -45,20 +39,6 @@ def get_storage(root: str | Path, *, filesystem: AsyncFileSystem | None = None) 
     from weatheasy.storage import get_store  # noqa: PLC0415
 
     return zarr.open_group(get_store(root, filesystem=filesystem), mode='a', zarr_format=3)
-
-
-def init_parser(module: str = 'weatheasy') -> ArgumentParser:
-    parser = ArgumentParser(module, formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-v', '--version', action='version', version=_version)
-    parser.add_argument(
-        '-d',
-        '--data',
-        default=Path.cwd().joinpath('weatheasy', 'zarr').as_posix(),
-        metavar='STORE',
-        help='Zarr store for downloaded data',
-    )
-
-    return parser
 
 
 def float_formatter_factory(nan: str, precision: int) -> FormatFloat:

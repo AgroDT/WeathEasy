@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from weatheasy import Coords, get_era5_data
+from weatheasy.query import Coords, get_era5_data
 from weatheasy.storage import group_exists, open_dataset, pristine_group
 
 

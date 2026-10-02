@@ -9,7 +9,8 @@ import zarr
 from httpx2 import Client
 from zarr.abc.store import Store
 
-from weatheasy import Coords, const, download, get_cfs2_data, get_cmip6_data
+from weatheasy import const, download
+from weatheasy.query import Coords, get_cfs2_data, get_cmip6_data
 from weatheasy.storage import get_store
 from weatheasy.util import get_storage
 
@@ -74,11 +75,12 @@ def test_cmip6_download_getter_resume_and_cli(
         'sys.argv',
         [
             'weatheasy',
+            'query',
+            'cmip6',
             '-d',
             str(tmp_path / 'data'),
             '-o',
             str(target),
-            'cmip6',
             '2000-02-29',
             '2000-02-29',
             '55.125',

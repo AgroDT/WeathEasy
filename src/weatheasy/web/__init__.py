@@ -2,9 +2,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-import weatheasy
 from . import controller as ctr, models as mls
 from .config import get_config
+from weatheasy import __version__, query as weather_query
 from weatheasy.error import BaseValueError
 
 
@@ -14,7 +14,7 @@ async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResp
 
 app = FastAPI(
     title='WeathEasy',
-    version=weatheasy.__version__ or 'unknown',
+    version=__version__ or 'unknown',
     exception_handlers={
         BaseValueError: handle_value_error,
     },
@@ -40,7 +40,7 @@ def get_variables() -> mls.Variables:
     response_model_exclude_unset=True,
 )
 async def get_cfs2_data(query: mls.SFS2Query) -> StreamingResponse:
-    return await ctr.get_data(weatheasy.get_cfs2_data, query)
+    return await ctr.get_data(weather_query.get_cfs2_data, query)
 
 
 @app.get(
@@ -49,4 +49,4 @@ async def get_cfs2_data(query: mls.SFS2Query) -> StreamingResponse:
     response_model_exclude_unset=True,
 )
 async def get_cmip6_data(query: mls.CMIP6Query) -> StreamingResponse:
-    return await ctr.get_data(weatheasy.get_cmip6_data, query)
+    return await ctr.get_data(weather_query.get_cmip6_data, query)

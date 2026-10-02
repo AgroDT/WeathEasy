@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import date
 
-    from ._base import EMDNABase
+    from weatheasy.emdna._base import EMDNABase
     from weatheasy.file_storage import FileStore
 
 
