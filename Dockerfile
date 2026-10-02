@@ -17,6 +17,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libgdal-dev \
         proj-bin
 WORKDIR /usr/src/weatheasy
+
+FROM builder AS dependencies-builder
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --all-extras --no-install-project --no-dev \
@@ -26,10 +28,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --no-binary-package netcdf4 \
         --no-binary-package pyproj \
         --no-binary-package rasterio
-COPY . .
+
+FROM builder AS wheel-builder
 ARG UV_DYNAMIC_VERSIONING_BYPASS='0.0.0'
-RUN . "$VENV_DIR/bin/activate" \
-    && UV_DYNAMIC_VERSIONING_BYPASS=$UV_DYNAMIC_VERSIONING_BYPASS uv pip install --no-cache --no-deps .
+COPY . .
+RUN UV_DYNAMIC_VERSIONING_BYPASS=$UV_DYNAMIC_VERSIONING_BYPASS uv build --wheel
 
 FROM python:${PYVERSION}-slim-${FLAVOUR}
 ARG VENV_DIR
@@ -42,7 +45,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y -qq --no-install-recommends \
         "$(apt-cache depends libeccodes-dev | awk '$1 == "Depends:" && $2 ~ /^libeccodes[0-9]/ { print $2 }')" \
         "$(apt-cache depends libgdal-dev | awk '$1 == "Depends:" && $2 ~ /^libgdal[0-9]/ { print $2 }')"
-    COPY --from=builder $VENV_DIR $VENV_DIR
+COPY --from=dependencies-builder $VENV_DIR $VENV_DIR
+RUN --mount=type=bind,from=builder,source=/usr/local/bin/uv,target=/usr/local/bin/uv \
+    --mount=type=bind,from=wheel-builder,source=/usr/src/weatheasy/dist,target=/usr/src/weatheasy/dist \
+    uv run pip --python "$VENV_DIR/bin/python3" install --no-deps /usr/src/weatheasy/dist/weatheasy*.whl
 RUN groupadd --gid 1000 weatheasy \
     && useradd --uid 1000 --gid weatheasy --home-dir /var/lib/weatheasy --create-home weatheasy
 WORKDIR /var/lib/weatheasy
