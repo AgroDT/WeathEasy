@@ -1,0 +1,68 @@
+{{- if .Values.api.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weatheasy.fullname" . }}
+  labels:
+    {{- include "weatheasy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "weatheasy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "weatheasy.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "weatheasy.podSettings" . | nindent 6 }}
+      containers:
+        - name: api
+          image: {{ include "weatheasy.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [uvicorn]
+          args: ["weatheasy.web:app", "--host", "0.0.0.0", "--port", "8000"]
+          workingDir: /var/lib/weatheasy
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            {{- include "weatheasy.env" . | nindent 12 }}
+            - name: WEATHEASY__PRECISION
+              value: {{ .Values.api.precision | quote }}
+            - name: WEATHEASY__ENABLE_CORS
+              value: {{ .Values.api.enableCors | quote }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /variables
+              port: http
+            {{- toYaml .Values.api.startupProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /variables
+              port: http
+            {{- toYaml .Values.api.readinessProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /variables
+              port: http
+            {{- toYaml .Values.api.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "weatheasy.volumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "weatheasy.volumes" . | nindent 8 }}
+{{- end }}

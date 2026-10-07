@@ -1,0 +1,12 @@
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: weatheasy.example.org
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: weatheasy-tls
+      hosts:
+        - weatheasy.example.org

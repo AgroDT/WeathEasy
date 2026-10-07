@@ -33,8 +33,10 @@ weatheasy = "weatheasy._cli:main"
 [dependency-groups]
 dev = [
     "joblib-stubs>=1.5.3.1.20260117",
+    "jsonref>=1.1,<2",
     "pandas-stubs>=3.0.5.260914",
     "pytest~=9.1",
+    "pyyaml>=6,<7",
     "ruff>=0.16,<1",
     "scipy-stubs>=1.18.1.1",
     "ty>=0.0.84,<1",

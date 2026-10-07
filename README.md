@@ -211,7 +211,8 @@ docker run --rm -it \
     --store s3://weatheasy/zarr
 ```
 
-Find an example for Docker Compose at [examples/docker-compose](examples/docker-compose).
+For Kubernetes, use the [Helm chart](charts/weatheasy/README.md) to run the API
+and scheduled updates with durable data in S3.
 
 ## Forecast storage and updates
 
@@ -392,8 +393,8 @@ Station CSV, ERA5 input directory, and output directory accept local paths or
 `s3://` URIs. S3 locations share one filesystem client within the command. For example:
 
 ```sh
-weatheasy emdna temperature s3://weather/stations.csv \
-    -o s3://weather/emdna-temperature --era5 s3://weather/era5-daily
+weatheasy emdna temperature s3://weatheasy/stations.csv \
+    -o s3://weatheasy/emdna-temperature --era5 s3://weatheasy/era5-daily
 ```
 
 Library processors receive station observations as a `pandas.DataFrame`, optional
