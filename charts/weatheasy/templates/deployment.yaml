@@ -27,7 +27,7 @@ spec:
           image: {{ include "weatheasy.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: [uvicorn]
-          args: ["weatheasy.web:app", "--host", "0.0.0.0", "--port", "8000"]
+          args: ["weatheasy.web:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
           workingDir: /var/lib/weatheasy
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}

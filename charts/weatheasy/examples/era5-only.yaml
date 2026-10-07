@@ -1,0 +1,4 @@
+sources:
+  era5:
+    store: s3://weatheasy/era5.zarr
+# Prepared data can be served without enabling scheduled updates.

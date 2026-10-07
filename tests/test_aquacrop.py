@@ -128,12 +128,10 @@ def weather_store(tmp_path: Path, correction: tuple[str, ...] = ()):
             crs='EPSG:4326',
         )
 
-    write_batch(root.store, 'era5/daily', dataset(values))
+    write_batch(root.store, 'daily', dataset(values))
     corrected = {'TMP_corr': [23, np.nan, 23, 23], 'PRATE_corr': [12, np.nan, 0.25, 1]}
     if correction:
-        write_batch(
-            root.store, 'era5/correction', dataset({key: corrected[key] for key in correction})
-        )
+        write_batch(root.store, 'correction', dataset({key: corrected[key] for key in correction}))
     return root
 
 
@@ -183,10 +181,10 @@ def test_adapter_units_independent_fallback_and_readonly(
 
 def test_corrected_precip_missing_day_and_nonpositive_et0(tmp_path: Path):
     root = weather_store(tmp_path, ('PRATE_corr',))
-    root['era5/correction/PRATE_corr'][3] = np.nan
+    root['correction/PRATE_corr'][3] = np.nan
     # Zero radiation and saturated air give negative net radiation and ET0.
-    root['era5/daily/DSWRF'][3] = 0
-    root['era5/daily/RH'][3] = 100
+    root['daily/DSWRF'][3] = 0
+    root['daily/RH'][3] = 100
     actual = read_weather(root)
     assert np.isnan(actual.pr[3])
     assert np.isnan(actual.et0[3])
@@ -212,7 +210,7 @@ def test_adapter_reads_corrected_fields_from_store_path(tmp_path: Path):
 
 def test_adapter_ignores_only_pristine_empty_correction_group(tmp_path: Path):
     root = weather_store(tmp_path)
-    correction = root.require_group('era5/correction')
+    correction = root.require_group('correction')
     actual = get_weather_data(
         store=get_store(tmp_path / 'weather'),
         latitude=50.8,
@@ -236,6 +234,6 @@ def test_adapter_ignores_only_pristine_empty_correction_group(tmp_path: Path):
 
 def test_adapter_rejects_array_in_place_of_correction_group(tmp_path: Path):
     root = weather_store(tmp_path)
-    root.create_array('era5/correction', shape=(1,), dtype='i4')
+    root.create_array('correction', shape=(1,), dtype='i4')
     with pytest.raises(TypeError, match='must be a Zarr group'):
         read_weather(root)

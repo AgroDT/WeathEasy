@@ -45,7 +45,7 @@ preparation, and DEM preparation. Install extras for the workflows you use:
 | Extra | Enables |
 | --- | --- |
 | `s3` | S3 access for weather data, DEM, model artifacts, station inputs and results |
-| `web` | The API launched with `uvicorn weatheasy.web:app` |
+| `web` | The API launched with `uvicorn weatheasy.web:create_app --factory` |
 | `prepare` | CFS2 GRIB decoding and ERA5 downloads through CDS |
 | `correction` | Training and applying bias correction models |
 | `emdna` | Interpolation of station observations |
@@ -73,7 +73,25 @@ file as `.env` or `.local.env`. WeathEasy will load it automatically.
 cp .example.env .env
 ```
 
+Configure each source independently; for an ERA5-only API, set:
+
+```sh
+WEATHEASY__SOURCES__ERA5__STORE=s3://weatheasy/era5.zarr
+```
+
+CFS2 and CMIP6 use `WEATHEASY__SOURCES__CFS2__STORE` and
+`WEATHEASY__SOURCES__CMIP6__STORE`. Omitted sources require no storage access or
+credentials. `/variables` lists configured sources and describes their
+variables, and `/era5`, `/cfs2`, `/cmip6` read the corresponding store. A query to
+an unconfigured source returns HTTP 404, and its route is absent from OpenAPI
+and interactive API documentation. Restart the API after changing the configured
+sources. Reading ERA5 requires no CDS credentials.
+Health endpoints do not access weather storage.
+
 CLI applications are configured with command line arguments (see below).
+`--store` addresses one source’s store. The default is `./weatheasy/SOURCE.zarr`.
+Automatic downloading is configured separately through the Helm chart’s
+`sources.SOURCE.update` settings.
 
 ## Launching
 
@@ -97,7 +115,7 @@ servers, and (possibly) star positions.
 | `emdna temperature`, `emdna precipitation` | `emdna` |
 
 All CLI commands can be invoked as `weatheasy ...` or `python -m weatheasy ...`.
-The web application is launched separately with `uvicorn weatheasy.web:app`.
+The web application is launched separately with `uvicorn weatheasy.web:create_app --factory`.
 
 ### Download CLI
 
@@ -121,7 +139,7 @@ original downloaded files (GRIB2 for CFSv2 and NetCDF for CMIP6).
 A full example for CFSv2:
 
 ```sh
-weatheasy download cfs2 --store s3://weatheasy/zarr --download-dir ./downloads
+weatheasy download cfs2 --store s3://weatheasy/cfs2.zarr --download-dir ./downloads
 ```
 
 To display the full help message, run:
@@ -157,7 +175,7 @@ python3 -m weatheasy list-vars
 A full example for CFSv2, Moscow:
 
 ```sh
-weatheasy query cfs2 --store s3://weatheasy/zarr \
+weatheasy query cfs2 --store s3://weatheasy/cfs2.zarr \
     2024-01-01 2024-01-31 \
     55.75222 37.61556 \
     TMIN TMAX TMP
@@ -176,7 +194,7 @@ weatheasy query cmip6 -h
 After [configuring](#configuration) launch the web application with:
 
 ```sh
-uvicorn weatheasy.web:app
+uvicorn weatheasy.web:create_app --factory
 ```
 
 By default it would be listening for incoming requests at
@@ -208,13 +226,20 @@ docker run --rm -it \
     --entrypoint weatheasy \
     ghcr.io/agrodt/weatheasy \
     download cfs2 \
-    --store s3://weatheasy/zarr
+    --store s3://weatheasy/cfs2.zarr
 ```
 
 For Kubernetes, use the [Helm chart](charts/weatheasy/README.md) to run the API
 and scheduled updates with durable data in S3.
 
 ## Forecast storage and updates
+
+Each source uses its own Zarr v3 store. Within it, CFS2 has
+`reanalysis/{flx,pgb}`, `forecast/{flx,pgb}` and `reanalysis/correction`;
+ERA5 has `daily` and `correction`; CMIP6 has one group per variable.
+Source metadata such as CFS2’s `updated` and ERA5’s `request_area` live at the
+store root. Existing combined stores need their source groups moved into
+separate store roots; there is no automatic migration or legacy-layout fallback.
 
 Prepared data uses Zarr v3. Before writing, rioxarray adds CF CRS and coordinate
 metadata, including the source sphere/ellipsoid parameters and WKT in
@@ -229,8 +254,8 @@ therefore remain NaN when read. NetCDF preparation is still eager; Dask is not
 required.
 
 CFS2 forecast grids have permanent group paths
-`cfs2/forecast/flx` and `cfs2/forecast/pgb`, including when the root store is an
-S3 prefix such as `s3://weatheasy/zarr`. For example, direct xarray consumers can
+`forecast/flx` and `forecast/pgb`, including when the root store is an
+S3 prefix such as `s3://weatheasy/cfs2.zarr`. For example, direct xarray consumers can
 open the FLX grid with:
 
 ```python
@@ -238,8 +263,8 @@ import rioxarray  # Registers the .rio accessor.
 import xarray as xr
 
 forecast = xr.open_zarr(
-    "s3://weatheasy/zarr",
-    group="cfs2/forecast/flx",
+    "s3://weatheasy/cfs2.zarr",
+    group="forecast/flx",
     consolidated=False,
     chunks=None,
     decode_coords="all",
@@ -247,9 +272,9 @@ forecast = xr.open_zarr(
 ```
 
 Updates replace the forecast in place. Before writing, the downloader clears
-`cfs2`'s `updated` readiness attribute and deletes the existing `cfs2/forecast`
+the store root’s `updated` readiness attribute and deletes the existing `forecast`
 subtree. It restores `updated` only after both grids finish successfully.
-Reanalysis and CMIP6 are not deleted by forecast replacement.
+Reanalysis is retained; CMIP6 lives in a separate store.
 
 **CFS2 data can be unavailable during replacement.** If preparation fails,
 readiness remains unset until a subsequent download command completes successfully.
@@ -279,9 +304,9 @@ Both training and application read the same prepared DEM. Their `--dem` argument
 accepts a local Zarr path or S3 URI:
 
 ```sh
-weatheasy correction train era5 --store s3://weatheasy/weather \
+weatheasy correction train era5 --store s3://weatheasy/era5.zarr \
     --stations ./stations.csv --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
-weatheasy correction apply era5 --store s3://weatheasy/weather \
+weatheasy correction apply era5 --store s3://weatheasy/era5.zarr \
     --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
 ```
 

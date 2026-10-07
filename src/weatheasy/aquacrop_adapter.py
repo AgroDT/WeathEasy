@@ -138,10 +138,10 @@ def get_weather_data(
     available: set[str] = set()
     if (
         use_corrected
-        and group_exists(store, 'era5/correction')
-        and not pristine_group(store, 'era5/correction')
+        and group_exists(store, 'correction')
+        and not pristine_group(store, 'correction')
     ):
-        with open_dataset(store, 'era5/correction') as correction:
+        with open_dataset(store, 'correction') as correction:
             available = {str(name) for name in correction.data_vars}
     tmp_var = 'TMP_corr' if 'TMP_corr' in available else 'TMP'
     prate_var = 'PRATE_corr' if 'PRATE_corr' in available else 'PRATE'

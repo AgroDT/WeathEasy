@@ -29,15 +29,14 @@ class Cfs2Variable(NamedTuple):
 
 ONE_DAY = timedelta(days=1)
 
-CFS2_DIR = 'cfs2'
 CFS2_KEY_UPDATED = 'updated'
 CFS2_HHS = '00', '06', '12', '18'
 
-CFS2_REANALYSIS_DIR = CFS2_DIR + '/reanalysis'
+CFS2_REANALYSIS_DIR = 'reanalysis'
 CFS2_REANALYSIS_FIRST_DATE = date(2011, 4, 1)
 CFS2_REANALYSIS_LAST_DATE_OFFSET = timedelta(days=3)
 
-CFS2_FORECAST_DIR = CFS2_DIR + '/forecast'
+CFS2_FORECAST_DIR = 'forecast'
 CFS2_FORECAST_DAYS = timedelta(days=180)
 
 
@@ -255,7 +254,6 @@ CMIP6_VARS = {
 }
 
 
-ERA5_DIR = 'era5'
 ERA5_RESOLUTION = 0.1
 ERA5_FIRST_YEAR = 1950
 # Edge-based BoundingBox: centers run from (-180, -90) to (179.9, 90) in steps of 0.1°

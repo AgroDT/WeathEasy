@@ -61,10 +61,10 @@ def grib_fixture(path: Path, *, gaussian: bool = False, spacing: int = 1):
 @pytest.mark.parametrize(
     ('group', 'gaussian', 'spacing'),
     [
-        ('cfs2/forecast/flx', True, 1),
-        ('cfs2/forecast/pgb', False, 1),
-        ('cfs2/reanalysis/flx', False, 0.5),
-        ('cfs2/reanalysis/pgb', False, 0.5),
+        ('forecast/flx', True, 1),
+        ('forecast/pgb', False, 1),
+        ('reanalysis/flx', False, 0.5),
+        ('reanalysis/pgb', False, 0.5),
     ],
 )
 def test_grib_source_to_zarr_preserves_grid_and_units(
@@ -124,8 +124,8 @@ def test_netcdf_cmip6_actual_ascending_latitude(tmp_path: Path):
     original.to_netcdf(path, engine='netcdf4')
     ds = read_netcdf(path, variables=['tas'], crs='EPSG:4326')
     store = MemoryStore()
-    write_batch(store, 'cmip6/ACCESS-CM2/historical/r1i1p1f1', ds)
-    result = open_dataset(store, 'cmip6/ACCESS-CM2/historical/r1i1p1f1')
+    write_batch(store, 'ACCESS-CM2/historical/r1i1p1f1', ds)
+    result = open_dataset(store, 'ACCESS-CM2/historical/r1i1p1f1')
     assert select_point(result, latitude=55.125, longitude=0.375).tas.item() == 7
     np.testing.assert_array_equal(result.tas, original.tas)
 

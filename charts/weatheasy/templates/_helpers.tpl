@@ -29,8 +29,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   value: /var/lib/weatheasy
 - name: PYTHONDONTWRITEBYTECODE
   value: "1"
-- name: WEATHEASY__DATA_ROOT
-  value: {{ required "storage.dataRoot is required" .Values.storage.dataRoot | quote }}
+{{- range $source, $settings := .Values.sources }}
+{{- if $settings.store }}
+- name: {{ printf "WEATHEASY__SOURCES__%s__STORE" (upper $source) }}
+  value: {{ $settings.store | quote }}
+{{- end }}
+{{- end }}
 {{- with .Values.s3.endpoint }}
 - name: AWS_ENDPOINT_URL_S3
   value: {{ . | quote }}

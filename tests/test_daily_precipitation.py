@@ -1,11 +1,7 @@
-import asyncio
 import io
-import json
 import sys
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -13,19 +9,15 @@ import xarray as xr
 
 from weatheasy.query import Coords, get_cfs2_data, get_cmip6_data, get_era5_data
 from weatheasy.storage import open_dataset, prepare_dataset, write_batch
-from weatheasy.util import float_formatter_factory, get_storage
-
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterable
+from weatheasy.util import get_storage
 
 
 BEGIN, END = date(2020, 2, 28), date(2020, 3, 1)
 
 
 def weather_store(tmp_path: Path, source: str):
-    root = get_storage(str(tmp_path / source))
     name = 'pr' if source == 'cmip6' else 'PRATE'
+    root = get_storage(str(tmp_path / source))
     scale = 21600 if source == 'cfs2' else 86400
     raw = np.array([8, np.nan, 2], dtype=np.float32) / scale
     dataset = prepare_dataset(
@@ -46,12 +38,12 @@ def weather_store(tmp_path: Path, source: str):
         crs='EPSG:4326',
     )
     if source == 'cfs2':
-        write_batch(root.store, 'cfs2/reanalysis/flx', dataset.isel(time=slice(0, 2)))
-        write_batch(root.store, 'cfs2/forecast/flx', dataset.isel(time=slice(2, None)))
-        root['cfs2'].attrs['updated'] = '2020-03-04'  # forecast begins March 1
-        path = 'cfs2/reanalysis/flx'
+        write_batch(root.store, 'reanalysis/flx', dataset.isel(time=slice(0, 2)))
+        write_batch(root.store, 'forecast/flx', dataset.isel(time=slice(2, None)))
+        root[''].attrs['updated'] = '2020-03-04'  # forecast begins March 1
+        path = 'reanalysis/flx'
     else:
-        path = 'era5/daily' if source == 'era5' else 'cmip6/pr'
+        path = 'daily' if source == 'era5' else 'pr'
         write_batch(root.store, path, dataset)
     return root, name, path
 
@@ -95,37 +87,38 @@ def test_daily_getter_and_csv_units(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize('source', ['cmip6', 'cfs2'])
 def test_http_precipitation_units_and_response_shape(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     source: str,
 ):
     pytest.importorskip('fastapi')
-    from weatheasy.web import controller
+    from starlette.testclient import TestClient
+
+    from weatheasy.web import create_app
+    from weatheasy.web.config import Settings, SourcesSettings
 
     root, name, _ = weather_store(tmp_path, source)
-    getter = get_cmip6_data if source == 'cmip6' else get_cfs2_data
-    monkeypatch.setattr(
-        controller,
-        'get_config',
-        lambda: SimpleNamespace(
-            storage=root.store, format_float=float_formatter_factory('null', 6)
-        ),
+    settings = Settings(
+        sources=SourcesSettings.model_validate({source: {'store': str(root.store.root)}}),
+        _env_file=None,
     )
-
-    async def query():
-        response = await controller.get_data(
-            getter, {'begin': BEGIN, 'end': END, 'coords': Coords(55, 37), 'variables': [name]}
+    with TestClient(create_app(settings)) as client:
+        response = client.get(
+            f'/{source}',
+            params={
+                'begin': BEGIN.isoformat(),
+                'end': END.isoformat(),
+                'lat': 55,
+                'lon': 37,
+                'var': name,
+            },
         )
-        chunks = [chunk async for chunk in cast('AsyncIterable[str]', response.body_iterator)]
-        return json.loads(''.join(chunks))
-
-    assert asyncio.run(query()) == [
-        {name: 8, 'date': '2020-02-28'},
-        {name: None, 'date': '2020-02-29'},
-        {name: 2, 'date': '2020-03-01'},
-    ]
-    variables = controller.get_variables()
-    info = getattr(variables, source)[name]
-    assert 'mm/day' in info.en
+        assert response.status_code == 200, response.text
+        assert response.json() == [
+            {name: 8, 'date': '2020-02-28'},
+            {name: None, 'date': '2020-02-29'},
+            {name: 2, 'date': '2020-03-01'},
+        ]
+        variables = client.get('/variables').json()
+        assert 'mm/day' in variables[source][name]['en']
 
 
 @pytest.mark.parametrize('source', ['cfs2', 'era5'])
@@ -135,7 +128,7 @@ def test_raw_and_corrected_precipitation_have_same_units(tmp_path: Path, source:
         corrected = raw.rename({'PRATE': 'PRATE_corr'}).load()
     corrected['PRATE_corr'][:] = 12
     corrected.PRATE_corr.attrs['units'] = 'mm/day'
-    correction_path = 'cfs2/reanalysis/correction' if source == 'cfs2' else 'era5/correction'
+    correction_path = 'reanalysis/correction' if source == 'cfs2' else 'correction'
     write_batch(root.store, correction_path, corrected)
     getter = get_cfs2_data if source == 'cfs2' else get_era5_data
     values = getter(

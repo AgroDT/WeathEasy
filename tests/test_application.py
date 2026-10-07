@@ -1,6 +1,5 @@
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -13,10 +12,6 @@ from weatheasy import const, download
 from weatheasy.query import Coords, get_cfs2_data, get_cmip6_data
 from weatheasy.storage import get_store
 from weatheasy.util import get_storage
-
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterable
 
 
 @pytest.mark.parametrize('hour', [0, 12])
@@ -194,7 +189,7 @@ def test_cfs2_public_download_extrema_missing_and_resume(
         expected[:, 0] = np.nan
         from weatheasy.storage import StorageError
 
-        target = root['cfs2/reanalysis/flx']
+        target = root['reanalysis/flx']
         target.attrs['write_state'] = 'writing'
         with pytest.raises(StorageError, match='completed'):
             get_cfs2_data(
@@ -234,8 +229,8 @@ def check_forecast_replacement(
     missing_reanalysis: bool,  # noqa: FBT001
 ):
     # A sentinel verifies deletion of the previous forecast before any new write.
-    root['cfs2/forecast'].attrs['old_forecast'] = True
-    previous_reanalysis_attrs = dict(root['cfs2/reanalysis/flx'].attrs)
+    root['forecast'].attrs['old_forecast'] = True
+    previous_reanalysis_attrs = dict(root['reanalysis/flx'].attrs)
     original_write = download.write_batch
     monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 9, 23, tzinfo=UTC))
 
@@ -244,10 +239,10 @@ def check_forecast_replacement(
         group: str,
         dataset: xr.Dataset,
     ):
-        if group.startswith('cfs2/forecast/'):
-            assert const.CFS2_KEY_UPDATED not in root['cfs2'].attrs
-            assert 'old_forecast' not in root['cfs2/forecast'].attrs
-        if group == 'cfs2/forecast/pgb':
+        if group.startswith('forecast/'):
+            assert const.CFS2_KEY_UPDATED not in root[''].attrs
+            assert 'old_forecast' not in root['forecast'].attrs
+        if group == 'forecast/pgb':
             msg = 'simulated interrupted second-grid write'
             raise OSError(msg)
         return original_write(store, group, dataset)
@@ -255,7 +250,7 @@ def check_forecast_replacement(
     monkeypatch.setattr(download, 'write_batch', fail_second_grid)
     with pytest.raises(OSError, match='second-grid'):
         download.download_cfs2_data(root.store)
-    assert const.CFS2_KEY_UPDATED not in root['cfs2'].attrs
+    assert const.CFS2_KEY_UPDATED not in root[''].attrs
     from weatheasy.error import CFS2Error
 
     with pytest.raises(CFS2Error):
@@ -267,20 +262,18 @@ def check_forecast_replacement(
             variables=['TMP'],
         )
     # Reanalysis data is appended independently, never deleted with forecast.
-    assert 'cfs2/reanalysis/flx' in root
+    assert 'reanalysis/flx' in root
     if not missing_reanalysis:
         assert (
-            root['cfs2/reanalysis/flx'].attrs['committed_length']
+            root['reanalysis/flx'].attrs['committed_length']
             >= previous_reanalysis_attrs['committed_length']  # ty: ignore[unsupported-operator]
         )
     monkeypatch.setattr(download, 'write_batch', original_write)
     download.download_cfs2_data(root.store)
-    assert root['cfs2'].attrs['updated'] == '2026-09-23'
-    assert set(root.get_group('cfs2/forecast').group_keys()) == {'flx', 'pgb'}
+    assert root[''].attrs['updated'] == '2026-09-23'
+    assert set(root.get_group('forecast').group_keys()) == {'flx', 'pgb'}
     # Direct consumers use a permanent group path; no pointer lookup is needed.
-    with xr.open_zarr(
-        root.store, group='cfs2/forecast/flx', consolidated=False, chunks=None
-    ) as direct:
+    with xr.open_zarr(root.store, group='forecast/flx', consolidated=False, chunks=None) as direct:
         np.testing.assert_allclose(direct.TMP.to_numpy(), 16.85, atol=1e-4)
     actual = get_cfs2_data(
         store=root.store,
@@ -295,16 +288,14 @@ def check_forecast_replacement(
 def test_http_prepared_data_uses_getter_without_prepare_imports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    import asyncio
-    import json
     import sys
-    from types import SimpleNamespace
 
     pytest.importorskip('fastapi')
-    monkeypatch.setenv('WEATHEASY__DATA_ROOT', str(tmp_path / 'store'))
+    from starlette.testclient import TestClient
+
     from weatheasy.storage import prepare_dataset, write_batch
-    from weatheasy.util import float_formatter_factory
-    from weatheasy.web import controller, get_cmip6_data as endpoint
+    from weatheasy.web import create_app
+    from weatheasy.web.config import Settings, SourceSettings, SourcesSettings
 
     root = get_storage(str(tmp_path / 'store'))
     ds = xr.Dataset(
@@ -321,30 +312,29 @@ def test_http_prepared_data_uses_getter_without_prepare_imports(
             'longitude': [0.0, 1.0],
         },
     )
-    write_batch(root.store, 'cmip6/tas', prepare_dataset(ds, crs='EPSG:4326'))
-    monkeypatch.setattr(
-        controller,
-        'get_config',
-        lambda: SimpleNamespace(
-            storage=get_store(tmp_path / 'store'), format_float=float_formatter_factory('null', 6)
-        ),
+    write_batch(root.store, 'tas', prepare_dataset(ds, crs='EPSG:4326'))
+    app = create_app(
+        Settings(
+            sources=SourcesSettings(cmip6=SourceSettings(store=str(tmp_path / 'store'))),
+            _env_file=None,
+        )
     )
     monkeypatch.setitem(sys.modules, 'cfgrib', None)
     monkeypatch.setitem(sys.modules, 'eccodes', None)
 
-    async def query():
-        response = await endpoint(
-            {
-                'begin': date(2000, 1, 1),
-                'end': date(2000, 1, 1),
-                'coords': Coords(55, 0),
-                'variables': ['tas'],
-            }
+    with TestClient(app) as client:
+        response = client.get(
+            '/cmip6',
+            params={
+                'begin': '2000-01-01',
+                'end': '2000-01-01',
+                'lat': 55,
+                'lon': 0,
+                'var': 'tas',
+            },
         )
-        chunks = [chunk async for chunk in cast('AsyncIterable[str]', response.body_iterator)]
-        return json.loads(''.join(chunks))
-
-    assert asyncio.run(query()) == [{'tas': 280, 'date': '2000-01-01'}]
+    assert response.status_code == 200, response.text
+    assert response.json() == [{'tas': 280, 'date': '2000-01-01'}]
 
 
 def test_daily_missing_forecast_sample_remains_nan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

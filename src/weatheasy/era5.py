@@ -84,7 +84,7 @@ def available_period(store: Store) -> tuple[date, date]:
     last_month is a convenience marker. A crash after committing data but before
     updating that marker must neither hide data nor cause a duplicate append.
     """
-    with open_dataset(store, f'{const.ERA5_DIR}/daily') as ds:
+    with open_dataset(store, 'daily') as ds:
         times = ds.time.to_numpy().astype('datetime64[D]')
         first = date.fromisoformat(str(times[0]))
         last = date.fromisoformat(str(times[-1]))
@@ -110,18 +110,20 @@ def download_era5_data(
     ):
         msg = 'Invalid ERA5 area (north, west, south, east)'
         raise StorageError(msg)
-    if group_exists(store, const.ERA5_DIR) and group_attrs(store, const.ERA5_DIR).get(
-        'request_area'
-    ) != list(area):
+    if (
+        group_exists(store, '')
+        and (stored_area := group_attrs(store, '').get('request_area')) is not None
+        and stored_area != list(area)
+    ):
         msg = 'Existing ERA5 store has a different requested area'
         raise StorageError(msg)
-    set_group_attrs(store, const.ERA5_DIR, request_area=list(area))
-    path = f'{const.ERA5_DIR}/daily'
+    set_group_attrs(store, '', request_area=list(area))
+    path = 'daily'
     previous = last_date(store, path)
     first = next_month(previous) if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
     latest = utc_now().date() - 5 * const.ONE_DAY
     if previous:
-        set_group_attrs(store, const.ERA5_DIR, last_month=[previous.year, previous.month])
+        set_group_attrs(store, '', last_month=[previous.year, previous.month])
     if next_month(first) > latest:
         return
     try:
@@ -145,7 +147,7 @@ def download_era5_data(
             # before changing any existing arrays, even for equal-sized regions.
             ds.attrs['request_area'] = list(area)
             write_batch(store, path, ds)
-            set_group_attrs(store, const.ERA5_DIR, last_month=[first.year, first.month])
+            set_group_attrs(store, '', last_month=[first.year, first.month])
             first = following
 
 

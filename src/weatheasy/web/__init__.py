@@ -1,10 +1,15 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
-from . import controller as ctr, models as mls
-from .config import get_config
-from weatheasy import __version__, query as weather_query
+from .config import Settings
+from .controller import build_variables
+from .routes import cfs2_router, cmip6_router, common_router, era5_router
+from .state import AppState
+from weatheasy import __version__
 from weatheasy.error import BaseValueError
 
 
@@ -12,49 +17,30 @@ async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResp
     return JSONResponse({'detail': str(err)}, 422)
 
 
-app = FastAPI(
-    title='WeathEasy',
-    version=__version__ or 'unknown',
-    exception_handlers={
-        BaseValueError: handle_value_error,
-    },
-)
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build an API for the configured sources without opening their stores."""
+    settings = settings if settings is not None else Settings()
+    sources = settings.sources
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[AppState]:
+        yield {'settings': settings, 'variables': build_variables(settings.sources)}
 
-if get_config().enable_cors:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_methods='*',
-        allow_origin_regex='.*',
+    app = FastAPI(
+        title='WeathEasy',
+        version=__version__ or 'unknown',
+        exception_handlers={BaseValueError: handle_value_error},
+        lifespan=lifespan,
     )
+    if settings.enable_cors:
+        app.add_middleware(CORSMiddleware, allow_methods='*', allow_origin_regex='.*')
 
+    app.include_router(common_router)
+    if sources.cfs2:
+        app.include_router(cfs2_router)
+    if sources.cmip6:
+        app.include_router(cmip6_router)
+    if sources.era5:
+        app.include_router(era5_router)
 
-@app.get('/startupz', tags=['Health'])
-@app.get('/readyz', tags=['Health'])
-@app.get('/livez', tags=['Health'])
-async def get_health() -> dict[str, str]:
-    """Check API responsiveness without accessing weather storage."""
-    return {'status': 'ok'}
-
-
-@app.get('/variables', response_model=mls.Variables)
-def get_variables() -> mls.Variables:
-    return ctr.get_variables()
-
-
-@app.get(
-    path='/cfs2',
-    response_model=list[mls.CFS2DataItem],
-    response_model_exclude_unset=True,
-)
-async def get_cfs2_data(query: mls.SFS2Query) -> StreamingResponse:
-    return await ctr.get_data(weather_query.get_cfs2_data, query)
-
-
-@app.get(
-    path='/cmip6',
-    response_model=list[mls.CMIP6DataItem],
-    response_model_exclude_unset=True,
-)
-async def get_cmip6_data(query: mls.CMIP6Query) -> StreamingResponse:
-    return await ctr.get_data(weather_query.get_cmip6_data, query)
+    return app

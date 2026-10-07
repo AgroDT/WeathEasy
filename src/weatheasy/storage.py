@@ -1,7 +1,7 @@
 """Coordinate-aware, single-writer Zarr v3 storage.
 
-Each grid is a separate group: cfs2/reanalysis/{flx,pgb},
-cfs2/forecast/{flx,pgb}, or cmip6/<variable>.
+Each source owns a separate store. CFS2 grids use reanalysis/{flx,pgb} and
+forecast/{flx,pgb}; ERA5 uses daily; CMIP6 uses <variable>.
 A group contains (time, latitude, longitude) fields, true cell centres and a
 scalar spatial_ref with the source CRS. Latitude increases; longitude increases
 in a continuous, unwrapped interval (e.g. 170..190 across the dateline). No
@@ -76,13 +76,19 @@ def get_store(uri: str | PathLike[str], *, filesystem: AsyncFileSystem | None = 
 
 def group_attrs(store: Store, group: str) -> dict[str, Any]:
     """Read metadata from a group without exposing Zarr objects to readers."""
-    target = zarr.open_group(store, mode='r', zarr_format=3).get_group(group)
+    root = zarr.open_group(store, mode='r', zarr_format=3)
+    target = root.get_group(group) if group else root
     return dict(target.attrs)
 
 
 def group_exists(store: Store, group: str) -> bool:
     """Check whether a group exists without creating it."""
-    root = zarr.open_group(store, mode='r', zarr_format=3)
+    try:
+        root = zarr.open_group(store, mode='r', zarr_format=3)
+    except FileNotFoundError:
+        return False
+    if not group:
+        return True
     if group not in root:
         return False
     if not isinstance(root[group], zarr.Group):
@@ -100,12 +106,16 @@ def pristine_group(store: Store, group: str) -> bool:
 
 def set_group_attrs(store: Store, group: str, **attrs: Any) -> None:
     """Create a metadata group if needed and update its attributes."""
-    zarr.open_group(store, mode='a', zarr_format=3).require_group(group).attrs.update(attrs)
+    root = zarr.open_group(store, mode='a', zarr_format=3)
+    target = root.require_group(group) if group else root
+    target.attrs.update(attrs)
 
 
 def remove_group_attr(store: Store, group: str, key: str) -> None:
     """Remove a readiness marker before mutating its published data."""
-    zarr.open_group(store, mode='a', zarr_format=3).get_group(group).attrs.pop(key, None)
+    root = zarr.open_group(store, mode='a', zarr_format=3)
+    target = root.get_group(group) if group else root
+    target.attrs.pop(key, None)
 
 
 def delete_group(store: Store, group: str) -> None:

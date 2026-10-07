@@ -14,12 +14,12 @@
     {{- end }}
     - {{ .source | quote }}
     - --store
-    - {{ required "storage.dataRoot is required" $root.Values.storage.dataRoot | quote }}
+    - {{ required (printf "sources.%s.store is required" .source) (index $root.Values.sources .source).store | quote }}
     {{- if .correction }}
     - --dem
-    - {{ required (printf "updates.%s.correction.dem is required" .source) $job.correction.dem | quote }}
+    - {{ required (printf "sources.%s.update.correction.dem is required" .source) $job.correction.dem | quote }}
     - --artifacts
-    - {{ required (printf "updates.%s.correction.artifacts is required" .source) $job.correction.artifacts | quote }}
+    - {{ required (printf "sources.%s.update.correction.artifacts is required" .source) $job.correction.artifacts | quote }}
     {{- else }}
     - --download-dir
     - /var/lib/weatheasy/downloads
@@ -51,7 +51,9 @@
   volumeMounts:
     {{- include "weatheasy.volumeMounts" $root | nindent 4 }}
 {{- end -}}
-{{- range $source, $job := .Values.updates }}
+{{- range $source, $settings := .Values.sources }}
+{{- with $settings.update }}
+{{- $job := . }}
 {{- if $job.enabled }}
 ---
 apiVersion: batch/v1
@@ -97,5 +99,6 @@ spec:
             {{- include "weatheasy.updateContainer" (dict "root" $ "job" $job "source" $source "correction" $job.correction.enabled) | nindent 12 }}
           volumes:
             {{- include "weatheasy.volumes" $ | nindent 12 }}
+{{- end }}
 {{- end }}
 {{- end }}

@@ -33,10 +33,10 @@ if TYPE_CHECKING:
 
 
 def download_cfs2_data(store: Store, download_dir: Path | None = None) -> None:
-    set_group_attrs(store, const.CFS2_DIR)
+    set_group_attrs(store, '')
     today = utc_now().date()
 
-    if updated := group_attrs(store, const.CFS2_DIR).get(const.CFS2_KEY_UPDATED):
+    if updated := group_attrs(store, '').get(const.CFS2_KEY_UPDATED):
         time_since_updated = today - date.fromisoformat(str(updated))
         if time_since_updated < const.ONE_DAY:
             _LOG.info('No forecast update required')
@@ -66,7 +66,7 @@ def download_cmip6_data(store: Store, download_dir: Path | None = None) -> None:
     download_dir = _process_args(const.CMIP6_DIR, store, download_dir)
     with _session() as session, _temp_dir() as temporary:
         for var in const.CMIP6_VARS:
-            path = f'cmip6/{var}'
+            path = var
             previous = last_date(store, path)
             first_year = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
             for year in range(first_year, const.CMIP6_LAST_YEAR + 1):
@@ -98,7 +98,7 @@ _CFS2_DOWNLOADED_FILENAME_TEMPLATE = '{}{}{}.grb2'
 
 
 def _process_args(group_name: str, store: Store, download_dir: Path | None):
-    set_group_attrs(store, group_name)
+    set_group_attrs(store, '')
     if download_dir:
         download_dir /= group_name
         download_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +215,7 @@ def _download_cfs2_forecast(
 def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Path):
     # In-place replacement deliberately makes forecast data unavailable. Clear
     # readiness before deleting any chunks, then publish only after both grids.
-    remove_group_attr(store, const.CFS2_DIR, const.CFS2_KEY_UPDATED)
+    remove_group_attr(store, '', const.CFS2_KEY_UPDATED)
     delete_group(store, const.CFS2_FORECAST_DIR)
     for kind in ('flx', 'pgb'):
         group = f'{const.CFS2_FORECAST_DIR}/{kind}'
@@ -239,7 +239,7 @@ def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Pat
             raise ValueError(msg)
         for date_, paths in paths_by_day:
             write_batch(store, group, _daily_cfs2(paths, kind, date_, template))
-    set_group_attrs(store, const.CFS2_DIR, updated=utc_now().date().isoformat())
+    set_group_attrs(store, '', updated=utc_now().date().isoformat())
 
 
 class _Cfs2ReanalysisDownloader:

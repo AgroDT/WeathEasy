@@ -17,14 +17,14 @@ except ImportError:
     version = 'unknown version'
 
 
-def _store(parser: ArgumentParser, *, required: bool = False) -> None:
+def _store(parser: ArgumentParser, *, source: str = '', required: bool = False) -> None:
     parser.add_argument(
         '--store',
         '-d',
         '--data',
         required=required,
-        default=None if required else str(Path.cwd() / 'weatheasy' / 'zarr'),
-        help='prepared Zarr path or s3:// URI',
+        default=None if required else str(Path.cwd() / 'weatheasy' / f'{source}.zarr'),
+        help='prepared source-specific Zarr path or s3:// URI',
     )
 
 
@@ -63,7 +63,7 @@ def _add_query(groups: _SubParsersAction[ArgumentParser]) -> None:
     ):
         sub = sources.add_parser(source, formatter_class=ArgumentDefaultsHelpFormatter)
         sub.set_defaults(handler='query')
-        _store(sub)
+        _store(sub, source=source)
         sub.add_argument('begin', type=date.fromisoformat, help='first date yyyy-mm-dd')
         sub.add_argument('end', type=date.fromisoformat, help='last date yyyy-mm-dd')
         sub.add_argument('latitude', type=float, help='decimal degrees EPSG:4326')
@@ -81,7 +81,7 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
     for source in ('cfs2', 'cmip6', 'era5'):
         sub = sources.add_parser(source, formatter_class=ArgumentDefaultsHelpFormatter)
         sub.set_defaults(handler=f'download_{source}')
-        _store(sub)
+        _store(sub, source=source)
         sub.add_argument('--download-dir', type=Path, help='local directory for downloaded files')
         if source == 'era5':
             sub.add_argument(

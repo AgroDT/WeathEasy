@@ -53,10 +53,10 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
     ds = field()
     ds.TMP.data[0, 0, 0] = np.nan
     path = tmp_path / 'weather.zarr'
-    write_batch(get_store(path), 'cmip6/ACCESS-CM2/historical/r1i1p1f1', ds, tile_size=2)
+    write_batch(get_store(path), 'ACCESS-CM2/historical/r1i1p1f1', ds, tile_size=2)
     with xr.open_zarr(
         path,
-        group='cmip6/ACCESS-CM2/historical/r1i1p1f1',
+        group='ACCESS-CM2/historical/r1i1p1f1',
         consolidated=False,
         chunks=None,
         decode_coords='all',
@@ -76,13 +76,13 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
         np.testing.assert_array_equal(result.longitude, ds.longitude)
         np.testing.assert_array_equal(result.TMP, ds.TMP)
     root = zarr.open_group(path)
-    arr = root.get_array('cmip6/ACCESS-CM2/historical/r1i1p1f1/TMP')
+    arr = root.get_array('ACCESS-CM2/historical/r1i1p1f1/TMP')
     assert arr.metadata.zarr_format == 3
     assert arr.metadata.dimension_names == ('time', 'latitude', 'longitude')
     assert arr.chunks == (1, 2, 2)
     # A new process importing only xarray can read the artifact.
     script = """import xarray as xr, sys
-x=xr.open_zarr(sys.argv[1],group='cmip6/ACCESS-CM2/historical/r1i1p1f1',chunks=None,consolidated=False,decode_coords='all')
+x=xr.open_zarr(sys.argv[1],group='ACCESS-CM2/historical/r1i1p1f1',chunks=None,consolidated=False,decode_coords='all')
 assert x.TMP.sel(latitude=55.375,longitude=0.375).item()==3
 assert 'weatheasy' not in sys.modules
 """
@@ -129,34 +129,34 @@ def test_separate_grid_groups_and_no_implicit_alignment():
     store = MemoryStore()
     flx = field(latitude=(54.7, 55.65), longitude=(0, 0.9375))
     pgb = field(latitude=(54, 55), longitude=(0, 1))
-    write_batch(store, 'cfs2/forecast/flx', flx)
-    write_batch(store, 'cfs2/forecast/pgb', pgb)
-    np.testing.assert_array_equal(open_dataset(store, 'cfs2/forecast/flx').latitude, flx.latitude)
-    np.testing.assert_array_equal(open_dataset(store, 'cfs2/forecast/pgb').latitude, pgb.latitude)
+    write_batch(store, 'forecast/flx', flx)
+    write_batch(store, 'forecast/pgb', pgb)
+    np.testing.assert_array_equal(open_dataset(store, 'forecast/flx').latitude, flx.latitude)
+    np.testing.assert_array_equal(open_dataset(store, 'forecast/pgb').latitude, pgb.latitude)
     with pytest.raises(ValueError, match='align'):
         merge_fields(flx, pgb.rename(TMP='PRES'))
     with pytest.raises(StorageError, match='conflicting'):
-        write_batch(store, 'cfs2/forecast/flx', pgb)
+        write_batch(store, 'forecast/flx', pgb)
 
 
 def test_append_and_conflict_leave_committed_data_unchanged():
     store = MemoryStore()
-    write_batch(store, 'cfs2/reanalysis/flx', field())
-    write_batch(store, 'cfs2/reanalysis/flx', field(day='2026-01-02'))
-    actual = open_dataset(store, 'cfs2/reanalysis/flx')
+    write_batch(store, 'reanalysis/flx', field())
+    write_batch(store, 'reanalysis/flx', field(day='2026-01-02'))
+    actual = open_dataset(store, 'reanalysis/flx')
     committed = actual.load().copy(deep=True)
     np.testing.assert_array_equal(
         actual.time.to_numpy(), np.array(['2026-01-01', '2026-01-02'], dtype='datetime64[ns]')
     )
     assert CRS.from_wkt(actual.spatial_ref.attrs['crs_wkt']).to_epsg() == 4326
     with pytest.raises(StorageError, match='follow'):
-        write_batch(store, 'cfs2/reanalysis/flx', field(day='2026-01-02'))
-    xr.testing.assert_identical(open_dataset(store, 'cfs2/reanalysis/flx'), committed)
+        write_batch(store, 'reanalysis/flx', field(day='2026-01-02'))
+    xr.testing.assert_identical(open_dataset(store, 'reanalysis/flx'), committed)
     changed = field(day='2026-01-03')
     changed.TMP.attrs['units'] = 'degC'
     with pytest.raises(StorageError, match='conflicting'):
-        write_batch(store, 'cfs2/reanalysis/flx', changed)
-    xr.testing.assert_identical(open_dataset(store, 'cfs2/reanalysis/flx'), committed)
+        write_batch(store, 'reanalysis/flx', changed)
+    xr.testing.assert_identical(open_dataset(store, 'reanalysis/flx'), committed)
 
 
 def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pytest.MonkeyPatch):
@@ -239,7 +239,7 @@ def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
     seen = []
 
     def get_group(group: str) -> SimpleNamespace:
-        assert group == 'era5/daily'
+        assert group == 'daily'
         return SimpleNamespace(
             attrs={
                 'storage_schema': 'weatheasy-coordinate-v1',
@@ -255,7 +255,7 @@ def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
         return SimpleNamespace(get_group=get_group)
 
     def open_zarr(store: StoreLike, *, group: str, **kwargs):
-        assert group == 'era5/daily'
+        assert group == 'daily'
         assert kwargs['decode_coords'] == 'all'
         seen.append(store)
         return field()
@@ -263,7 +263,7 @@ def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
     monkeypatch.setattr(zarr, 'open_group', open_group)
     monkeypatch.setattr(xr, 'open_zarr', open_zarr)
     store = get_store('s3://weather-bucket/zarr', filesystem=filesystem)
-    result = open_dataset(store, 'era5/daily')
+    result = open_dataset(store, 'daily')
     assert result.TMP.sel(latitude=55.375, longitude=0.375).item() == 3
     assert len(seen) == 2
     assert seen[0] is seen[1]

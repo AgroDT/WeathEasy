@@ -17,10 +17,6 @@ nameOverride: ''
 # Override the complete resource name (truncated to 48 characters).
 fullnameOverride: ''
 
-storage:
-  # Shared durable S3 URI; required when API or updates are enabled.
-  dataRoot: ''
-
 s3:
   # S3-compatible endpoint; empty uses the SDK default.
   endpoint: ''
@@ -119,77 +115,86 @@ service:
   # Service port; containers listen on port 8000.
   port: 8000
 
-updates:
+sources:
   cfs2:
-    # Create the source CronJob.
-    enabled: false
-    # Cron schedule.
-    schedule: 0 5 * * *
-    # Schedule time zone.
-    timeZone: Etc/UTC
-    # Pause scheduled runs; does not stop active Jobs.
-    suspend: false
-    # Job retry limit.
-    backoffLimit: 2
-    # Maximum lateness for starting a scheduled run; null omits the deadline.
-    startingDeadlineSeconds: null
-    # Maximum total Job duration, including retries; null omits the deadline.
-    activeDeadlineSeconds: null
-    # Number of successful Jobs to retain.
-    successfulJobsHistoryLimit: 3
-    # Number of failed Jobs to retain.
-    failedJobsHistoryLimit: 1
-    # Download container resource requests and limits.
-    resources: {}
-    # Source-specific Secret/ConfigMap references, appended to global entries.
-    envFrom: []
-    # Source-specific EnvVar entries, appended to global entries.
-    extraEnv: []
-    correction:
-      # Apply correction after successful download.
+    # Independent CFS2 Zarr store URI; empty disables this source.
+    store: ''
+    update:
+      # Create the source CronJob.
       enabled: false
-      # Published DEM Zarr URI; required when this update and correction are enabled.
-      dem: ''
-      # Published model artifact directory URI; required when this update and correction are enabled.
-      artifacts: ''
-      # Correction container resource requests and limits.
+      # Cron schedule.
+      schedule: 0 5 * * *
+      # Schedule time zone.
+      timeZone: Etc/UTC
+      # Pause scheduled runs; does not stop active Jobs.
+      suspend: false
+      # Job retry limit.
+      backoffLimit: 2
+      # Maximum lateness for starting a scheduled run; null omits the deadline.
+      startingDeadlineSeconds: null
+      # Maximum total Job duration, including retries; null omits the deadline.
+      activeDeadlineSeconds: null
+      # Number of successful Jobs to retain.
+      successfulJobsHistoryLimit: 3
+      # Number of failed Jobs to retain.
+      failedJobsHistoryLimit: 1
+      # Download container resource requests and limits.
       resources: {}
+      # Source-specific Secret/ConfigMap references, appended to global entries.
+      envFrom: []
+      # Source-specific EnvVar entries, appended to global entries.
+      extraEnv: []
+      correction:
+        # Apply correction after successful download.
+        enabled: false
+        # Published DEM Zarr URI; required when this update and correction are enabled.
+        dem: ''
+        # Published model artifact directory URI; required when this update and correction are enabled.
+        artifacts: ''
+        # Correction container resource requests and limits.
+        resources: {}
   era5:
-    # Create the source CronJob.
-    enabled: false
-    # Cron schedule.
-    schedule: 0 6 10 * *
-    # Schedule time zone.
-    timeZone: Etc/UTC
-    # Pause scheduled runs; does not stop active Jobs.
-    suspend: false
-    # Job retry limit.
-    backoffLimit: 2
-    # Maximum lateness for starting a scheduled run; null omits the deadline.
-    startingDeadlineSeconds: null
-    # Maximum total Job duration, including retries; null omits the deadline.
-    activeDeadlineSeconds: null
-    # Number of successful Jobs to retain.
-    successfulJobsHistoryLimit: 3
-    # Number of failed Jobs to retain.
-    failedJobsHistoryLimit: 1
-    # Download container resource requests and limits.
-    resources: {}
-    # Source-specific Secret/ConfigMap references, appended to global entries.
-    envFrom: []
-    # Source-specific EnvVar entries, appended to global entries.
-    extraEnv: []
-    # Optional ERA5 bounding box [north, west, south, east].
-    area: []
-    correction:
-      # Apply correction after successful download.
+    # Independent ERA5 Zarr store URI; empty disables this source.
+    store: ''
+    update:
+      # Create the source CronJob.
       enabled: false
-      # Published DEM Zarr URI; required when this update and correction are enabled.
-      dem: ''
-      # Published model artifact directory URI; required when this update and correction are enabled.
-      artifacts: ''
-      # Correction container resource requests and limits.
+      # Cron schedule.
+      schedule: 0 6 10 * *
+      # Schedule time zone.
+      timeZone: Etc/UTC
+      # Pause scheduled runs; does not stop active Jobs.
+      suspend: false
+      # Job retry limit.
+      backoffLimit: 2
+      # Maximum lateness for starting a scheduled run; null omits the deadline.
+      startingDeadlineSeconds: null
+      # Maximum total Job duration, including retries; null omits the deadline.
+      activeDeadlineSeconds: null
+      # Number of successful Jobs to retain.
+      successfulJobsHistoryLimit: 3
+      # Number of failed Jobs to retain.
+      failedJobsHistoryLimit: 1
+      # Download container resource requests and limits.
       resources: {}
+      # Source-specific Secret/ConfigMap references, appended to global entries.
+      envFrom: []
+      # Source-specific EnvVar entries, appended to global entries.
+      extraEnv: []
+      # Optional ERA5 bounding box [north, west, south, east].
+      area: []
+      correction:
+        # Apply correction after successful download.
+        enabled: false
+        # Published DEM Zarr URI; required when this update and correction are enabled.
+        dem: ''
+        # Published model artifact directory URI; required when this update and correction are enabled.
+        artifacts: ''
+        # Correction container resource requests and limits.
+        resources: {}
+  cmip6:
+    # Independent CMIP6 Zarr store URI; empty disables this source.
+    store: ''
 
 ingress:
   # Create an Ingress; requires API.

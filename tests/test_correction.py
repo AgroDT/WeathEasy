@@ -102,9 +102,7 @@ def raw_store(
     )
     write_batch(root.store, source.path(root), prepare_dataset(ds, crs='EPSG:4326'))
     if source == CFS2:
-        root.require_group('cfs2').attrs['updated'] = (
-            start + timedelta(days=max(offsets) + 4)
-        ).isoformat()
+        root.attrs['updated'] = (start + timedelta(days=max(offsets) + 4)).isoformat()
     return root, start
 
 

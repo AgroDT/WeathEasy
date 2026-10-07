@@ -46,18 +46,6 @@
       "description": "Override the complete resource name (truncated to 48 characters).",
       "default": ""
     },
-    "storage": {
-      "type": "object",
-      "properties": {
-        "dataRoot": {
-          "type": "string",
-          "pattern": "^$|^s3://[^/]+/.+",
-          "description": "Shared durable S3 URI; required when API or updates are enabled.",
-          "default": ""
-        }
-      },
-      "additionalProperties": false
-    },
     "s3": {
       "type": "object",
       "properties": {
@@ -264,126 +252,150 @@
       },
       "additionalProperties": false
     },
-    "updates": {
+    "sources": {
       "type": "object",
       "properties": {
         "cfs2": {
           "type": "object",
           "properties": {
-            "enabled": {
-              "type": "boolean",
-              "description": "Create the source CronJob.",
-              "default": false
-            },
-            "schedule": {
+            "store": {
               "type": "string",
-              "minLength": 1,
-              "description": "Cron schedule.",
-              "default": "0 5 * * *"
+              "pattern": "^$|^s3://[^/]+/.+",
+              "description": "Independent CFS2 Zarr store URI; empty disables this source.",
+              "default": ""
             },
-            "timeZone": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Schedule time zone.",
-              "default": "Etc/UTC"
-            },
-            "suspend": {
-              "type": "boolean",
-              "description": "Pause scheduled runs; does not stop active Jobs.",
-              "default": false
-            },
-            "backoffLimit": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Job retry limit.",
-              "default": 2
-            },
-            "startingDeadlineSeconds": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 0,
-              "description": "Maximum lateness for starting a scheduled run; null omits the deadline.",
-              "default": null
-            },
-            "activeDeadlineSeconds": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 1,
-              "description": "Maximum total Job duration, including retries; null omits the deadline.",
-              "default": null
-            },
-            "successfulJobsHistoryLimit": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Number of successful Jobs to retain.",
-              "default": 3
-            },
-            "failedJobsHistoryLimit": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Number of failed Jobs to retain.",
-              "default": 1
-            },
-            "resources": {
-              "type": "object",
-              "description": "Download container resource requests and limits.",
-              "default": {}
-            },
-            "envFrom": {
-              "type": "array",
-              "items": {
-                "type": "object"
-              },
-              "description": "Source-specific Secret/ConfigMap references, appended to global entries.",
-              "default": []
-            },
-            "extraEnv": {
-              "type": "array",
-              "items": {
-                "type": "object"
-              },
-              "description": "Source-specific EnvVar entries, appended to global entries.",
-              "default": []
-            },
-            "correction": {
+            "update": {
               "type": "object",
               "properties": {
                 "enabled": {
                   "type": "boolean",
-                  "description": "Apply correction after successful download.",
+                  "description": "Create the source CronJob.",
                   "default": false
                 },
-                "dem": {
+                "schedule": {
                   "type": "string",
-                  "description": "Published DEM Zarr URI; required when this update and correction are enabled.",
-                  "default": ""
+                  "minLength": 1,
+                  "description": "Cron schedule.",
+                  "default": "0 5 * * *"
                 },
-                "artifacts": {
+                "timeZone": {
                   "type": "string",
-                  "description": "Published model artifact directory URI; required when this update and correction are enabled.",
-                  "default": ""
+                  "minLength": 1,
+                  "description": "Schedule time zone.",
+                  "default": "Etc/UTC"
+                },
+                "suspend": {
+                  "type": "boolean",
+                  "description": "Pause scheduled runs; does not stop active Jobs.",
+                  "default": false
+                },
+                "backoffLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Job retry limit.",
+                  "default": 2
+                },
+                "startingDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "Maximum lateness for starting a scheduled run; null omits the deadline.",
+                  "default": null
+                },
+                "activeDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "description": "Maximum total Job duration, including retries; null omits the deadline.",
+                  "default": null
+                },
+                "successfulJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of successful Jobs to retain.",
+                  "default": 3
+                },
+                "failedJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of failed Jobs to retain.",
+                  "default": 1
                 },
                 "resources": {
                   "type": "object",
-                  "description": "Correction container resource requests and limits.",
+                  "description": "Download container resource requests and limits.",
                   "default": {}
+                },
+                "envFrom": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific Secret/ConfigMap references, appended to global entries.",
+                  "default": []
+                },
+                "extraEnv": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific EnvVar entries, appended to global entries.",
+                  "default": []
+                },
+                "correction": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Apply correction after successful download.",
+                      "default": false
+                    },
+                    "dem": {
+                      "type": "string",
+                      "description": "Published DEM Zarr URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "artifacts": {
+                      "type": "string",
+                      "description": "Published model artifact directory URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "resources": {
+                      "type": "object",
+                      "description": "Correction container resource requests and limits.",
+                      "default": {}
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false,
-          "allOf": [
-            {
-              "if": {
-                "allOf": [
-                  {
-                    "properties": {
-                      "correction": {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "allOf": [
+                      {
+                        "properties": {
+                          "correction": {
+                            "properties": {
+                              "enabled": {
+                                "const": true
+                              }
+                            },
+                            "required": [
+                              "enabled"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "correction"
+                        ]
+                      },
+                      {
                         "properties": {
                           "enabled": {
                             "const": true
@@ -393,12 +405,46 @@
                           "enabled"
                         ]
                       }
-                    },
-                    "required": [
-                      "correction"
                     ]
                   },
-                  {
+                  "then": {
+                    "properties": {
+                      "correction": {
+                        "allOf": [
+                          {
+                            "properties": {
+                              "dem": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "dem"
+                            ]
+                          },
+                          {
+                            "properties": {
+                              "artifacts": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "artifacts"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "update": {
                     "properties": {
                       "enabled": {
                         "const": true
@@ -408,35 +454,20 @@
                       "enabled"
                     ]
                   }
+                },
+                "required": [
+                  "update"
                 ]
               },
               "then": {
                 "properties": {
-                  "correction": {
-                    "allOf": [
-                      {
-                        "properties": {
-                          "dem": {
-                            "minLength": 1
-                          }
-                        },
-                        "required": [
-                          "dem"
-                        ]
-                      },
-                      {
-                        "properties": {
-                          "artifacts": {
-                            "minLength": 1
-                          }
-                        },
-                        "required": [
-                          "artifacts"
-                        ]
-                      }
-                    ]
+                  "store": {
+                    "minLength": 1
                   }
-                }
+                },
+                "required": [
+                  "store"
+                ]
               }
             }
           ]
@@ -444,137 +475,161 @@
         "era5": {
           "type": "object",
           "properties": {
-            "enabled": {
-              "type": "boolean",
-              "description": "Create the source CronJob.",
-              "default": false
-            },
-            "schedule": {
+            "store": {
               "type": "string",
-              "minLength": 1,
-              "description": "Cron schedule.",
-              "default": "0 6 10 * *"
+              "pattern": "^$|^s3://[^/]+/.+",
+              "description": "Independent ERA5 Zarr store URI; empty disables this source.",
+              "default": ""
             },
-            "timeZone": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Schedule time zone.",
-              "default": "Etc/UTC"
-            },
-            "suspend": {
-              "type": "boolean",
-              "description": "Pause scheduled runs; does not stop active Jobs.",
-              "default": false
-            },
-            "backoffLimit": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Job retry limit.",
-              "default": 2
-            },
-            "startingDeadlineSeconds": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 0,
-              "description": "Maximum lateness for starting a scheduled run; null omits the deadline.",
-              "default": null
-            },
-            "activeDeadlineSeconds": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 1,
-              "description": "Maximum total Job duration, including retries; null omits the deadline.",
-              "default": null
-            },
-            "successfulJobsHistoryLimit": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Number of successful Jobs to retain.",
-              "default": 3
-            },
-            "failedJobsHistoryLimit": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Number of failed Jobs to retain.",
-              "default": 1
-            },
-            "resources": {
-              "type": "object",
-              "description": "Download container resource requests and limits.",
-              "default": {}
-            },
-            "envFrom": {
-              "type": "array",
-              "items": {
-                "type": "object"
-              },
-              "description": "Source-specific Secret/ConfigMap references, appended to global entries.",
-              "default": []
-            },
-            "extraEnv": {
-              "type": "array",
-              "items": {
-                "type": "object"
-              },
-              "description": "Source-specific EnvVar entries, appended to global entries.",
-              "default": []
-            },
-            "area": {
-              "type": "array",
-              "items": {
-                "type": "number"
-              },
-              "oneOf": [
-                {
-                  "maxItems": 0
-                },
-                {
-                  "minItems": 4,
-                  "maxItems": 4
-                }
-              ],
-              "description": "Optional ERA5 bounding box [north, west, south, east].",
-              "default": []
-            },
-            "correction": {
+            "update": {
               "type": "object",
               "properties": {
                 "enabled": {
                   "type": "boolean",
-                  "description": "Apply correction after successful download.",
+                  "description": "Create the source CronJob.",
                   "default": false
                 },
-                "dem": {
+                "schedule": {
                   "type": "string",
-                  "description": "Published DEM Zarr URI; required when this update and correction are enabled.",
-                  "default": ""
+                  "minLength": 1,
+                  "description": "Cron schedule.",
+                  "default": "0 6 10 * *"
                 },
-                "artifacts": {
+                "timeZone": {
                   "type": "string",
-                  "description": "Published model artifact directory URI; required when this update and correction are enabled.",
-                  "default": ""
+                  "minLength": 1,
+                  "description": "Schedule time zone.",
+                  "default": "Etc/UTC"
+                },
+                "suspend": {
+                  "type": "boolean",
+                  "description": "Pause scheduled runs; does not stop active Jobs.",
+                  "default": false
+                },
+                "backoffLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Job retry limit.",
+                  "default": 2
+                },
+                "startingDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "Maximum lateness for starting a scheduled run; null omits the deadline.",
+                  "default": null
+                },
+                "activeDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "description": "Maximum total Job duration, including retries; null omits the deadline.",
+                  "default": null
+                },
+                "successfulJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of successful Jobs to retain.",
+                  "default": 3
+                },
+                "failedJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of failed Jobs to retain.",
+                  "default": 1
                 },
                 "resources": {
                   "type": "object",
-                  "description": "Correction container resource requests and limits.",
+                  "description": "Download container resource requests and limits.",
                   "default": {}
+                },
+                "envFrom": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific Secret/ConfigMap references, appended to global entries.",
+                  "default": []
+                },
+                "extraEnv": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific EnvVar entries, appended to global entries.",
+                  "default": []
+                },
+                "area": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "oneOf": [
+                    {
+                      "maxItems": 0
+                    },
+                    {
+                      "minItems": 4,
+                      "maxItems": 4
+                    }
+                  ],
+                  "description": "Optional ERA5 bounding box [north, west, south, east].",
+                  "default": []
+                },
+                "correction": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Apply correction after successful download.",
+                      "default": false
+                    },
+                    "dem": {
+                      "type": "string",
+                      "description": "Published DEM Zarr URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "artifacts": {
+                      "type": "string",
+                      "description": "Published model artifact directory URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "resources": {
+                      "type": "object",
+                      "description": "Correction container resource requests and limits.",
+                      "default": {}
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false,
-          "allOf": [
-            {
-              "if": {
-                "allOf": [
-                  {
-                    "properties": {
-                      "correction": {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "allOf": [
+                      {
+                        "properties": {
+                          "correction": {
+                            "properties": {
+                              "enabled": {
+                                "const": true
+                              }
+                            },
+                            "required": [
+                              "enabled"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "correction"
+                        ]
+                      },
+                      {
                         "properties": {
                           "enabled": {
                             "const": true
@@ -584,12 +639,46 @@
                           "enabled"
                         ]
                       }
-                    },
-                    "required": [
-                      "correction"
                     ]
                   },
-                  {
+                  "then": {
+                    "properties": {
+                      "correction": {
+                        "allOf": [
+                          {
+                            "properties": {
+                              "dem": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "dem"
+                            ]
+                          },
+                          {
+                            "properties": {
+                              "artifacts": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "artifacts"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "update": {
                     "properties": {
                       "enabled": {
                         "const": true
@@ -599,38 +688,35 @@
                       "enabled"
                     ]
                   }
+                },
+                "required": [
+                  "update"
                 ]
               },
               "then": {
                 "properties": {
-                  "correction": {
-                    "allOf": [
-                      {
-                        "properties": {
-                          "dem": {
-                            "minLength": 1
-                          }
-                        },
-                        "required": [
-                          "dem"
-                        ]
-                      },
-                      {
-                        "properties": {
-                          "artifacts": {
-                            "minLength": 1
-                          }
-                        },
-                        "required": [
-                          "artifacts"
-                        ]
-                      }
-                    ]
+                  "store": {
+                    "minLength": 1
                   }
-                }
+                },
+                "required": [
+                  "store"
+                ]
               }
             }
           ]
+        },
+        "cmip6": {
+          "type": "object",
+          "properties": {
+            "store": {
+              "type": "string",
+              "pattern": "^$|^s3://[^/]+/.+",
+              "description": "Independent CMIP6 Zarr store URI; empty disables this source.",
+              "default": ""
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -746,86 +832,82 @@
   "allOf": [
     {
       "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "api": {
-                "properties": {
-                  "enabled": {
-                    "const": true
-                  }
-                },
-                "required": [
-                  "enabled"
-                ]
-              }
-            },
-            "required": [
-              "api"
-            ]
-          },
-          {
-            "properties": {
-              "updates": {
-                "anyOf": [
-                  {
-                    "properties": {
-                      "cfs2": {
-                        "properties": {
-                          "enabled": {
-                            "const": true
-                          }
-                        },
-                        "required": [
-                          "enabled"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "cfs2"
-                    ]
-                  },
-                  {
-                    "properties": {
-                      "era5": {
-                        "properties": {
-                          "enabled": {
-                            "const": true
-                          }
-                        },
-                        "required": [
-                          "enabled"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "era5"
-                    ]
-                  }
-                ]
-              }
-            },
-            "required": [
-              "updates"
-            ]
-          }
-        ]
-      },
-      "then": {
         "properties": {
-          "storage": {
+          "api": {
             "properties": {
-              "dataRoot": {
-                "minLength": 1
+              "enabled": {
+                "const": true
               }
             },
             "required": [
-              "dataRoot"
+              "enabled"
             ]
           }
         },
         "required": [
-          "storage"
+          "api"
+        ]
+      },
+      "then": {
+        "properties": {
+          "sources": {
+            "anyOf": [
+              {
+                "properties": {
+                  "cfs2": {
+                    "properties": {
+                      "store": {
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "store"
+                    ]
+                  }
+                },
+                "required": [
+                  "cfs2"
+                ]
+              },
+              {
+                "properties": {
+                  "era5": {
+                    "properties": {
+                      "store": {
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "store"
+                    ]
+                  }
+                },
+                "required": [
+                  "era5"
+                ]
+              },
+              {
+                "properties": {
+                  "cmip6": {
+                    "properties": {
+                      "store": {
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "store"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmip6"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "sources"
         ]
       }
     },

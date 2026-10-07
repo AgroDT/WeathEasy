@@ -74,11 +74,11 @@ class Source:
         return dataset.sel(latitude=slice(south, north), longitude=slice(west, east))
 
 
-ERA5 = Source('era5', 'era5/daily', 'era5/correction')
+ERA5 = Source('era5', 'daily', 'correction')
 CFS2 = Source(
     'cfs2',
-    'cfs2/reanalysis/flx',
-    'cfs2/reanalysis/correction',
+    'reanalysis/flx',
+    'reanalysis/correction',
     precip_to_mm=21600.0,
     crop_area=RUSSIA_AREA,
 )

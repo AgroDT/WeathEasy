@@ -48,7 +48,7 @@ def get_cfs2_data(  # noqa: C901
     """Read prepared daily fields; PRATE and PRATE_corr are returned in mm/day."""
     _check_date_range(begin, end)
     try:
-        updated = group_attrs(store, const.CFS2_DIR)[const.CFS2_KEY_UPDATED]
+        updated = group_attrs(store, '')[const.CFS2_KEY_UPDATED]
     except KeyError as err:
         raise CFS2Error from err
     boundary = date.fromisoformat(str(updated)) - const.CFS2_REANALYSIS_LAST_DATE_OFFSET
@@ -63,7 +63,7 @@ def get_cfs2_data(  # noqa: C901
             selected = [var for var in variables if var in bands]
             if not selected:
                 continue
-            path = f'cfs2/{kind}/{grid}'
+            path = f'{kind}/{grid}'
             # The loader creates empty groups before trying source files.
             # Only pristine groups mean no data; incomplete/corrupt stores
             # must still fail validation in open_dataset.
@@ -78,7 +78,7 @@ def get_cfs2_data(  # noqa: C901
             if corrected:
                 values = _read_point(
                     store,
-                    'cfs2/reanalysis/correction',
+                    'reanalysis/correction',
                     first,
                     last,
                     coords,
@@ -108,10 +108,7 @@ def get_cmip6_data(
         if not first <= value <= last:
             raise CMIP6DateRangeError(value, first, last)
     result = np.stack(
-        [
-            _read_point(store, f'cmip6/{variable}', begin, end, coords, [variable])[0]
-            for variable in variables
-        ]
+        [_read_point(store, variable, begin, end, coords, [variable])[0] for variable in variables]
     )
     return _daily_precipitation(result, variables, 'pr', 86400)
 
@@ -136,7 +133,7 @@ def get_era5_data(
     raw = [var for var in variables if var not in ('TMP_corr', 'PRATE_corr')]
     corrected = [var for var in variables if var in ('TMP_corr', 'PRATE_corr')]
     result = np.full((len(variables), (end - begin).days + 1), np.nan, np.float32)
-    for group, selected in (('era5/daily', raw), ('era5/correction', corrected)):
+    for group, selected in (('daily', raw), ('correction', corrected)):
         if selected:
             values = _read_point(store, group, begin, end, coords, selected)
             for index, variable in enumerate(selected):

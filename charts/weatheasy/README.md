@@ -10,7 +10,7 @@ The image tag defaults to `appVersion` from `Chart.yaml`: currently
 `ghcr.io/agrodt/weatheasy:0.3.0`, for the upcoming release. Set `image.tag` to
 override the default.
 
-Copy [examples/s3.yaml](examples/s3.yaml), then set your weather store, S3 endpoint,
+Copy [examples/s3.yaml](examples/s3.yaml), then set each source store, S3 endpoint,
 schedules, DEM and model artifact addresses. The
 resource settings and bounding box in that file are examples, not sizing guidance.
 
@@ -27,8 +27,23 @@ helm upgrade --install weatheasy charts/weatheasy \
     --namespace weatheasy --create-namespace -f weatheasy-values.yaml
 ```
 
-`storage.dataRoot` must be set. This chart uses S3 for durable data: API and Job
-Pods share the same published store without a persistent volume or node binding.
+Set `sources.SOURCE.store` for each source you want to use. Unconfigured sources
+are omitted from `/variables` and OpenAPI; requests to them return
+HTTP 404. Source routes are selected when the application is created.
+The API requires at least one configured source. CFS2, ERA5 and CMIP6 have
+independent Zarr stores, which can live in the same bucket or different buckets.
+API and Job Pods access the corresponding published store without a persistent
+volume or node binding. Setting a store does not enable automatic updates.
+
+For ERA5 alone, use [examples/era5-only.yaml](examples/era5-only.yaml):
+
+```sh
+helm template weatheasy charts/weatheasy -f charts/weatheasy/examples/era5-only.yaml
+```
+
+Enable `sources.era5.update.enabled` only if this deployment should download data.
+An existing prepared store needs S3 read access; CDS credentials are needed only
+for ERA5 downloads.
 Local paths belong to local CLI usage. Models and DEM must already be
 published before enabling correction; this chart does not train models or prepare
 DEM. CMIP6 preparation and EMDNA remain separate, explicitly invoked workflows.
@@ -101,7 +116,7 @@ The example expects `weatheasy-s3` to supply `AWS_ACCESS_KEY_ID` and
 For an S3-compatible service set `s3.endpoint`; for AWS leave it empty. Region and
 other SDK settings can be supplied with `extraEnv` or the existing Secret.
 
-ERA5 additionally needs CDS credentials. Its `updates.era5.envFrom` can reference
+ERA5 additionally needs CDS credentials. Its `sources.era5.update.envFrom` can reference
 a separate Secret supplying `CDSAPI_URL` and `CDSAPI_KEY`; this Secret is passed
 only to ERA5 update containers.
 
@@ -113,7 +128,7 @@ needed by WeathEasy itself.
 
 ## Scheduled updates
 
-Both update sources are disabled in the default values. For each enabled source,
+Scheduled CFS2 and ERA5 updates are disabled in the default values. For each enabled source,
 one CronJob owns downloading and optional correction:
 
 1. With correction disabled, the Job runs `weatheasy download SOURCE`.
@@ -128,13 +143,13 @@ resources and scratch limits for your data volume. A large initial load may span
 many scheduled intervals; subsequent runs are skipped while it is active.
 
 `concurrencyPolicy: Forbid` prevents scheduled runs of the same CronJob from
-interleaving. CFS2 and ERA5 write different groups and can run independently.
+interleaving. CFS2 and ERA5 write separate stores and can run independently.
 It is not a distributed storage lock: do not point a second release, manually
 created Job or an external writer at the same source groups concurrently.
 [Kubernetes also does not guarantee exactly-once CronJob execution](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#job-creation).
 
 Schedules use `timeZone`, defaulting to `Etc/UTC`. To pause scheduled work, set
-`updates.SOURCE.suspend: true`. This does not stop an already running Job.
+`sources.SOURCE.update.suspend: true`. This does not stop an already running Job.
 
 `startingDeadlineSeconds` limits how late a scheduled run may start;
 `activeDeadlineSeconds` limits total Job duration, including retries and both
@@ -180,7 +195,6 @@ remain extensible and are validated by Kubernetes.
 | `imagePullSecrets` | array | `[]` | Existing image pull Secret references. |
 | `nameOverride` | string | `""` | Override the chart name used in resource names. |
 | `fullnameOverride` | string | `""` | Override the complete resource name (truncated to 48 characters). |
-| `storage.dataRoot` | string | `""` | Shared durable S3 URI; required when API or updates are enabled. |
 | `s3.endpoint` | string | `""` | S3-compatible endpoint; empty uses the SDK default. |
 | `envFrom` | array | `[]` | Existing Secret/ConfigMap references for all containers. |
 | `extraEnv` | array | `[]` | Additional Kubernetes EnvVar entries for all containers. |
@@ -207,39 +221,42 @@ remain extensible and are validated by Kubernetes.
 | `service.type` | string | `"ClusterIP"` | ClusterIP, NodePort or LoadBalancer. |
 | `service.annotations` | object | `{}` | Service annotations, including cloud load balancer settings. |
 | `service.port` | integer | `8000` | Service port; containers listen on port 8000. |
-| `updates.cfs2.enabled` | boolean | `false` | Create the source CronJob. |
-| `updates.cfs2.schedule` | string | `"0 5 * * *"` | Cron schedule. |
-| `updates.cfs2.timeZone` | string | `"Etc/UTC"` | Schedule time zone. |
-| `updates.cfs2.suspend` | boolean | `false` | Pause scheduled runs; does not stop active Jobs. |
-| `updates.cfs2.backoffLimit` | integer | `2` | Job retry limit. |
-| `updates.cfs2.startingDeadlineSeconds` | integer / null | `null` | Maximum lateness for starting a scheduled run; null omits the deadline. |
-| `updates.cfs2.activeDeadlineSeconds` | integer / null | `null` | Maximum total Job duration, including retries; null omits the deadline. |
-| `updates.cfs2.successfulJobsHistoryLimit` | integer | `3` | Number of successful Jobs to retain. |
-| `updates.cfs2.failedJobsHistoryLimit` | integer | `1` | Number of failed Jobs to retain. |
-| `updates.cfs2.resources` | object | `{}` | Download container resource requests and limits. |
-| `updates.cfs2.envFrom` | array | `[]` | Source-specific Secret/ConfigMap references, appended to global entries. |
-| `updates.cfs2.extraEnv` | array | `[]` | Source-specific EnvVar entries, appended to global entries. |
-| `updates.cfs2.correction.enabled` | boolean | `false` | Apply correction after successful download. |
-| `updates.cfs2.correction.dem` | string | `""` | Published DEM Zarr URI; required when this update and correction are enabled. |
-| `updates.cfs2.correction.artifacts` | string | `""` | Published model artifact directory URI; required when this update and correction are enabled. |
-| `updates.cfs2.correction.resources` | object | `{}` | Correction container resource requests and limits. |
-| `updates.era5.enabled` | boolean | `false` | Create the source CronJob. |
-| `updates.era5.schedule` | string | `"0 6 10 * *"` | Cron schedule. |
-| `updates.era5.timeZone` | string | `"Etc/UTC"` | Schedule time zone. |
-| `updates.era5.suspend` | boolean | `false` | Pause scheduled runs; does not stop active Jobs. |
-| `updates.era5.backoffLimit` | integer | `2` | Job retry limit. |
-| `updates.era5.startingDeadlineSeconds` | integer / null | `null` | Maximum lateness for starting a scheduled run; null omits the deadline. |
-| `updates.era5.activeDeadlineSeconds` | integer / null | `null` | Maximum total Job duration, including retries; null omits the deadline. |
-| `updates.era5.successfulJobsHistoryLimit` | integer | `3` | Number of successful Jobs to retain. |
-| `updates.era5.failedJobsHistoryLimit` | integer | `1` | Number of failed Jobs to retain. |
-| `updates.era5.resources` | object | `{}` | Download container resource requests and limits. |
-| `updates.era5.envFrom` | array | `[]` | Source-specific Secret/ConfigMap references, appended to global entries. |
-| `updates.era5.extraEnv` | array | `[]` | Source-specific EnvVar entries, appended to global entries. |
-| `updates.era5.area` | array | `[]` | Optional ERA5 bounding box [north, west, south, east]. |
-| `updates.era5.correction.enabled` | boolean | `false` | Apply correction after successful download. |
-| `updates.era5.correction.dem` | string | `""` | Published DEM Zarr URI; required when this update and correction are enabled. |
-| `updates.era5.correction.artifacts` | string | `""` | Published model artifact directory URI; required when this update and correction are enabled. |
-| `updates.era5.correction.resources` | object | `{}` | Correction container resource requests and limits. |
+| `sources.cfs2.store` | string | `""` | Independent CFS2 Zarr store URI; empty disables this source. |
+| `sources.cfs2.update.enabled` | boolean | `false` | Create the source CronJob. |
+| `sources.cfs2.update.schedule` | string | `"0 5 * * *"` | Cron schedule. |
+| `sources.cfs2.update.timeZone` | string | `"Etc/UTC"` | Schedule time zone. |
+| `sources.cfs2.update.suspend` | boolean | `false` | Pause scheduled runs; does not stop active Jobs. |
+| `sources.cfs2.update.backoffLimit` | integer | `2` | Job retry limit. |
+| `sources.cfs2.update.startingDeadlineSeconds` | integer / null | `null` | Maximum lateness for starting a scheduled run; null omits the deadline. |
+| `sources.cfs2.update.activeDeadlineSeconds` | integer / null | `null` | Maximum total Job duration, including retries; null omits the deadline. |
+| `sources.cfs2.update.successfulJobsHistoryLimit` | integer | `3` | Number of successful Jobs to retain. |
+| `sources.cfs2.update.failedJobsHistoryLimit` | integer | `1` | Number of failed Jobs to retain. |
+| `sources.cfs2.update.resources` | object | `{}` | Download container resource requests and limits. |
+| `sources.cfs2.update.envFrom` | array | `[]` | Source-specific Secret/ConfigMap references, appended to global entries. |
+| `sources.cfs2.update.extraEnv` | array | `[]` | Source-specific EnvVar entries, appended to global entries. |
+| `sources.cfs2.update.correction.enabled` | boolean | `false` | Apply correction after successful download. |
+| `sources.cfs2.update.correction.dem` | string | `""` | Published DEM Zarr URI; required when this update and correction are enabled. |
+| `sources.cfs2.update.correction.artifacts` | string | `""` | Published model artifact directory URI; required when this update and correction are enabled. |
+| `sources.cfs2.update.correction.resources` | object | `{}` | Correction container resource requests and limits. |
+| `sources.era5.store` | string | `""` | Independent ERA5 Zarr store URI; empty disables this source. |
+| `sources.era5.update.enabled` | boolean | `false` | Create the source CronJob. |
+| `sources.era5.update.schedule` | string | `"0 6 10 * *"` | Cron schedule. |
+| `sources.era5.update.timeZone` | string | `"Etc/UTC"` | Schedule time zone. |
+| `sources.era5.update.suspend` | boolean | `false` | Pause scheduled runs; does not stop active Jobs. |
+| `sources.era5.update.backoffLimit` | integer | `2` | Job retry limit. |
+| `sources.era5.update.startingDeadlineSeconds` | integer / null | `null` | Maximum lateness for starting a scheduled run; null omits the deadline. |
+| `sources.era5.update.activeDeadlineSeconds` | integer / null | `null` | Maximum total Job duration, including retries; null omits the deadline. |
+| `sources.era5.update.successfulJobsHistoryLimit` | integer | `3` | Number of successful Jobs to retain. |
+| `sources.era5.update.failedJobsHistoryLimit` | integer | `1` | Number of failed Jobs to retain. |
+| `sources.era5.update.resources` | object | `{}` | Download container resource requests and limits. |
+| `sources.era5.update.envFrom` | array | `[]` | Source-specific Secret/ConfigMap references, appended to global entries. |
+| `sources.era5.update.extraEnv` | array | `[]` | Source-specific EnvVar entries, appended to global entries. |
+| `sources.era5.update.area` | array | `[]` | Optional ERA5 bounding box [north, west, south, east]. |
+| `sources.era5.update.correction.enabled` | boolean | `false` | Apply correction after successful download. |
+| `sources.era5.update.correction.dem` | string | `""` | Published DEM Zarr URI; required when this update and correction are enabled. |
+| `sources.era5.update.correction.artifacts` | string | `""` | Published model artifact directory URI; required when this update and correction are enabled. |
+| `sources.era5.update.correction.resources` | object | `{}` | Correction container resource requests and limits. |
+| `sources.cmip6.store` | string | `""` | Independent CMIP6 Zarr store URI; empty disables this source. |
 | `ingress.enabled` | boolean | `false` | Create an Ingress; requires API. |
 | `ingress.className` | string | `""` | Ingress controller class. |
 | `ingress.annotations` | object | `{}` | Ingress controller annotations. |

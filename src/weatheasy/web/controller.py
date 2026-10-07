@@ -7,9 +7,8 @@ import numpy as np
 from anyio import to_thread
 from fastapi.responses import StreamingResponse
 
-from .config import get_config
-from .models import DataQuery, Variables, VarInfo
-from weatheasy.const import CFS2_BANDS, CMIP6_VARS, ONE_DAY
+from .models import DataQuery, Variables
+from weatheasy.const import CFS2_BANDS, CMIP6_VARS, CORRECTION_INFO, ERA5_ALL_VARS, ONE_DAY
 
 
 if TYPE_CHECKING:
@@ -19,22 +18,30 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
+    from .config import Settings, SourcesSettings
     from weatheasy.util import FormatFloat
 
     type Getter = Callable[..., NDArray[np.float32]]
 
 
-def get_variables() -> Variables:
-    return Variables(
-        cfs2={k: VarInfo(en=v.info.en, ru=v.info.ru) for k, v in CFS2_BANDS.items()},
-        cmip6={k: VarInfo(en=v.en, ru=v.ru) for k, v in CMIP6_VARS.items()},
-    )
+def build_variables(sources: SourcesSettings) -> Variables:
+    data = {
+        'cfs2': sources.cfs2 and {k: v.info for k, v in CFS2_BANDS.items()} | CORRECTION_INFO,
+        'cmip6': sources.cmip6 and CMIP6_VARS,
+        'era5': sources.era5 and ERA5_ALL_VARS | CORRECTION_INFO,
+    }
+
+    return Variables.model_validate(data, from_attributes=True)
 
 
-async def get_data(getter: Getter, query: DataQuery) -> StreamingResponse:
-    cfg = get_config()
-    data = await to_thread.run_sync(_exec_getter, getter, query, cfg.storage)
-    content = _stream_data(data, query, cfg.format_float)
+async def get_data(
+    store: Store,
+    getter: Getter,
+    query: DataQuery,
+    settings: Settings,
+) -> StreamingResponse:
+    data = await to_thread.run_sync(_exec_getter, getter, query, store)
+    content = _stream_data(data, query, settings.format_float)
     return StreamingResponse(content, media_type='application/json')
 
 

@@ -9,8 +9,9 @@ from weatheasy import const
 from weatheasy.query import Coords
 
 
-CFS2Var = Enum('CFS2Var', {k: k for k in const.CFS2_BANDS})  # type: ignore[misc]
-CMIP6Var = Enum('CMIP6Var', {k: k for k in const.CMIP6_VARS})  # type: ignore[misc]
+CFS2Var = Enum('CFS2Var', {k: k for k in (*const.CFS2_BANDS, *const.CORRECTION_INFO)})
+CMIP6Var = Enum('CMIP6Var', {k: k for k in const.CMIP6_VARS})
+ERA5Var = Enum('ERA5Var', {k: k for k in (*const.ERA5_ALL_VARS, *const.CORRECTION_INFO)})
 
 
 class VarInfo(BaseModel):
@@ -19,8 +20,9 @@ class VarInfo(BaseModel):
 
 
 class Variables(BaseModel):
-    cfs2: dict[str, VarInfo]
-    cmip6: dict[str, VarInfo]
+    cfs2: dict[str, VarInfo] | None = None
+    cmip6: dict[str, VarInfo] | None = None
+    era5: dict[str, VarInfo] | None = None
 
 
 class DataQuery(TypedDict):
@@ -62,6 +64,14 @@ def _cmip6_query(
     return query
 
 
+def _era5_query(
+    query: _QueryBase,
+    variables: Annotated[set[ERA5Var], Query(alias='var')],
+):
+    query['variables'] = [v.value for v in variables]
+    return query
+
+
 def _data_item(name: str, variables: type[Enum]):
     field_definitions: dict = {k.value: (DecimalField | None, None) for k in variables}
     field_definitions['date_'] = DateField, ...
@@ -70,7 +80,9 @@ def _data_item(name: str, variables: type[Enum]):
 
 SFS2Query = Annotated[DataQuery, Depends(_cfs2_query)]
 CMIP6Query = Annotated[DataQuery, Depends(_cmip6_query)]
+ERA5Query = Annotated[DataQuery, Depends(_era5_query)]
 DateField = Annotated[date, Field(alias='date')]
 DecimalField = Annotated[float | None, Field()]
 CFS2DataItem = _data_item('CFS2DataItem', CFS2Var)
 CMIP6DataItem = _data_item('CMIP6DataItem', CMIP6Var)
+ERA5DataItem = _data_item('ERA5DataItem', ERA5Var)

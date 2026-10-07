@@ -63,14 +63,16 @@ runpy.run_module('weatheasy', run_name='__main__')
         assert 'TMP_corr' in result.stdout
     else:
         assert result.stdout
+    if len(arguments) == 3 and arguments[0] in {'query', 'download'}:
+        assert f'weatheasy/{arguments[1]}.zarr' in result.stdout
 
 
 @pytest.mark.parametrize(
     ('source', 'group', 'variable', 'units'),
     [
-        ('cmip6', 'cmip6/tas', 'tas', 'K'),
-        ('cfs2', 'cfs2/reanalysis/flx', 'TMP', 'degC'),
-        ('era5', 'era5/daily', 'TMP', 'degC'),
+        ('cmip6', 'tas', 'tas', 'K'),
+        ('cfs2', 'reanalysis/flx', 'TMP', 'degC'),
+        ('era5', 'daily', 'TMP', 'degC'),
     ],
 )
 def test_query_local_store_without_optional_imports(
@@ -83,7 +85,7 @@ def test_query_local_store_without_optional_imports(
 
     store = tmp_path / 'weather.zarr'
     if source == 'cfs2':
-        set_group_attrs(get_store(store), 'cfs2', updated='2000-01-05')
+        set_group_attrs(get_store(store), '', updated='2000-01-05')
     write_batch(
         get_store(store),
         group,
@@ -163,7 +165,7 @@ def test_query_s3_result_reuses_store_filesystem(tmp_path: Path, monkeypatch: py
     weather = get_store(tmp_path / 'weather.zarr')
     write_batch(
         weather,
-        'cmip6/tas',
+        'tas',
         prepare_dataset(
             xr.Dataset(
                 {
