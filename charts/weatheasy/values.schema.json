@@ -1023,7 +1023,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Startup probe timings and thresholds; endpoint is /variables.",
+      "description": "Startup probe timings and thresholds; endpoint is /startupz.",
       "default": {
         "initialDelaySeconds": 0,
         "periodSeconds": 5,
@@ -1057,7 +1057,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Readiness probe timings and thresholds; endpoint is /variables.",
+      "description": "Readiness probe timings and thresholds; endpoint is /readyz.",
       "default": {
         "initialDelaySeconds": 0,
         "periodSeconds": 10,
@@ -1092,7 +1092,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Liveness probe timings and thresholds; endpoint is /variables.",
+      "description": "Liveness probe timings and thresholds; endpoint is /livez.",
       "default": {
         "initialDelaySeconds": 0,
         "periodSeconds": 10,

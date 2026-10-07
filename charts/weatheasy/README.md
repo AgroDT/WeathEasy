@@ -40,11 +40,13 @@ is optional (see below). You can access the Service locally with:
 kubectl -n weatheasy port-forward service/weatheasy-weatheasy 8000:8000
 ```
 
-Readiness, startup and liveness probes use `/variables`, which is independent of
-weather availability. These probes show that the API process responds; they do
-not certify that a source store is ready during an update. Configure intervals,
-timeouts and thresholds through `api.startupProbe`, `api.readinessProbe` and
-`api.livenessProbe`; the endpoint remains `/variables`.
+Startup, readiness and liveness probes use `/startupz`, `/readyz` and `/livez`,
+respectively. Each endpoint returns HTTP 200 with `{"status":"ok"}` when the API
+responds, without accessing weather storage. The API has no background
+initialization, so readiness succeeds as soon as it can serve requests. These
+probes do not certify that a source store is ready during an update. Configure
+intervals, timeouts and thresholds through `api.startupProbe`,
+`api.readinessProbe` and `api.livenessProbe`.
 
 ## Publishing the API
 
@@ -199,9 +201,9 @@ remain extensible and are validated by Kubernetes.
 | `api.precision` | integer | `6` | Decimal precision of API results. |
 | `api.enableCors` | boolean | `false` | Enable application CORS. |
 | `api.resources` | object | `{}` | API container resource requests and limits. |
-| `api.startupProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":5,"timeoutSeconds":1,"failureThreshold":30,"successThreshold":1}` | Startup probe timings and thresholds; endpoint is /variables. |
-| `api.readinessProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":10,"timeoutSeconds":1,"failureThreshold":3,"successThreshold":1}` | Readiness probe timings and thresholds; endpoint is /variables. |
-| `api.livenessProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":10,"timeoutSeconds":1,"failureThreshold":3,"successThreshold":1}` | Liveness probe timings and thresholds; endpoint is /variables. |
+| `api.startupProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":5,"timeoutSeconds":1,"failureThreshold":30,"successThreshold":1}` | Startup probe timings and thresholds; endpoint is /startupz. |
+| `api.readinessProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":10,"timeoutSeconds":1,"failureThreshold":3,"successThreshold":1}` | Readiness probe timings and thresholds; endpoint is /readyz. |
+| `api.livenessProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":10,"timeoutSeconds":1,"failureThreshold":3,"successThreshold":1}` | Liveness probe timings and thresholds; endpoint is /livez. |
 | `service.type` | string | `"ClusterIP"` | ClusterIP, NodePort or LoadBalancer. |
 | `service.annotations` | object | `{}` | Service annotations, including cloud load balancer settings. |
 | `service.port` | integer | `8000` | Service port; containers listen on port 8000. |

@@ -29,6 +29,14 @@ if get_config().enable_cors:
     )
 
 
+@app.get('/startupz', tags=['Health'])
+@app.get('/readyz', tags=['Health'])
+@app.get('/livez', tags=['Health'])
+async def get_health() -> dict[str, str]:
+    """Check API responsiveness without accessing weather storage."""
+    return {'status': 'ok'}
+
+
 @app.get('/variables', response_model=mls.Variables)
 def get_variables() -> mls.Variables:
     return ctr.get_variables()

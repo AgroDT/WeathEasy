@@ -89,21 +89,21 @@ api:
   enableCors: false
   # API container resource requests and limits.
   resources: {}
-  # Startup probe timings and thresholds; endpoint is /variables.
+  # Startup probe timings and thresholds; endpoint is /startupz.
   startupProbe:
     initialDelaySeconds: 0
     periodSeconds: 5
     timeoutSeconds: 1
     failureThreshold: 30
     successThreshold: 1
-  # Readiness probe timings and thresholds; endpoint is /variables.
+  # Readiness probe timings and thresholds; endpoint is /readyz.
   readinessProbe:
     initialDelaySeconds: 0
     periodSeconds: 10
     timeoutSeconds: 1
     failureThreshold: 3
     successThreshold: 1
-  # Liveness probe timings and thresholds; endpoint is /variables.
+  # Liveness probe timings and thresholds; endpoint is /livez.
   livenessProbe:
     initialDelaySeconds: 0
     periodSeconds: 10

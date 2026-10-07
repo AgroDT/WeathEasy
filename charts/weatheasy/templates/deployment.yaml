@@ -46,17 +46,17 @@ spec:
               containerPort: 8000
           startupProbe:
             httpGet:
-              path: /variables
+              path: /startupz
               port: http
             {{- toYaml .Values.api.startupProbe | nindent 12 }}
           readinessProbe:
             httpGet:
-              path: /variables
+              path: /readyz
               port: http
             {{- toYaml .Values.api.readinessProbe | nindent 12 }}
           livenessProbe:
             httpGet:
-              path: /variables
+              path: /livez
               port: http
             {{- toYaml .Values.api.livenessProbe | nindent 12 }}
           resources:
