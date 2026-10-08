@@ -196,6 +196,7 @@ remain extensible and are validated by Kubernetes.
 | `nameOverride` | string | `""` | Override the chart name used in resource names. |
 | `fullnameOverride` | string | `""` | Override the complete resource name (truncated to 48 characters). |
 | `s3.endpoint` | string | `""` | S3-compatible endpoint; empty uses the SDK default. |
+| `downloadCache` | string | `"/var/lib/weatheasy/downloads"` | Shared downloaded-file cache for source update jobs: local directory or s3:// URI. |
 | `envFrom` | array | `[]` | Existing Secret/ConfigMap references for all containers. |
 | `extraEnv` | array | `[]` | Additional Kubernetes EnvVar entries for all containers. |
 | `serviceAccount.create` | boolean | `true` | Create a ServiceAccount. |

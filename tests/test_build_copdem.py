@@ -36,7 +36,7 @@ def test_build_publishes_spatial_terrain_store(
         src.write(np.array([[30, 40], [10, 20]], np.float32), 1)
 
     def fetch_tile(tlat, tlon, cache_dir, session):  # noqa: ANN001, ARG001
-        assert cache_dir == tmp_path / 'tiles'
+        assert cache_dir.root == tmp_path / 'tiles' / 'copdem'
         return tile if tlon == 10 else None
 
     monkeypatch.setattr(build_copdem, '_fetch_tile', fetch_tile)
@@ -66,6 +66,7 @@ def test_build_publishes_spatial_terrain_store(
         )
 
     tile.unlink()
+    (tmp_path / 'tiles' / 'copdem').rmdir()
     (tmp_path / 'tiles').rmdir()
     terrain = load_dem(store)
     np.testing.assert_array_equal(terrain['elevation'], elevation)
@@ -150,3 +151,93 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
     assert terrain.fs.sync_fs is shared_filesystem
     assert artifacts.fs is shared_filesystem
     assert artifacts.root == 'models/correction'
+
+
+@pytest.mark.parametrize('remote', [False, True])
+def test_tile_cache_processes_local_file_and_reuses_completed_tile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool
+):
+    from contextlib import nullcontext
+
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy.file_storage import FileStore
+
+    tile = tmp_path / 'fixture.tif'
+    with rasterio.open(
+        tile,
+        'w',
+        driver='GTiff',
+        width=2,
+        height=2,
+        count=1,
+        dtype='float32',
+        crs='EPSG:4326',
+        transform=from_origin(10, 61, 0.5, 0.5),
+    ) as source:
+        source.write(np.array([[30, 40], [10, 20]], np.float32), 1)
+    content = tile.read_bytes()
+    fs = MemoryFileSystem(skip_instance_cache=True)
+    backing = FileStore(fs, f'{tmp_path.name}/raw')
+    location = backing if remote else tmp_path / 'raw'
+    requests = []
+    reads = []
+    fs_open = fs.open
+
+    def track_open(path: str, mode: str = 'rb', **kwargs):
+        if mode == 'rb':
+            reads.append(path)
+        return fs_open(path, mode, **kwargs)
+
+    monkeypatch.setattr(fs, 'open', track_open)
+
+    def get(url: str, **_kwargs):
+        requests.append(url)
+        return SimpleNamespace(status_code=200, is_success=True, content=content)
+
+    monkeypatch.setattr(build_copdem, '_session', lambda: nullcontext(SimpleNamespace(get=get)))
+    original_read = build_copdem._read_tile_block
+    processed = []
+    name = 'Copernicus_DSM_COG_30_N60_00_E010_00_DEM.tif'
+
+    def read(path: Path, cells: int):
+        processed.append(path)
+        if remote and len(processed) == 1:
+            assert not backing.child('copdem').exists(name)
+            assert reads == []
+        if not remote:
+            assert path == tmp_path / 'raw' / 'copdem' / name
+        return original_read(path, cells)
+
+    monkeypatch.setattr(build_copdem, '_read_tile_block', read)
+    for attempt in range(2):
+        store = MemoryStore()
+        build_copdem.build_copdem((61, 10, 60, 11), 0.5, store, location)
+        with xr.open_zarr(store, chunks=None, consolidated=False) as result:
+            np.testing.assert_array_equal(result.elevation, [[10, 20], [30, 40]])
+        if remote:
+            assert backing.child('copdem').exists(name)
+            assert len(reads) == attempt
+    assert len(requests) == 1
+    assert len(processed) == 2
+
+
+def test_unreadable_tile_is_not_published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from contextlib import nullcontext
+
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy.file_storage import FileStore
+
+    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    session = SimpleNamespace(
+        get=lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=200,
+            is_success=True,
+            content=b'invalid TIFF',
+        )
+    )
+    monkeypatch.setattr(build_copdem, '_session', lambda: nullcontext(session))
+    with pytest.raises(rasterio.errors.RasterioIOError):
+        build_copdem.build_copdem((61, 10, 60, 11), 0.5, MemoryStore(), remote)
+    assert remote.child('copdem').glob('*.tif') == []

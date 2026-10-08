@@ -3,7 +3,7 @@
 Downloads Copernicus DEM GLO-90 tiles (1°x1° COGs) anonymously from the AWS Open
 Data bucket, aggregates them to a coarse regular grid (default 0.1°) and writes a
 spatial Zarr v3 dataset with ``elevation``, ``slope_we`` and ``slope_sn``.
-The published store can be local or in S3; downloaded tiles stay local.
+The published store and downloaded-tile cache can be local or in S3.
 
 This is a one-off build step (terrain is static); it is NOT part of the realtime
 download path.
@@ -29,11 +29,15 @@ import xarray as xr
 from httpx2 import Client, HTTPTransport
 from rasterio.enums import Resampling
 
+from weatheasy.raw_cache import DownloadCache, download_cache
+
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from zarr.abc.store import Store
+
+    from weatheasy.file_storage import FileStore
 
 
 _LOG = logging.getLogger('build_copdem')
@@ -56,12 +60,12 @@ def _tile_name(tlat: int, tlon: int) -> str:
 def _fetch_tile(
     tlat: int,
     tlon: int,
-    cache_dir: Path,
+    cache: DownloadCache,
     session: Client,
 ) -> Path | None:
     """Download one 1°x1° DEM tile to the cache. Returns None for missing (ocean) tiles."""
     name = _tile_name(tlat, tlon)
-    path = cache_dir / f'{name}.tif'
+    path = cache.file(f'{name}.tif')
     if path.is_file():
         return path
     url = f'https://{_HOST}/{name}/{name}.tif'
@@ -102,7 +106,7 @@ def build_copdem(
     area: tuple[int, int, int, int],
     resolution: float,
     output: Store,
-    cache_dir: Path,
+    cache: str | Path | FileStore | None = None,
 ) -> None:
     north, west, south, east = area
     if not (south < north and west < east):
@@ -114,7 +118,6 @@ def build_copdem(
         msg = f'--resolution {resolution} must divide 1.0 (e.g. 0.1, 0.05)'
         raise ValueError(msg)
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
     n_lat = round((north - south) / resolution)
     n_lon = round((east - west) / resolution)
     lats = (south + (np.arange(n_lat) + 0.5) * resolution).astype(np.float32)
@@ -124,12 +127,12 @@ def build_copdem(
     tiles = list(product(range(south, north), range(west, east)))
     n_tiles = len(tiles)
     found = 0
-    with _session() as session:
+    with _session() as session, download_cache(cache, 'copdem') as tiles_cache:
         for done, (tlat, tlon) in enumerate(tiles, start=1):
             if done % 50 == 0 or done == n_tiles:
                 _LOG.info('Tiles: %d/%d (found %d)', done, n_tiles, found)
 
-            path = _fetch_tile(tlat, tlon, cache_dir, session)
+            path = _fetch_tile(tlat, tlon, tiles_cache, session)
             if path is None:
                 continue
 
@@ -137,6 +140,7 @@ def build_copdem(
             r0 = (tlat - south) * cells_per_degree
             c0 = (tlon - west) * cells_per_degree
             elev[r0 : r0 + cells_per_degree, c0 : c0 + cells_per_degree] = block
+            tiles_cache.publish([path])
             found += 1
 
     if found == 0:

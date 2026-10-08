@@ -21,8 +21,8 @@
     - --artifacts
     - {{ required (printf "sources.%s.update.correction.artifacts is required" .source) $job.correction.artifacts | quote }}
     {{- else }}
-    - --download-dir
-    - /var/lib/weatheasy/downloads
+    - --download-cache
+    - {{ $root.Values.downloadCache | quote }}
     {{- if and (eq .source "era5") $job.area }}
     - --area
     {{- range $job.area }}

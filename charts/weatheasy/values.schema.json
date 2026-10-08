@@ -57,6 +57,12 @@
       },
       "additionalProperties": false
     },
+    "downloadCache": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shared downloaded-file cache for source update jobs: local directory or s3:// URI.",
+      "default": "/var/lib/weatheasy/downloads"
+    },
     "envFrom": {
       "type": "array",
       "items": {

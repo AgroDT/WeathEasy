@@ -1,10 +1,12 @@
 from argparse import Namespace
 
-from weatheasy.era5 import download_era5_data
-from weatheasy.storage import get_store
+from weatheasy import era5
+from weatheasy._cli._storage import Storage
 
 
 def run(args: Namespace) -> None:
-    download_era5_data(
-        get_store(args.store), args.download_dir, area=tuple(args.area) if args.area else None
+    storage = Storage(args.store, args.download_cache)
+    cache = storage.files(args.download_cache) if args.download_cache else None
+    era5.download_era5_data(
+        storage.store(args.store), cache, area=tuple(args.area) if args.area else None
     )

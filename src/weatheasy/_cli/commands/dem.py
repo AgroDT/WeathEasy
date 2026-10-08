@@ -1,8 +1,14 @@
 from argparse import Namespace
 
-from weatheasy.build_copdem import build_copdem
-from weatheasy.storage import get_store
+from weatheasy import build_copdem
+from weatheasy._cli._storage import Storage
 
 
 def run(args: Namespace) -> None:
-    build_copdem(tuple(args.area), args.resolution, get_store(args.output), args.cache_dir)
+    storage = Storage(args.output, args.download_cache)
+    build_copdem.build_copdem(
+        tuple(args.area),
+        args.resolution,
+        storage.store(args.output),
+        storage.files(args.download_cache),
+    )

@@ -21,6 +21,9 @@ s3:
   # S3-compatible endpoint; empty uses the SDK default.
   endpoint: ''
 
+# Shared downloaded-file cache for source update jobs: local directory or s3:// URI.
+downloadCache: /var/lib/weatheasy/downloads
+
 # Existing Secret/ConfigMap references for all containers.
 envFrom: []
 

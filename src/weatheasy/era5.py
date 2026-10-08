@@ -20,6 +20,7 @@ import numpy as np
 import xarray as xr
 
 from weatheasy import const
+from weatheasy.raw_cache import DownloadCache, download_cache
 from weatheasy.storage import (
     StorageError,
     group_attrs,
@@ -35,6 +36,8 @@ from weatheasy.util import utc_now
 
 if TYPE_CHECKING:
     from zarr.abc.store import Store
+
+    from weatheasy.file_storage import FileStore
 
 
 EXTRA = {
@@ -93,7 +96,7 @@ def available_period(store: Store) -> tuple[date, date]:
 
 def download_era5_data(
     store: Store,
-    download_dir: Path | None = None,
+    download_dir: str | Path | FileStore | None = None,
     *,
     area: tuple[float, float, float, float] | None = None,
 ) -> None:
@@ -133,9 +136,7 @@ def download_era5_data(
         msg = 'ERA5 preparation requires weatheasy[prepare]'
         raise ImportError(msg) from err
     client = cdsapi.Client()
-    with TemporaryDirectory() as temporary:
-        cache = (download_dir / 'era5') if download_dir else Path(temporary)
-        cache.mkdir(parents=True, exist_ok=True)
+    with download_cache(download_dir, 'era5') as cache:
         downloader = _Downloader(client, cache, area)
         while next_month(first) <= latest:
             following = next_month(first)
@@ -146,6 +147,7 @@ def download_era5_data(
             # write_batch checks exact normalized axes, CRS, fields and units
             # before changing any existing arrays, even for equal-sized regions.
             ds.attrs['request_area'] = list(area)
+            cache.publish(cache.root.glob('*.nc'))
             write_batch(store, path, ds)
             set_group_attrs(store, '', last_month=[first.year, first.month])
             first = following
@@ -154,9 +156,9 @@ def download_era5_data(
 class _Downloader:
     __slots__ = ('area', 'cache', 'client')
 
-    def __init__(self, client: Any, cache: Path, area: tuple) -> None:
+    def __init__(self, client: Any, cache: DownloadCache | Path, area: tuple) -> None:
         self.client = client
-        self.cache = cache
+        self.cache = DownloadCache(cache) if isinstance(cache, Path) else cache
         self.area = area
 
     def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
@@ -206,7 +208,7 @@ class _Downloader:
             'download_format': 'unarchived',
         }
         key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:20]
-        path = self.cache / f'{month:%Y%m}-{key}.nc'
+        path = self.cache.file(f'{month:%Y%m}-{key}.nc')
         if not path.exists():
             pending = path.with_suffix('.pending')
             self.client.retrieve('reanalysis-era5-land', request).download(str(pending))

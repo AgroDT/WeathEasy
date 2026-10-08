@@ -1,8 +1,10 @@
 from argparse import Namespace
 
-from weatheasy.download import download_cmip6_data
-from weatheasy.storage import get_store
+from weatheasy import download
+from weatheasy._cli._storage import Storage
 
 
 def run(args: Namespace) -> None:
-    download_cmip6_data(get_store(args.store), args.download_dir)
+    storage = Storage(args.store, args.download_cache)
+    cache = storage.files(args.download_cache) if args.download_cache else None
+    download.download_cmip6_data(storage.store(args.store), cache)

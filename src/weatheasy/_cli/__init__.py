@@ -82,7 +82,9 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         sub = sources.add_parser(source, formatter_class=ArgumentDefaultsHelpFormatter)
         sub.set_defaults(handler=f'download_{source}')
         _store(sub, source=source)
-        sub.add_argument('--download-dir', type=Path, help='local directory for downloaded files')
+        sub.add_argument(
+            '--download-cache', help='cache for downloaded files, local path or s3:// URI'
+        )
         if source == 'era5':
             sub.add_argument(
                 '--area', type=float, nargs=4, metavar=('NORTH', 'WEST', 'SOUTH', 'EAST')
@@ -102,10 +104,9 @@ def _add_dem(groups: _SubParsersAction[ArgumentParser]) -> None:
         '-o', '--output', default='copdem_russia_01deg.zarr', help='Zarr path or s3:// URI'
     )
     dem.add_argument(
-        '--cache-dir',
-        type=Path,
-        default=Path('copdem-cache'),
-        help='local tile directory for resume',
+        '--download-cache',
+        default='copdem-cache',
+        help='cache for downloaded tiles, local path or s3:// URI',
     )
 
 

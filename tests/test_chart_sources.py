@@ -35,10 +35,14 @@ def test_era5_only_chart_connects_one_store_without_jobs(tmp_path: Path):
     assert not api['spec']['template']['spec']['containers'][0].get('envFrom')
 
 
-def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path):
+@pytest.mark.parametrize('cache', [None, 's3://weather/raw', '/data/raw'])
+def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path, cache: str | None):
     values = {
         'sources': {
-            'cfs2': {'store': 's3://cfs/weather.zarr', 'update': {'enabled': True}},
+            'cfs2': {
+                'store': 's3://cfs/weather.zarr',
+                'update': {'enabled': True},
+            },
             'era5': {
                 'store': 's3://era/weather.zarr',
                 'update': {
@@ -54,6 +58,8 @@ def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path):
             'cmip6': {'store': 's3://climate/weather.zarr'},
         }
     }
+    if cache is not None:
+        values['downloadCache'] = cache
     result = render(tmp_path, values)
     assert result.returncode == 0, result.stderr
     jobs = [m for m in yaml.safe_load_all(result.stdout) if m['kind'] == 'CronJob']
@@ -66,6 +72,10 @@ def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path):
         for container in containers:
             args = container['args']
             assert args[args.index('--store') + 1] == values['sources'][source]['store']
+            if container['name'] == 'download':
+                assert args[args.index('--download-cache') + 1] == (
+                    cache if cache is not None else '/var/lib/weatheasy/downloads'
+                )
             assert container.get('envFrom', []) == (
                 [{'secretRef': {'name': 'cds'}}] if source == 'era5' else []
             )

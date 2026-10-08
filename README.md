@@ -160,13 +160,16 @@ any not-AWS S3 storages you also need to export `AWS_ENDPOINT_URL_S3`. See the
 [Boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables)
 for details.
 
-Optionally you can provide a local path to `--download-dir` to preserve
-original downloaded files (GRIB2 for CFSv2 and NetCDF for CMIP6).
+Optionally you can provide a local path or `s3://<bucket>/<prefix>` to
+`--download-cache` to preserve original downloaded files (GRIB2 for CFSv2 and
+NetCDF for CMIP6 and ERA5). Local directories are used directly. With S3,
+new files are downloaded and processed locally before uploading; cached files
+are fetched only when needed.
 
 A full example for CFSv2:
 
 ```sh
-weatheasy download cfs2 --store s3://weatheasy/cfs2.zarr --download-dir ./downloads
+weatheasy download cfs2 --store s3://weatheasy/cfs2.zarr --download-cache s3://weatheasy/downloads
 ```
 
 To display the full help message, run:
@@ -317,11 +320,14 @@ Build the static Copernicus DEM once and publish it as a spatial Zarr v3 dataset
 ```sh
 weatheasy dem --area 56 37 55 38 -o ./copdem.zarr
 # Publish directly to S3 using the same command:
-weatheasy dem --area 56 37 55 38 -o s3://weatheasy/copdem.zarr
+weatheasy dem --area 56 37 55 38 -o s3://weatheasy/copdem.zarr \
+    --download-cache s3://weatheasy/downloads
 ```
 
-Downloaded source tiles stay in the local `--cache-dir` and can be reused after
-an interrupted build. The published dataset contains `latitude`, `longitude`,
+Downloaded source tiles use `--download-cache` (local path or S3 URI), in its
+`copdem/` subdirectory (default root: `copdem-cache`). New tiles are read locally
+before uploading to S3; local cache files are read directly. Tiles can be reused
+after an interrupted build. The published dataset contains `latitude`, `longitude`,
 `elevation` (metres), `slope_we` and `slope_sn` (m/m), with EPSG:4326 and CF metadata
 written through rioxarray. The output is replaced when the build runs again;
 coordinate writers and readers so that training or correction starts after it

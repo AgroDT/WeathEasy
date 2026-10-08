@@ -3,11 +3,9 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from datetime import date
 from itertools import product
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -15,6 +13,7 @@ import xarray as xr
 from httpx2 import Client, HTTPTransport
 
 from weatheasy import const
+from weatheasy.raw_cache import DownloadCache, download_cache
 from weatheasy.sources import read_cfs2, read_netcdf
 from weatheasy.storage import (
     delete_group,
@@ -29,10 +28,14 @@ from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from zarr.abc.store import Store
 
+    from weatheasy.file_storage import FileStore
 
-def download_cfs2_data(store: Store, download_dir: Path | None = None) -> None:
+
+def download_cfs2_data(store: Store, download_dir: str | Path | FileStore | None = None) -> None:
     set_group_attrs(store, '')
     today = utc_now().date()
 
@@ -48,31 +51,28 @@ def download_cfs2_data(store: Store, download_dir: Path | None = None) -> None:
 
     with ExitStack() as stack:
         session = stack.enter_context(_session())
-        if download_dir:
-            reanalysis_dir = download_dir.joinpath(const.CFS2_REANALYSIS_DIR)
-            reanalysis_dir.mkdir(parents=True, exist_ok=True)
-            forecast_dir = download_dir.joinpath(const.CFS2_FORECAST_DIR, today.isoformat())
-            forecast_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            reanalysis_dir = stack.enter_context(_temp_dir())
-            forecast_dir = stack.enter_context(_temp_dir())
-        _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis_dir)
-        _download_cfs2_forecast(forecast_begin, yesterday, session, forecast_dir)
-        _download_cfs2_forecast(yesterday, forecast_end, session, forecast_dir)
-        _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast_dir)
+        reanalysis = stack.enter_context(download_cache(download_dir, const.CFS2_REANALYSIS_DIR))
+        forecast = stack.enter_context(
+            download_cache(download_dir, const.CFS2_FORECAST_DIR, today.isoformat())
+        )
+        _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis)
+        _download_cfs2_forecast(forecast_begin, yesterday, session, forecast)
+        _download_cfs2_forecast(yesterday, forecast_end, session, forecast)
+        _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast.root)
+        forecast.publish(forecast.root.glob('*.grb2'))
+        set_group_attrs(store, '', updated=today.isoformat())
 
 
-def download_cmip6_data(store: Store, download_dir: Path | None = None) -> None:
-    download_dir = _process_args(const.CMIP6_DIR, store, download_dir)
-    with _session() as session, _temp_dir() as temporary:
+def download_cmip6_data(store: Store, download_dir: str | Path | FileStore | None = None) -> None:
+    set_group_attrs(store, '')
+    with _session() as session, download_cache(download_dir, const.CMIP6_DIR) as cache:
         for var in const.CMIP6_VARS:
             path = var
             previous = last_date(store, path)
             first_year = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
             for year in range(first_year, const.CMIP6_LAST_YEAR + 1):
-                filename, content = _load_cmip6_dataset(download_dir, var, year, session)
-                source = temporary / filename
-                source.write_bytes(content)
+                source = _load_cmip6_dataset(cache, var, year, session)
+                filename = source.name
                 dataset = read_netcdf(source, variables=[var], crs='EPSG:4326')
                 expected = np.arange(
                     np.datetime64(f'{year}-01-01'), np.datetime64(f'{year + 1}-01-01')
@@ -88,6 +88,7 @@ def download_cmip6_data(store: Store, download_dir: Path | None = None) -> None:
                     )
                 )
                 _LOG.info('Saving %s/%s', path, year)
+                cache.publish([source])
                 write_batch(store, path, dataset)
 
 
@@ -97,25 +98,13 @@ _LOG = logging.getLogger(_MODULE_NAME)
 _CFS2_DOWNLOADED_FILENAME_TEMPLATE = '{}{}{}.grb2'
 
 
-def _process_args(group_name: str, store: Store, download_dir: Path | None):
-    set_group_attrs(store, '')
-    if download_dir:
-        download_dir /= group_name
-        download_dir.mkdir(parents=True, exist_ok=True)
-    return download_dir
-
-
 def _session() -> Client:
     return Client(transport=HTTPTransport(retries=3), follow_redirects=True)
 
 
-@contextmanager
-def _temp_dir():
-    with TemporaryDirectory() as tmp_dir:
-        yield Path(tmp_dir)
-
-
-def _download_cfs2_reanalysis(store: Store, end: date, session: Client, download_dir: Path):
+def _download_cfs2_reanalysis(
+    store: Store, end: date, session: Client, download_dir: DownloadCache
+):
     download = _Cfs2ReanalysisDownloader(session, download_dir)
     groups = {kind: f'{const.CFS2_REANALYSIS_DIR}/{kind}' for kind in ('flx', 'pgb')}
     for kind in groups:
@@ -133,6 +122,7 @@ def _download_cfs2_reanalysis(store: Store, end: date, session: Client, download
                 if last is not None and date_ <= last:
                     continue
                 daily = _daily_cfs2(paths, kind, date_)
+                download_dir.publish(paths)
                 write_batch(store, path, daily)
         else:
             _LOG.warning('%s was not found on the server', date_)
@@ -204,9 +194,8 @@ def _download_cfs2_forecast(
     begin: date,
     end: date,
     session: Client,
-    download_dir: Path,
+    download_dir: DownloadCache,
 ):
-    download_dir.mkdir(parents=True, exist_ok=True)
     download = _Cfs2ForecastDownloader(session, download_dir, begin, end)
     download('flx', f'flxf{{}}{{}}.01.{begin:%Y%m%d}00.grb2', const.CFS2_FLX_PARAMS)
     download('pgb', f'pgbf{{}}{{}}.01.{begin:%Y%m%d}00.grb2', const.CFS2_PGB_PARAMS)
@@ -239,26 +228,23 @@ def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Pat
             raise ValueError(msg)
         for date_, paths in paths_by_day:
             write_batch(store, group, _daily_cfs2(paths, kind, date_, template))
-    set_group_attrs(store, '', updated=utc_now().date().isoformat())
 
 
 class _Cfs2ReanalysisDownloader:
-    def __init__(self, session: Client, download_dir: Path) -> None:
+    def __init__(self, session: Client, download_dir: DownloadCache) -> None:
         self._session = session
         self._download_dir = download_dir
 
     def __call__(self, date_: date) -> list[Path] | None:
         ymd = date_.strftime('%Y%m%d')
         ym = ymd[:-2]
-        subdir = self._download_dir / ym
-        subdir.mkdir(exist_ok=True)
         url_template = (
             'https://www.ncei.noaa.gov/data/climate-forecast-system/access/operational-analysis/6-hourly-by-pressure/'
             f'{date_.year}/{ym}/{ymd}/cdas1.t{{}}z.pgrbh00.grib2'
         )
         paths = []
         for hhs in const.CFS2_HHS:
-            path = subdir / f'{ymd}.cdas1.t{hhs}z.pgrbh00.grib2'
+            path = self._download_dir.file(f'{ym}/{ymd}.cdas1.t{hhs}z.pgrbh00.grib2')
             if not path.is_file():
                 url = url_template.format(hhs)
                 _LOG.info('Downloading %s', url)
@@ -278,7 +264,9 @@ class _Cfs2ForecastDownloader:
     _base_url: ClassVar = 'https://nomads.ncep.noaa.gov/cgi-bin/'
     _min_interval: ClassVar = 1.0 / 3.0
 
-    def __init__(self, session: Client, download_dir: Path, begin: date, end: date) -> None:
+    def __init__(
+        self, session: Client, download_dir: DownloadCache, begin: date, end: date
+    ) -> None:
         self._session = session
         self._download_dir = download_dir
         self._begin = begin
@@ -291,8 +279,8 @@ class _Cfs2ForecastDownloader:
         params = {**params, 'dir': self._dir}
         for date_str, hhs in product(_cfs2_forecast_dates(self._begin, self._end), const.CFS2_HHS):
             file = filename_tmpl.format(date_str, hhs)
-            path = self._download_dir / _CFS2_DOWNLOADED_FILENAME_TEMPLATE.format(
-                kind, date_str, hhs
+            path = self._download_dir.file(
+                _CFS2_DOWNLOADED_FILENAME_TEMPLATE.format(kind, date_str, hhs)
             )
             if path.is_file():
                 _LOG.info('Skipping already downloaded %s', path)
@@ -321,14 +309,12 @@ def _cfs2_forecast_dates(date_: date, end: date):
         date_ += const.ONE_DAY
 
 
-def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Client):
+def _load_cmip6_dataset(cache: DownloadCache, var: str, year: int, session: Client) -> Path:
     filename = f'{var}_{year}.nc'
-    if path:
-        path /= filename
-
-    if path and path.is_file():
+    path = cache.file(filename)
+    if path.is_file():
         _LOG.info('Reading %s', path)
-        return filename, path.read_bytes()
+        return path
 
     kind = 'historical' if year <= const.CMIP6_LAST_HISTORICAL_YEAR else 'ssp245'
     url = (
@@ -340,8 +326,6 @@ def _load_cmip6_dataset(path: Path | None, var: str, year: int, session: Client)
     if not response.is_success:
         _LOG.critical('Failed to download %s', url)
         sys.exit(1)
-    if path:
-        _LOG.info('Writing %s', path)
-        path.write_bytes(response.content)
-
-    return filename, response.content
+    _LOG.info('Writing %s', path)
+    path.write_bytes(response.content)
+    return path

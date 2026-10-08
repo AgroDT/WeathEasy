@@ -10,6 +10,7 @@ from zarr.abc.store import Store
 
 from weatheasy import const, download
 from weatheasy.query import Coords, get_cfs2_data, get_cmip6_data
+from weatheasy.raw_cache import DownloadCache
 from weatheasy.storage import get_store
 from weatheasy.util import get_storage
 
@@ -38,7 +39,7 @@ def test_cmip6_download_getter_resume_and_cli(
 
     def load(*args):
         calls.append(args[2])
-        return 'tas_2000.nc', source.read_bytes()
+        return source
 
     monkeypatch.setattr(download, '_load_cmip6_dataset', load)
     root = get_storage(str(tmp_path / 'data'))
@@ -121,13 +122,13 @@ def forecast(
     begin: date,
     end: date,
     _session: Client,
-    download_dir: Path,
+    download_dir: DownloadCache,
 ):
     day = begin
     while day < end:
         for kind in ('flx', 'pgb'):
             for hour in (0, 6, 12, 18):
-                path = download_dir / f'{kind}{day:%Y%m%d}{hour:02d}.grb2'
+                path = download_dir.file(f'{kind}{day:%Y%m%d}{hour:02d}.grb2')
                 write_grib(
                     path,
                     datetime.combine(day, datetime.min.time()).replace(hour=hour),

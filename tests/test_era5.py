@@ -358,3 +358,24 @@ def test_partial_request_missing_variable_never_publishes(
         variables=['WIND'],
     )
     np.testing.assert_allclose(result, [[5]])
+
+
+def test_s3_monthly_cache_reused_by_fresh_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient
+):
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy.file_storage import FileStore
+
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+    fs = MemoryFileSystem()
+    cache = FileStore(fs, f'{tmp_path.name}/raw')
+    area = (55.3, 37.1, 55.2, 37.3)
+    era5.download_era5_data(get_store(tmp_path / 'first'), cache, area=area)
+    assert len(cds_client.calls) == 6
+    assert len(cache.child('era5').glob('*.nc')) == 6
+    era5.download_era5_data(get_store(tmp_path / 'second'), cache, area=area)
+    assert len(cds_client.calls) == 6
+    with era5.open_dataset(get_store(tmp_path / 'second'), 'daily') as ds:
+        assert ds.sizes['time'] == 31

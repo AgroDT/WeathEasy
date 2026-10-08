@@ -238,7 +238,7 @@ def test_download_dispatches_prepared_store_and_local_workdir(
 
     def record(store, download_dir):  # noqa: ANN001
         assert isinstance(store, LocalStore)
-        calls.append((store.root, download_dir))
+        calls.append((store.root, download_dir.root))
 
     monkeypatch.setattr(download, f'download_{source}_data', record)
     # Handler imports occur during this command, avoiding dependency imports during help.
@@ -248,28 +248,45 @@ def test_download_dispatches_prepared_store_and_local_workdir(
             source,
             '--store',
             str(tmp_path / 'weather'),
-            '--download-dir',
+            '--download-cache',
             str(tmp_path / 'downloads'),
         ],
         configure_logging=False,
     )
-    assert calls == [(tmp_path / 'weather', tmp_path / 'downloads')]
+    assert calls == [(tmp_path / 'weather', str(tmp_path / 'downloads'))]
 
 
-def test_dem_dispatches_spatial_store_and_local_tile_cache(
+@pytest.mark.parametrize('remote', [False, True])
+def test_dem_dispatches_spatial_store_and_tile_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    remote: bool,
 ):
+    from fsspec.implementations.memory import MemoryFileSystem
     from zarr.storage import LocalStore
 
     from weatheasy import build_copdem
-    from weatheasy._cli import main
+    from weatheasy._cli import _storage, main
+    from weatheasy.file_storage import FileStore, get_file_store
 
+    fs = MemoryFileSystem()
+    uri = 's3://tiles/raw' if remote else str(tmp_path / 'tiles')
+
+    def files(location: str, *, filesystem=None):  # noqa: ANN001
+        assert filesystem is None or filesystem is fs
+        return (
+            FileStore(fs, location[5:])
+            if location.startswith('s3://')
+            else get_file_store(location)
+        )
+
+    monkeypatch.setattr(_storage, 'get_file_store', files)
     calls = []
 
     def record(area, resolution, store, cache):  # noqa: ANN001
         assert isinstance(store, LocalStore)
-        calls.append((area, resolution, store.root, cache))
+        calls.append((area, resolution, store.root, cache.root))
 
     monkeypatch.setattr(build_copdem, 'build_copdem', record)
     main(
@@ -284,9 +301,58 @@ def test_dem_dispatches_spatial_store_and_local_tile_cache(
             '0.2',
             '-o',
             str(tmp_path / 'dem.zarr'),
-            '--cache-dir',
-            str(tmp_path / 'tiles'),
+            '--download-cache',
+            uri,
         ],
         configure_logging=False,
     )
-    assert calls == [((56, 37, 55, 38), 0.2, tmp_path / 'dem.zarr', tmp_path / 'tiles')]
+    assert calls == [
+        (
+            (56, 37, 55, 38),
+            0.2,
+            tmp_path / 'dem.zarr',
+            'tiles/raw' if remote else str(tmp_path / 'tiles'),
+        )
+    ]
+
+
+@pytest.mark.parametrize('source', ['cfs2', 'cmip6', 'era5'])
+def test_download_cli_preserves_s3_cache_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+):
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy import download, era5
+    from weatheasy._cli import _storage, main
+    from weatheasy.file_storage import FileStore
+
+    fs = MemoryFileSystem()
+    locations = []
+
+    def files(uri: str, *, filesystem=None):  # noqa: ANN001
+        locations.append(uri)
+        assert filesystem is None or filesystem is fs
+        return FileStore(fs, uri.removeprefix('s3://'))
+
+    calls = []
+
+    def prepare(_store, cache, **_kwargs):  # noqa: ANN001
+        calls.append(cache)
+
+    monkeypatch.setattr(_storage, 'get_file_store', files)
+    monkeypatch.setattr(era5 if source == 'era5' else download, f'download_{source}_data', prepare)
+    main(
+        [
+            'download',
+            source,
+            '--store',
+            str(tmp_path / 'prepared'),
+            '--download-cache',
+            's3://weather/raw',
+        ],
+        configure_logging=False,
+    )
+    assert locations == ['s3://weather/raw', 's3://weather/raw']
+    assert len(calls) == 1
+    assert calls[0].root == 'weather/raw'
+    assert calls[0].fs is fs
