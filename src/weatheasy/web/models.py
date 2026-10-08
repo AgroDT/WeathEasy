@@ -32,7 +32,7 @@ class DataQuery(TypedDict):
     variables: list[str]
 
 
-def _query_base(
+async def _query_base(
     lat: Annotated[float, Query(description='EPSG:4326', ge=-90, le=90, examples=[55.75222])],
     lon: Annotated[float, Query(description='EPSG:4326', ge=-180, le=180, examples=[37.61556])],
     begin: Annotated[date, Query()],
@@ -48,7 +48,7 @@ def _query_base(
 _QueryBase = Annotated[dict, Depends(_query_base)]
 
 
-def _cfs2_query(
+async def _cfs2_query(
     query: _QueryBase,
     variables: Annotated[set[CFS2Var], Query(alias='var')],
 ):
@@ -56,7 +56,7 @@ def _cfs2_query(
     return query
 
 
-def _cmip6_query(
+async def _cmip6_query(
     query: _QueryBase,
     variables: Annotated[set[CMIP6Var], Query(alias='var')],
 ):
@@ -64,7 +64,7 @@ def _cmip6_query(
     return query
 
 
-def _era5_query(
+async def _era5_query(
     query: _QueryBase,
     variables: Annotated[set[ERA5Var], Query(alias='var')],
 ):

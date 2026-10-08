@@ -1,14 +1,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from anyio import CapacityLimiter
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import Settings
-from .controller import build_variables
 from .routes import cfs2_router, cmip6_router, common_router, era5_router
-from .state import AppState
+from .state import AppState, create_state
 from weatheasy import __version__
 from weatheasy.error import BaseValueError
 
@@ -24,7 +24,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[AppState]:
-        yield {'settings': settings, 'variables': build_variables(settings.sources)}
+        # All sources share a budget separate from response streaming.
+        limiter = CapacityLimiter(40)
+        yield create_state(settings, limiter)
 
     app = FastAPI(
         title='WeathEasy',

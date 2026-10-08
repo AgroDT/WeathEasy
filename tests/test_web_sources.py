@@ -157,25 +157,30 @@ def test_applications_keep_routes_and_lifespan_state_independent():
         assert set(era5.get('/variables').json()) == {'era5'}
 
 
-def test_variables_are_prepared_once_before_lifespan(monkeypatch: pytest.MonkeyPatch):
+def test_variables_are_prepared_once_during_lifespan(monkeypatch: pytest.MonkeyPatch):
     pytest.importorskip('fastapi')
     from starlette.testclient import TestClient
 
-    from weatheasy import web
-    from weatheasy.web import controller
+    from weatheasy.web import state
 
+    validate_variables = state.Variables.model_validate
+    calls = 0
+
+    def track_validation(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return validate_variables(*args, **kwargs)
+
+    monkeypatch.setattr(state.Variables, 'model_validate', track_validation)
     app = configured_api({'era5': {'store': './era5.zarr'}})
-
-    def reject_rebuild(*_args, **_kwargs):
-        pytest.fail('Variables must be prepared once in the application factory')
-
-    monkeypatch.setattr(web, 'build_variables', reject_rebuild)
-    monkeypatch.setattr(controller, 'build_variables', reject_rebuild)
+    assert calls == 0
     with TestClient(app) as client:
+        assert calls == 1
         for _ in range(2):
             response = client.get('/variables')
             assert response.status_code == 200
             assert response.json()['era5']['TMP']['en'] == 'Temperature, °C'
+        assert calls == 1
 
 
 def test_unknown_source_settings_are_rejected():
