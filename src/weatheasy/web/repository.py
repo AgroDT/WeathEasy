@@ -12,14 +12,17 @@ from anyio import CapacityLimiter, fail_after
 
 from .reader import PointReader, PointSelection
 from weatheasy import const
-from weatheasy.error import CFS2Error, CMIP6DateRangeError, ERA5DateRangeError
+from weatheasy.error import CFS2Error, CMIP6DateRangeError, ERA5DateRangeError, S3ImportError
 from weatheasy.query import check_date_range, daily_precipitation
+from weatheasy.storage import get_store
+from weatheasy.web.config import DEFAULT_STORAGE_OPERATION_TIMEOUT, DEFAULT_STORAGE_READ_TIMEOUT
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from numpy.typing import NDArray
+    from s3fs import S3FileSystem
     from zarr.abc.store import Store
 
     from .models import DataQuery
@@ -60,6 +63,43 @@ class ReadPlan:
         )
 
 
+class RepositoryFactory:
+    """Own one lazy S3 filesystem shared by the stores."""
+
+    __slots__ = ('filesystem', 'operation_timeout', 'read_limiter', 'read_timeout')
+
+    def __init__(
+        self,
+        read_limiter: CapacityLimiter,
+        *,
+        read_timeout: float = DEFAULT_STORAGE_READ_TIMEOUT,
+        operation_timeout: float = DEFAULT_STORAGE_OPERATION_TIMEOUT,
+    ) -> None:
+        self.filesystem: S3FileSystem | None = None
+        self.read_limiter = read_limiter
+        self.read_timeout = read_timeout
+        self.operation_timeout = operation_timeout
+
+    def __call__(self, repo_cls: type[WeatherRepository], store: str) -> WeatherRepository:
+        return repo_cls(
+            get_store(store, filesystem=self._get_filesystem(store)),
+            self.read_limiter,
+            read_timeout=self.read_timeout,
+            operation_timeout=self.operation_timeout,
+        )
+
+    def _get_filesystem(self, store: str) -> S3FileSystem | None:
+        if not store.startswith('s3://'):
+            return None
+        if self.filesystem is None:
+            try:
+                import s3fs  # noqa: PLC0415
+            except ImportError as exc:
+                raise S3ImportError from exc
+            self.filesystem = s3fs.S3FileSystem(asynchronous=True, skip_instance_cache=True)
+        return self.filesystem
+
+
 class WeatherRepository(ABC):
     """Read a ready store with the application's shared storage read budget."""
 
@@ -70,8 +110,8 @@ class WeatherRepository(ABC):
         store: Store,
         read_limiter: CapacityLimiter,
         *,
-        read_timeout: float = 60,
-        operation_timeout: float = 10,
+        read_timeout: float = DEFAULT_STORAGE_READ_TIMEOUT,
+        operation_timeout: float = DEFAULT_STORAGE_OPERATION_TIMEOUT,
     ) -> None:
         self._reader = PointReader(store, operation_timeout)
         self.read_limiter = read_limiter

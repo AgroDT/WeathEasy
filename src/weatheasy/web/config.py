@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from weatheasy.util import FormatFloat, float_formatter_factory
 
 
+DEFAULT_STORAGE_READ_TIMEOUT = 60
+DEFAULT_STORAGE_OPERATION_TIMEOUT = 10
+
+
 class SourceSettings(BaseModel):
     store: Annotated[str, Field(min_length=1)]
 
@@ -28,8 +32,8 @@ class Settings(BaseSettings):
     }
 
     sources: Annotated[SourcesSettings, Field(default_factory=SourcesSettings)]
-    storage_read_timeout: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60
-    storage_operation_timeout: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 10
+    storage_read_timeout: PositiveInt = DEFAULT_STORAGE_READ_TIMEOUT
+    storage_operation_timeout: PositiveInt = DEFAULT_STORAGE_OPERATION_TIMEOUT
     precision: PositiveInt = 6
     enable_cors: bool = False
 

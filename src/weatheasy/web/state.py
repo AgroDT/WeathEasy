@@ -5,9 +5,14 @@ from fastapi import Depends, Request
 
 from .config import Settings
 from .models import Variables
-from .repository import Cfs2Repository, Cmip6Repository, Era5Repository, WeatherRepository
+from .repository import (
+    Cfs2Repository,
+    Cmip6Repository,
+    Era5Repository,
+    RepositoryFactory,
+    WeatherRepository,
+)
 from weatheasy.const import CFS2_BANDS, CMIP6_VARS, CORRECTION_INFO, ERA5_ALL_VARS
-from weatheasy.storage import get_store
 
 
 class AppState(TypedDict):
@@ -20,28 +25,24 @@ class AppState(TypedDict):
 
 def create_state(settings: Settings, limiter: CapacityLimiter) -> AppState:
     sources = settings.sources
-    read_timeout = settings.storage_read_timeout
-    operation_timeout = settings.storage_operation_timeout
     state = cast('AppState', {'settings': settings})
     variables = {}
 
-    def create_repo(store: str, repository: type[WeatherRepository]):
-        return repository(
-            get_store(store),
-            limiter,
-            read_timeout=read_timeout,
-            operation_timeout=operation_timeout,
-        )
+    create_repo = RepositoryFactory(
+        limiter,
+        read_timeout=settings.storage_read_timeout,
+        operation_timeout=settings.storage_operation_timeout,
+    )
 
-    if sources.cfs2:
+    if cfs2 := sources.cfs2:
         variables['cfs2'] = {k: v.info for k, v in CFS2_BANDS.items()} | CORRECTION_INFO
-        state['cfs2_repository'] = create_repo(sources.cfs2.store, Cfs2Repository)
-    if sources.cmip6:
+        state['cfs2_repository'] = create_repo(Cfs2Repository, cfs2.store)
+    if cmip6 := sources.cmip6:
         variables['cmip6'] = CMIP6_VARS
-        state['cmip6_repository'] = create_repo(sources.cmip6.store, Cmip6Repository)
-    if sources.era5:
+        state['cmip6_repository'] = create_repo(Cmip6Repository, cmip6.store)
+    if era5 := sources.era5:
         variables['era5'] = ERA5_ALL_VARS | CORRECTION_INFO
-        state['era5_repository'] = create_repo(sources.era5.store, Era5Repository)
+        state['era5_repository'] = create_repo(Era5Repository, era5.store)
 
     state['variables'] = Variables.model_validate(variables, from_attributes=True)
 

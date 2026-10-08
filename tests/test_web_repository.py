@@ -53,16 +53,16 @@ async def test_store_created_once_per_lifespan_off_loop(
     from anyio import Event as AsyncEvent, create_task_group, fail_after, from_thread
     from zarr.storage import MemoryStore
 
-    from weatheasy.web import create_app, state
+    from weatheasy.web import create_app, repository
     from weatheasy.web.config import Settings, SourcesSettings
 
     loop_thread = get_ident()
     started = AsyncEvent()
     release = Event()
     stores_created = []
-    uri = f's3://weather/{source}.zarr'
+    uri = f'./{source}.zarr'
 
-    def create_store(location: str):
+    def create_store(location: str, **_kwargs):
         assert get_ident() != loop_thread, 'Store initialization must run off the event loop'
         assert location == uri
         store = MemoryStore()
@@ -71,7 +71,7 @@ async def test_store_created_once_per_lifespan_off_loop(
         assert release.wait(timeout=5), 'Event loop must run while store initialization is blocked'
         return store
 
-    monkeypatch.setattr(state, 'get_store', create_store)
+    monkeypatch.setattr(repository, 'get_store', create_store)
     settings = Settings(
         sources=SourcesSettings.model_validate({source: {'store': uri}}), _env_file=None
     )
@@ -107,17 +107,15 @@ async def test_store_created_once_per_lifespan_off_loop(
 @pytest.mark.anyio
 async def test_store_initialization_failure_aborts_startup(monkeypatch: pytest.MonkeyPatch):
     pytest.importorskip('fastapi')
-    from weatheasy.web import create_app, state
+    from weatheasy.web import create_app, repository
     from weatheasy.web.config import Settings, SourceSettings, SourcesSettings
 
-    def fail_store(_uri: str):
+    def fail_store(_uri: str, **_kwargs):
         msg = 'Store initialization failed'
         raise OSError(msg)
 
-    monkeypatch.setattr(state, 'get_store', fail_store)
-    app = create_app(
-        Settings(sources=SourcesSettings(era5=SourceSettings(store='s3://weather/era5.zarr')))
-    )
+    monkeypatch.setattr(repository, 'get_store', fail_store)
+    app = create_app(Settings(sources=SourcesSettings(era5=SourceSettings(store='./era5.zarr'))))
     with pytest.raises(OSError, match='Store initialization failed'):
         async with app.router.lifespan_context(app):
             pytest.fail('Startup must not complete without initialized stores')
@@ -298,7 +296,7 @@ def test_storage_timeout_returns_504_before_streaming(monkeypatch: pytest.Monkey
     from starlette.testclient import TestClient
     from zarr.storage import MemoryStore
 
-    from weatheasy.web import create_app, state
+    from weatheasy.web import create_app, repository
     from weatheasy.web.config import Settings, SourceSettings, SourcesSettings
 
     cancelled = Event()
@@ -310,12 +308,12 @@ def test_storage_timeout_returns_504_before_streaming(monkeypatch: pytest.Monkey
             finally:
                 cancelled.set()
 
-    monkeypatch.setattr(state, 'get_store', lambda _uri: HungStore())
+    monkeypatch.setattr(repository, 'get_store', lambda _uri, **_kwargs: HungStore())
     app = create_app(
         Settings(
-            sources=SourcesSettings(era5=SourceSettings(store='s3://weather/era5.zarr')),
+            sources=SourcesSettings(era5=SourceSettings(store='./era5.zarr')),
             storage_read_timeout=2,
-            storage_operation_timeout=0.05,
+            storage_operation_timeout=1,
             _env_file=None,
         )
     )

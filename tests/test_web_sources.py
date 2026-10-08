@@ -30,23 +30,23 @@ def test_era5_only_discovery_and_disabled_sources_open_only_enabled_store(
     from starlette.testclient import TestClient
     from zarr.storage import MemoryStore
 
-    from weatheasy.web import state
+    from weatheasy.web import repository
 
     created = []
 
-    def create_store(uri: str):
+    def create_store(uri: str, **_kwargs):
         created.append(uri)
         return MemoryStore()
 
     def reject_store(*_args, **_kwargs):
         pytest.fail('Discovery and disabled sources must not open stores after startup')
 
-    monkeypatch.setattr(state, 'get_store', create_store)
+    monkeypatch.setattr(repository, 'get_store', create_store)
     app = configured_api({'era5': {'store': str(tmp_path / 'missing.zarr')}})
     assert created == []
     with TestClient(app) as client:
         assert created == [str(tmp_path / 'missing.zarr')]
-        monkeypatch.setattr(state, 'get_store', reject_store)
+        monkeypatch.setattr(repository, 'get_store', reject_store)
         variables = client.get('/variables')
         assert variables.status_code == 200
         assert set(variables.json()) == {'era5'}
@@ -120,7 +120,7 @@ def test_http_sources_read_independent_stores(tmp_path: Path):
 
 def test_source_environment_configuration_is_optional_and_lazy(monkeypatch: pytest.MonkeyPatch):
     pytest.importorskip('fastapi')
-    from weatheasy.web import config, state
+    from weatheasy.web import config, repository
 
     monkeypatch.setenv('WEATHEASY__SOURCES', '{}')
     monkeypatch.setenv('WEATHEASY__SOURCES__ERA5__STORE', 's3://weather/era5.zarr')
@@ -130,7 +130,7 @@ def test_source_environment_configuration_is_optional_and_lazy(monkeypatch: pyte
     def reject_store(*_args, **_kwargs):
         pytest.fail('Parsing settings must not open stores or require S3 credentials')
 
-    monkeypatch.setattr(state, 'get_store', reject_store)
+    monkeypatch.setattr(repository, 'get_store', reject_store)
     settings = config.Settings(_env_file=None)
     assert settings.sources.cfs2 is None
     assert settings.sources.cmip6 is None

@@ -18,7 +18,7 @@ def test_storage_reads_leave_default_pool_available(
     from starlette.testclient import TestClient
     from zarr.storage import MemoryStore
 
-    from weatheasy.web import create_app, state
+    from weatheasy.web import create_app, repository
     from weatheasy.web.config import Settings, SourcesSettings
     from weatheasy.web.models import DataQuery
     from weatheasy.web.repository import ReadPlan, WeatherRepository
@@ -35,17 +35,17 @@ def test_storage_reads_leave_default_pool_available(
         await release.wait()
         return ConstantPlan([], [])
 
-    repository = getattr(
-        state,
+    repo_cls = getattr(
+        repository,
         {'era5': 'Era5Repository', 'cfs2': 'Cfs2Repository', 'cmip6': 'Cmip6Repository'}[source],
     )
-    monkeypatch.setattr(repository, '_prepare', slow_prepare)
+    monkeypatch.setattr(repo_cls, '_prepare', slow_prepare)
     settings = Settings(
         sources=SourcesSettings.model_validate({source: {'store': './unused.zarr'}}),
         _env_file=None,
     )
     # Exercise the real startup and routes without opening external storage.
-    monkeypatch.setattr(state, 'get_store', lambda _uri: MemoryStore())
+    monkeypatch.setattr(repository, 'get_store', lambda _uri, **_kwargs: MemoryStore())
     app = create_app(settings)
 
     @app.get('/prepared')
