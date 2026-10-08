@@ -15,6 +15,7 @@ def test_storage_reads_leave_default_pool_available(
     from anyio import to_thread
     from fastapi.responses import StreamingResponse
     from starlette.testclient import TestClient
+    from zarr.storage import MemoryStore
 
     from weatheasy.web import create_app, state
     from weatheasy.web.config import Settings, SourcesSettings
@@ -33,8 +34,8 @@ def test_storage_reads_leave_default_pool_available(
         sources=SourcesSettings.model_validate({source: {'store': './unused.zarr'}}),
         _env_file=None,
     )
-    # Avoid opening storage; exercise the real route, dependencies and worker dispatch.
-    getattr(settings.sources, source).__dict__['zarr_store'] = object()
+    # Exercise the real startup and routes without opening external storage.
+    monkeypatch.setattr(state, 'get_store', lambda _uri: MemoryStore())
     app = create_app(settings)
 
     @app.get('/prepared')

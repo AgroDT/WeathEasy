@@ -86,7 +86,9 @@ variables, and `/era5`, `/cfs2`, `/cmip6` read the corresponding store. A query 
 an unconfigured source returns HTTP 404, and its route is absent from OpenAPI
 and interactive API documentation. Restart the API after changing the configured
 sources. Reading ERA5 requires no CDS credentials.
-Health endpoints do not access weather storage.
+The API creates stores for configured sources during startup in a worker thread.
+Store initialization errors prevent startup. Requests reuse those stores; health
+endpoints do not access weather storage.
 
 CLI applications are configured with command line arguments (see below).
 `--store` addresses one source’s store. The default is `./weatheasy/SOURCE.zarr`.

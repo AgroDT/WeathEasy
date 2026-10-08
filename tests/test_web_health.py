@@ -9,8 +9,9 @@ def test_health_probes_do_not_access_storage(
 ):
     pytest.importorskip('fastapi')
     from starlette.testclient import TestClient
+    from zarr.storage import MemoryStore
 
-    from weatheasy.web import config, create_app
+    from weatheasy.web import config, create_app, state
 
     settings = config.Settings(
         sources=config.SourcesSettings(
@@ -22,9 +23,10 @@ def test_health_probes_do_not_access_storage(
     def fail_storage_access(*_args, **_kwargs):
         pytest.fail('Health probes must not access configuration or weather storage')
 
-    monkeypatch.setattr(config, 'get_store', fail_storage_access)
+    monkeypatch.setattr(state, 'get_store', lambda _uri: MemoryStore())
     app = create_app(settings)
     with TestClient(app) as client:
+        monkeypatch.setattr(state, 'get_store', fail_storage_access)
         response = client.get(path)
     assert response.status_code == 200
     assert response.json() == {'status': 'ok'}

@@ -23,38 +23,50 @@ def request(app: Any, path: str, **kwargs):
         return client.get(path, **kwargs)
 
 
-def test_era5_only_discovery_and_disabled_sources_need_no_storage(
+def test_era5_only_discovery_and_disabled_sources_open_only_enabled_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     pytest.importorskip('fastapi')
-    from weatheasy.web import config
+    from starlette.testclient import TestClient
+    from zarr.storage import MemoryStore
+
+    from weatheasy.web import state
+
+    created = []
+
+    def create_store(uri: str):
+        created.append(uri)
+        return MemoryStore()
 
     def reject_store(*_args, **_kwargs):
-        pytest.fail('Discovery and disabled sources must not open any store')
+        pytest.fail('Discovery and disabled sources must not open stores after startup')
 
-    monkeypatch.setattr(config, 'get_store', reject_store)
+    monkeypatch.setattr(state, 'get_store', create_store)
     app = configured_api({'era5': {'store': str(tmp_path / 'missing.zarr')}})
-    variables = request(app, '/variables')
-    assert variables.status_code == 200
-    assert set(variables.json()) == {'era5'}
-    assert variables.json()['era5']['TMP']['en'] == 'Temperature, °C'
-    assert 'WIND' in variables.json()['era5']
-    for source, variable in [('cfs2', 'TMP'), ('cmip6', 'tas')]:
-        missing_query = request(app, f'/{source}')
-        assert missing_query.status_code == 404
-        response = request(
-            app,
-            f'/{source}',
-            params={
-                'lat': 55,
-                'lon': 37,
-                'begin': '2020-03-01',
-                'end': '2020-03-01',
-                'var': variable,
-            },
-        )
-        assert response.status_code == 404
-        assert response.json() == {'detail': 'Not Found'}
+    assert created == []
+    with TestClient(app) as client:
+        assert created == [str(tmp_path / 'missing.zarr')]
+        monkeypatch.setattr(state, 'get_store', reject_store)
+        variables = client.get('/variables')
+        assert variables.status_code == 200
+        assert set(variables.json()) == {'era5'}
+        assert variables.json()['era5']['TMP']['en'] == 'Temperature, °C'
+        assert 'WIND' in variables.json()['era5']
+        for source, variable in [('cfs2', 'TMP'), ('cmip6', 'tas')]:
+            missing_query = client.get(f'/{source}')
+            assert missing_query.status_code == 404
+            response = client.get(
+                f'/{source}',
+                params={
+                    'lat': 55,
+                    'lon': 37,
+                    'begin': '2020-03-01',
+                    'end': '2020-03-01',
+                    'var': variable,
+                },
+            )
+            assert response.status_code == 404
+            assert response.json() == {'detail': 'Not Found'}
 
 
 def test_http_sources_read_independent_stores(tmp_path: Path):
@@ -108,7 +120,7 @@ def test_http_sources_read_independent_stores(tmp_path: Path):
 
 def test_source_environment_configuration_is_optional_and_lazy(monkeypatch: pytest.MonkeyPatch):
     pytest.importorskip('fastapi')
-    from weatheasy.web import config
+    from weatheasy.web import config, state
 
     monkeypatch.setenv('WEATHEASY__SOURCES', '{}')
     monkeypatch.setenv('WEATHEASY__SOURCES__ERA5__STORE', 's3://weather/era5.zarr')
@@ -118,7 +130,7 @@ def test_source_environment_configuration_is_optional_and_lazy(monkeypatch: pyte
     def reject_store(*_args, **_kwargs):
         pytest.fail('Parsing settings must not open stores or require S3 credentials')
 
-    monkeypatch.setattr(config, 'get_store', reject_store)
+    monkeypatch.setattr(state, 'get_store', reject_store)
     settings = config.Settings(_env_file=None)
     assert settings.sources.cfs2 is None
     assert settings.sources.cmip6 is None

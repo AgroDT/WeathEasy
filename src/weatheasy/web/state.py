@@ -8,6 +8,7 @@ from .models import Variables
 from .repository import WeatherRepository
 from weatheasy.const import CFS2_BANDS, CMIP6_VARS, CORRECTION_INFO, ERA5_ALL_VARS
 from weatheasy.query import get_cfs2_data, get_cmip6_data, get_era5_data
+from weatheasy.storage import get_store
 
 
 class AppState(TypedDict):
@@ -25,13 +26,19 @@ def create_state(settings: Settings, limiter: CapacityLimiter) -> AppState:
 
     if sources.cfs2:
         variables['cfs2'] = {k: v.info for k, v in CFS2_BANDS.items()} | CORRECTION_INFO
-        state['cfs2_repository'] = WeatherRepository(sources.cfs2, get_cfs2_data, limiter)
+        state['cfs2_repository'] = WeatherRepository(
+            get_store(sources.cfs2.store), get_cfs2_data, limiter
+        )
     if sources.cmip6:
         variables['cmip6'] = CMIP6_VARS
-        state['cmip6_repository'] = WeatherRepository(sources.cmip6, get_cmip6_data, limiter)
+        state['cmip6_repository'] = WeatherRepository(
+            get_store(sources.cmip6.store), get_cmip6_data, limiter
+        )
     if sources.era5:
         variables['era5'] = ERA5_ALL_VARS | CORRECTION_INFO
-        state['era5_repository'] = WeatherRepository(sources.era5, get_era5_data, limiter)
+        state['era5_repository'] = WeatherRepository(
+            get_store(sources.era5.store), get_era5_data, limiter
+        )
 
     state['variables'] = Variables.model_validate(variables, from_attributes=True)
 

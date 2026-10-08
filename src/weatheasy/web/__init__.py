@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from anyio import CapacityLimiter
+from anyio import CapacityLimiter, to_thread
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -26,7 +26,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[AppState]:
         # All sources share a budget separate from response streaming.
         limiter = CapacityLimiter(40)
-        yield create_state(settings, limiter)
+        yield await to_thread.run_sync(create_state, settings, limiter, limiter=limiter)
 
     app = FastAPI(
         title='WeathEasy',

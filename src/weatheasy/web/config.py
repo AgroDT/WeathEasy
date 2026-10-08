@@ -3,18 +3,12 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from zarr.abc.store import Store
 
-from weatheasy.storage import get_store
 from weatheasy.util import FormatFloat, float_formatter_factory
 
 
 class SourceSettings(BaseModel):
     store: Annotated[str, Field(min_length=1)]
-
-    @cached_property
-    def zarr_store(self) -> Store:
-        return get_store(self.store)
 
 
 class SourcesSettings(BaseModel):
