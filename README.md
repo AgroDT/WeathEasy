@@ -91,19 +91,29 @@ Store initialization errors prevent startup. Requests reuse those stores; health
 endpoints do not access weather storage.
 
 The API reads prepared stores directly through Zarr's asynchronous API; CLI
-queries keep their synchronous implementation. API reads have a 60-second
-budget, including waiting for a read slot, and a 10-second timeout per Zarr
-metadata, array read or listing operation (including backend retries).
-Set `WEATHEASY__STORAGE_READ_TIMEOUT` and
-`WEATHEASY__STORAGE_OPERATION_TIMEOUT` to positive finite seconds to override
-these defaults. A timeout returns HTTP 504 before response streaming begins.
+queries keep their synchronous implementation. Each API request prepares its
+metadata and point indices once, then reads and sends batches of up to 64 days.
+The successful response remains a JSON array in chronological order, with
+missing values represented as `null`. The first batch is read before sending
+HTTP headers; subsequent batches are read as the client consumes the response.
 
-Cancellation propagates to the active asynchronous read, and its limiter slot
-is released as the request unwinds. Queued cancelled requests never start I/O.
-No getter worker thread is left running after cancellation. Zarr may internally
-use threads for filesystem operations and codecs; cancellation cannot forcibly
-stop an already running filesystem call or CPU work. Shared stores stay open
-when a query finishes, times out or is cancelled.
+API reads have a cumulative 60-second budget for storage work and waiting for a
+read slot across all batches. Formatting and sending data to the client do not
+consume that budget. Each Zarr metadata, array read or listing operation
+(including backend retries) has a 10-second timeout. Set
+`WEATHEASY__STORAGE_READ_TIMEOUT` and `WEATHEASY__STORAGE_OPERATION_TIMEOUT` to
+positive finite seconds to override these defaults. Validation errors and
+initial read timeouts retain their normal HTTP responses (422 and 504).
+After headers are sent, a storage failure terminates the stream: the client
+receives a truncated JSON response, and the HTTP status cannot be changed.
+
+The read limiter is held only while preparing metadata or reading a batch and
+is released before sending data. Slow clients therefore do not occupy storage
+slots. Cancellation propagates to an active asynchronous read; queued cancelled
+requests never start I/O. Zarr may internally use threads for filesystem
+operations and codecs; cancellation cannot forcibly stop an already running
+filesystem call or CPU work. Shared stores stay open when a query finishes,
+times out or is cancelled.
 
 CLI applications are configured with command line arguments (see below).
 `--store` addresses one source’s store. The default is `./weatheasy/SOURCE.zarr`.

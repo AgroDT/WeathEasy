@@ -9,7 +9,10 @@ import pytest
 
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
     from weatheasy.web.models import DataQuery
+    from weatheasy.web.repository import ReadPlan
 
 
 @pytest.fixture
@@ -29,6 +32,16 @@ def query() -> DataQuery:
         end=date(2020, 3, 2),
         variables=['TMP'],
     )
+
+
+def constant_plan(values: NDArray[np.float32]) -> ReadPlan:
+    from weatheasy.web.repository import ReadPlan
+
+    class ConstantPlan(ReadPlan):
+        async def read(self, _first: date, _last: date, /):
+            return values
+
+    return ConstantPlan([], [])
 
 
 @pytest.mark.anyio
@@ -132,7 +145,7 @@ async def test_repository_reads_ready_store_concurrently():
     )
 
     class ConcurrentRepository(WeatherRepository):
-        async def _read(self, data_query: DataQuery):
+        async def _prepare(self, data_query: DataQuery):
             nonlocal active
             assert data_query == query
             assert self._reader.store is store
@@ -141,7 +154,7 @@ async def test_repository_reads_ready_store_concurrently():
             if active == 4:
                 all_started.set()
             await all_started.wait()
-            return np.array([[11, 12]], dtype=np.float32)
+            return constant_plan(np.array([[11, 12]], dtype=np.float32))
 
     limiter = CapacityLimiter(4)
     repository = ConcurrentRepository(store, limiter)
@@ -197,8 +210,8 @@ async def test_hung_storage_operation_times_out_and_releases_read_slot(
     assert limiter.borrowed_tokens == 0
 
     class ReadyRepository(WeatherRepository):
-        async def _read(self, _query: DataQuery):
-            return np.array([[42]], dtype=np.float32)
+        async def _prepare(self, _query: DataQuery):
+            return constant_plan(np.array([[42]], dtype=np.float32))
 
     ready = ReadyRepository(MemoryStore(), limiter)
     with fail_after(3):
@@ -262,7 +275,7 @@ async def test_queued_read_times_out_without_starting_io(query: DataQuery):
     from weatheasy.web.repository import StorageReadTimeoutError, WeatherRepository
 
     class FailingRepository(WeatherRepository):
-        async def _read(self, _query: DataQuery):
+        async def _prepare(self, _query: DataQuery):
             pytest.fail('An expired queued request must never start I/O')
 
     limiter = CapacityLimiter(1)

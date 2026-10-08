@@ -2,19 +2,23 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import date
+from time import monotonic
 from typing import TYPE_CHECKING
 
 import numpy as np
 from anyio import CapacityLimiter, fail_after
 
-from .reader import PointReader
+from .reader import PointReader, PointSelection
 from weatheasy import const
 from weatheasy.error import CFS2Error, CMIP6DateRangeError, ERA5DateRangeError
 from weatheasy.query import check_date_range, daily_precipitation
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from numpy.typing import NDArray
     from zarr.abc.store import Store
 
@@ -23,6 +27,37 @@ if TYPE_CHECKING:
 
 class StorageReadTimeoutError(TimeoutError):
     """The storage operation or query exceeded its budget."""
+
+
+@dataclass
+class ReadRegion:
+    selection: PointSelection
+    rows: list[int]
+    first: date
+    last: date
+
+
+@dataclass
+class ReadPlan:
+    """Prepared regions assembled into chronological batches for one query."""
+
+    variables: list[str]
+    regions: list[ReadRegion]
+    precipitation: str = 'PRATE'
+    precipitation_factor: int = 86400
+
+    async def read(self, first: date, last: date, /) -> NDArray[np.float32]:
+        result = np.full((len(self.variables), (last - first).days + 1), np.nan, np.float32)
+        for region in self.regions:
+            begin, end = max(first, region.first), min(last, region.last)
+            if begin > end:
+                continue
+            values = await region.selection.read(begin, end)
+            offset = (begin - first).days
+            result[region.rows, offset : offset + values.shape[1]] = values
+        return daily_precipitation(
+            result, self.variables, self.precipitation, self.precipitation_factor
+        )
 
 
 class WeatherRepository(ABC):
@@ -43,16 +78,42 @@ class WeatherRepository(ABC):
         self.read_timeout = read_timeout
 
     async def read(self, query: DataQuery) -> NDArray[np.float32]:
-        try:
-            with fail_after(self.read_timeout):
-                async with self.read_limiter:
-                    return await self._read(query)
-        except TimeoutError as exc:
-            raise StorageReadTimeoutError from exc
+        """Collect batches for callers that need an in-memory result."""
+        return np.concatenate([values async for values in self.stream(query)], axis=1)
+
+    async def stream(
+        self, query: DataQuery, *, batch_days: int = 64
+    ) -> AsyncGenerator[NDArray[np.float32]]:
+        """Read bounded batches, releasing the slot before yielding to the sender."""
+        check_date_range(query['begin'], query['end'])
+        if batch_days < 1:
+            msg = 'batch_days must be positive'
+            raise ValueError(msg)
+        remaining = self.read_timeout
+        plan = None
+        days = (query['end'] - query['begin']).days + 1
+        for offset in range(0, days, batch_days):
+            first = query['begin'] + const.ONE_DAY * offset
+            last = query['begin'] + const.ONE_DAY * (min(offset + batch_days, days) - 1)
+            started = monotonic()
+            try:
+                if remaining <= 0:
+                    raise StorageReadTimeoutError
+                with fail_after(remaining):
+                    async with self.read_limiter:
+                        if plan is None:
+                            plan = await self._prepare(query)
+                        values = await plan.read(first, last)
+            except TimeoutError as exc:
+                raise StorageReadTimeoutError from exc
+            remaining -= monotonic() - started
+            if remaining <= 0:
+                raise StorageReadTimeoutError
+            yield values
 
     @abstractmethod
-    async def _read(self, query: DataQuery, /) -> NDArray[np.float32]:
-        """Read source data inside the shared limiter and query timeout."""
+    async def _prepare(self, query: DataQuery, /) -> ReadPlan:
+        """Validate the query and load metadata under the shared read budget."""
 
 
 class Era5Repository(WeatherRepository):
@@ -60,10 +121,9 @@ class Era5Repository(WeatherRepository):
 
     __slots__ = ()
 
-    async def _read(self, query: DataQuery, /) -> NDArray[np.float32]:
+    async def _prepare(self, query: DataQuery, /) -> ReadPlan:
         begin, end = query['begin'], query['end']
         coords, variables = query['coords'], query['variables']
-        check_date_range(begin, end)
         reader = self._reader
         daily = await reader.group('daily')
         times = await reader.times(daily)
@@ -73,19 +133,20 @@ class Era5Repository(WeatherRepository):
         for value in (begin, end):
             if not first <= value <= last:
                 raise ERA5DateRangeError(value, first, last)
-        result = np.full((len(variables), (end - begin).days + 1), np.nan, np.float32)
+        regions = []
         for path, selected in (
             ('daily', [name for name in variables if name not in ('TMP_corr', 'PRATE_corr')]),
             ('correction', [name for name in variables if name in ('TMP_corr', 'PRATE_corr')]),
         ):
             if selected:
                 group = daily if path == 'daily' else await reader.group(path)
-                values = await reader.point(
-                    group, begin, end, coords, selected, times=times if path == 'daily' else None
+                selection = await reader.prepare(
+                    group, coords, selected, times=times if path == 'daily' else None
                 )
-                for row, name in enumerate(selected):
-                    result[variables.index(name)] = values[row]
-        return daily_precipitation(result, variables, 'PRATE', 86400)
+                regions.append(
+                    ReadRegion(selection, [variables.index(name) for name in selected], begin, end)
+                )
+        return ReadPlan(variables, regions)
 
 
 class Cmip6Repository(WeatherRepository):
@@ -93,20 +154,20 @@ class Cmip6Repository(WeatherRepository):
 
     __slots__ = ()
 
-    async def _read(self, query: DataQuery, /) -> NDArray[np.float32]:
+    async def _prepare(self, query: DataQuery, /) -> ReadPlan:
         begin, end = query['begin'], query['end']
         coords, variables = query['coords'], query['variables']
-        check_date_range(begin, end)
         first, last = date(const.CMIP6_FIRST_YEAR, 1, 1), date(const.CMIP6_LAST_YEAR, 12, 31)
         for value in (begin, end):
             if not first <= value <= last:
                 raise CMIP6DateRangeError(value, first, last)
         reader = self._reader
-        rows = []
-        for name in variables:
+        regions = []
+        for row, name in enumerate(variables):
             group = await reader.group(name)
-            rows.append((await reader.point(group, begin, end, coords, [name]))[0])
-        return daily_precipitation(np.stack(rows), variables, 'pr', 86400)
+            selection = await reader.prepare(group, coords, [name])
+            regions.append(ReadRegion(selection, [row], begin, end))
+        return ReadPlan(variables, regions, precipitation='pr')
 
 
 class Cfs2Repository(WeatherRepository):
@@ -114,10 +175,9 @@ class Cfs2Repository(WeatherRepository):
 
     __slots__ = ()
 
-    async def _read(self, query: DataQuery, /) -> NDArray[np.float32]:  # noqa: C901
+    async def _prepare(self, query: DataQuery, /) -> ReadPlan:
         begin, end = query['begin'], query['end']
         coords, variables = query['coords'], query['variables']
-        check_date_range(begin, end)
         reader = self._reader
         root = await reader.group()
         try:
@@ -125,7 +185,7 @@ class Cfs2Repository(WeatherRepository):
         except KeyError as exc:
             raise CFS2Error from exc
         boundary = date.fromisoformat(str(updated)) - const.CFS2_REANALYSIS_LAST_DATE_OFFSET
-        result = np.full((len(variables), (end - begin).days + 1), np.nan, np.float32)
+        regions = []
         for kind, first, last in (
             ('reanalysis', begin, min(end, boundary - const.ONE_DAY)),
             ('forecast', max(begin, boundary), end),
@@ -143,18 +203,18 @@ class Cfs2Repository(WeatherRepository):
                         async with aclosing(group.members()) as members:
                             if await anext(members, None) is None:
                                 continue
-                values = await reader.point(group, first, last, coords, selected)
-                offset = (first - begin).days
-                for row, name in enumerate(selected):
-                    result[variables.index(name), offset : offset + values.shape[1]] = values[row]
+                selection = await reader.prepare(group, coords, selected)
+                regions.append(
+                    ReadRegion(selection, [variables.index(name) for name in selected], first, last)
+                )
             if kind == 'reanalysis':
                 selected = [name for name in variables if name in ('TMP_corr', 'PRATE_corr')]
                 if selected:
                     group = await reader.group('reanalysis/correction')
-                    values = await reader.point(group, first, last, coords, selected)
-                    offset = (first - begin).days
-                    for row, name in enumerate(selected):
-                        result[variables.index(name), offset : offset + values.shape[1]] = values[
-                            row
-                        ]
-        return daily_precipitation(result, variables, 'PRATE', 21600)
+                    selection = await reader.prepare(group, coords, selected)
+                    regions.append(
+                        ReadRegion(
+                            selection, [variables.index(name) for name in selected], first, last
+                        )
+                    )
+        return ReadPlan(variables, regions, precipitation_factor=21600)

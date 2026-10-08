@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import aclosing
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -10,7 +11,7 @@ from weatheasy.const import ONE_DAY
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
     from datetime import date
 
     from numpy.typing import NDArray
@@ -26,28 +27,46 @@ async def data_response(
     query: DataQuery,
     settings: Settings,
 ) -> StreamingResponse:
-    data = await repository.read(query)
-    content = _stream_data(data.transpose(), query, settings.format_float)
+    batches = repository.stream(query)
+    first = await anext(batches)
+    content = _stream_data(first, batches, query, settings.format_float)
     return StreamingResponse(content, media_type='application/json')
 
 
-def _stream_data(data: NDArray[np.float32], query: DataQuery, format_float: FormatFloat):
+async def _stream_data(
+    first: NDArray[np.float32],
+    batches: AsyncGenerator[NDArray[np.float32]],
+    query: DataQuery,
+    format_float: FormatFloat,
+) -> AsyncIterator[str]:
     sio = StringIO()
     format_row = _row_formatter_factory(sio, query['variables'], format_float)
     date_ = query['begin']
-    buf_size = 10240
+    first_row = True
+    data = first
     sio.write('[')
-    format_row(date_, data[0])
-    for row in data[1:]:
-        date_ += ONE_DAY
-        sio.write(',')
-        format_row(date_, row)
-        pos = sio.tell()
-        if pos >= buf_size:
-            yield sio.getvalue()[:pos]
-            sio.seek(0)
-    sio.write(']')
-    yield sio.getvalue()[: sio.tell()]
+    async with aclosing(batches):
+        while True:
+            for row in data.transpose():
+                if not first_row:
+                    sio.write(',')
+                format_row(date_, row)
+                first_row = False
+                if date_ < query['end']:
+                    date_ += ONE_DAY
+                if sio.tell() >= 10240:
+                    yield sio.getvalue()
+                    sio.seek(0)
+                    sio.truncate()
+            if sio.tell():
+                # Flush each storage batch before starting the next read.
+                yield sio.getvalue()
+                sio.seek(0)
+                sio.truncate()
+            data = await anext(batches, None)
+            if data is None:
+                break
+    yield ']'
 
 
 def _row_formatter_factory(sio: StringIO, variables: Sequence[str], format_float: FormatFloat):

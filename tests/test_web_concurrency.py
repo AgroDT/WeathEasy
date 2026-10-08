@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from threading import Event
 
 import numpy as np
@@ -20,21 +21,25 @@ def test_storage_reads_leave_default_pool_available(
     from weatheasy.web import create_app, state
     from weatheasy.web.config import Settings, SourcesSettings
     from weatheasy.web.models import DataQuery
-    from weatheasy.web.repository import WeatherRepository
+    from weatheasy.web.repository import ReadPlan, WeatherRepository
 
     started = Event()
     release: AsyncEvent
 
-    async def slow_read(_self: WeatherRepository, _query: DataQuery):
+    class ConstantPlan(ReadPlan):
+        async def read(self, _first: date, _last: date, /):
+            return np.array([[11, 12]], dtype=np.float32)
+
+    async def slow_prepare(_self: WeatherRepository, _query: DataQuery):
         started.set()
         await release.wait()
-        return np.array([[11, 12]], dtype=np.float32)
+        return ConstantPlan([], [])
 
     repository = getattr(
         state,
         {'era5': 'Era5Repository', 'cfs2': 'Cfs2Repository', 'cmip6': 'Cmip6Repository'}[source],
     )
-    monkeypatch.setattr(repository, '_read', slow_read)
+    monkeypatch.setattr(repository, '_prepare', slow_prepare)
     settings = Settings(
         sources=SourcesSettings.model_validate({source: {'store': './unused.zarr'}}),
         _env_file=None,

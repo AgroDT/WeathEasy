@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
     from zarr.abc.store import Store
+    from zarr.core.array import AsyncArray
     from zarr.core.group import AsyncGroup
 
     from weatheasy.query import Coords
@@ -57,16 +59,14 @@ class PointReader:
             values, cast('str', array.attrs['units']), cast('str', array.attrs['calendar'])
         )
 
-    async def point(
+    async def prepare(
         self,
         group: AsyncGroup,
-        first: date,
-        last: date,
         coords: Coords,
         variables: Sequence[str],
         *,
         times: NDArray[np.datetime64] | None = None,
-    ) -> NDArray[np.float32]:
+    ) -> PointSelection:
         times = await self.times(group) if times is None else times
         axes = []
         for name in ('latitude', 'longitude'):
@@ -85,12 +85,8 @@ class PointReader:
                 float(latitudes.max()),
             )
             raise CoordsError(coords, bbox) from exc
-        dates = np.arange(np.datetime64(first), np.datetime64(last) + np.timedelta64(1, 'D'))
-        indices = np.searchsorted(times, dates)
-        matched = indices < len(times)
-        matched[matched] &= times[indices[matched]] == dates[matched]
-        result = np.full((len(variables), len(dates)), np.nan, np.float32)
-        for row, name in enumerate(variables):
+        arrays = []
+        for name in variables:
             array = await self.wait(group.get_array(name))
             if array.metadata.dimension_names != DIMS or array.shape != (
                 len(times),
@@ -99,9 +95,32 @@ class PointReader:
             ):
                 msg = f'{name} must match coordinate dimensions {DIMS}'
                 raise StorageError(msg)
-            if matched.any():
-                values = await self.wait(
-                    array.get_orthogonal_selection((indices[matched], latitude, longitude))
+            arrays.append(array)
+        return PointSelection(self, times, latitude, longitude, arrays)
+
+
+@dataclass
+class PointSelection:
+    """Metadata and point indices retained only for one request."""
+
+    reader: PointReader
+    times: NDArray[np.datetime64]
+    latitude: int
+    longitude: int
+    arrays: list[AsyncArray]
+
+    async def read(self, first: date, last: date) -> NDArray[np.float32]:
+        dates = np.arange(np.datetime64(first), np.datetime64(last) + np.timedelta64(1, 'D'))
+        indices = np.searchsorted(self.times, dates)
+        matched = indices < len(self.times)
+        matched[matched] &= self.times[indices[matched]] == dates[matched]
+        result = np.full((len(self.arrays), len(dates)), np.nan, np.float32)
+        if matched.any():
+            for row, array in enumerate(self.arrays):
+                values = await self.reader.wait(
+                    array.get_orthogonal_selection(
+                        (indices[matched], self.latitude, self.longitude)
+                    )
                 )
                 result[row, matched] = np.asarray(values, dtype=np.float32)
         return result
