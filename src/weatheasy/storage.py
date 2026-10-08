@@ -206,19 +206,38 @@ def select_point(dataset: xr.Dataset, *, latitude: float, longitude: float) -> x
     select the same cell. Bounds come from adjacent centres, clipped at poles.
     On global seam ties the equivalent centre in the stored interval wins.
     """
+    lat_index, lon_index = point_indices(
+        dataset.latitude.to_numpy(),
+        dataset.longitude.to_numpy(),
+        latitude=latitude,
+        longitude=longitude,
+    )
+    return dataset.isel(latitude=lat_index, longitude=lon_index)
+
+
+def point_indices(
+    latitudes: np.ndarray, longitudes: np.ndarray, *, latitude: float, longitude: float
+) -> tuple[int, int]:
+    """Validate a point and find its nearest centres on normalized increasing axes."""
     if not np.isfinite(latitude) or not np.isfinite(longitude):
         msg = 'Coordinates must be finite'
         raise StorageError(msg)
     if not -90 <= latitude <= 90 or not -180 <= longitude <= 360:
         msg = 'Invalid geographic coordinates'
         raise StorageError(msg)
-    south, north = _edges(dataset.latitude.to_numpy())
-    west, east = _edges(dataset.longitude.to_numpy())
+    south, north = _edges(latitudes)
+    west, east = _edges(longitudes)
     wrapped = (longitude - west) % 360 + west
     if not max(-90, south) <= latitude <= min(90, north) or wrapped > east + 1e-10:
         msg = 'Point is outside this grid'
         raise StorageError(msg)
-    return dataset.sel(latitude=latitude, longitude=wrapped, method='nearest')
+
+    def nearest(values: np.ndarray, value: float) -> int:
+        distances = abs(values - value)
+        # Increasing axes: the last nearest centre wins north/east ties.
+        return int(np.flatnonzero(distances == distances.min())[-1])
+
+    return nearest(latitudes, latitude), nearest(longitudes, wrapped)
 
 
 def _signature(ds: xr.Dataset) -> str:
@@ -260,8 +279,8 @@ def write_batch(
 
     The caller serializes writers. A failed write is retried with the same grid
     and field metadata; previously committed dates must not be supplied again.
-    The caller supplies a ready local or S3 store. Direct Zarr access remains confined here to
-    the commit marker and recovery of interrupted in-place appends.
+    The caller supplies a ready local or S3 store. Writes use xarray; direct Zarr
+    writes update the commit marker and recover interrupted in-place appends.
     """
     if tile_size < 1 or dataset.attrs.get('storage_schema') != SCHEMA:
         msg = 'A prepared dataset and positive tile_size are required'

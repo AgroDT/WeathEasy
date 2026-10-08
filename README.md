@@ -90,6 +90,21 @@ The API creates stores for configured sources during startup in a worker thread.
 Store initialization errors prevent startup. Requests reuse those stores; health
 endpoints do not access weather storage.
 
+The API reads prepared stores directly through Zarr's asynchronous API; CLI
+queries keep their synchronous implementation. API reads have a 60-second
+budget, including waiting for a read slot, and a 10-second timeout per Zarr
+metadata, array read or listing operation (including backend retries).
+Set `WEATHEASY__STORAGE_READ_TIMEOUT` and
+`WEATHEASY__STORAGE_OPERATION_TIMEOUT` to positive finite seconds to override
+these defaults. A timeout returns HTTP 504 before response streaming begins.
+
+Cancellation propagates to the active asynchronous read, and its limiter slot
+is released as the request unwinds. Queued cancelled requests never start I/O.
+No getter worker thread is left running after cancellation. Zarr may internally
+use threads for filesystem operations and codecs; cancellation cannot forcibly
+stop an already running filesystem call or CPU work. Shared stores stay open
+when a query finishes, times out or is cancelled.
+
 CLI applications are configured with command line arguments (see below).
 `--store` addresses one source’s store. The default is `./weatheasy/SOURCE.zarr`.
 Automatic downloading is configured separately through the Helm chart’s

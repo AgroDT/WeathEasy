@@ -12,24 +12,29 @@ def test_storage_reads_leave_default_pool_available(
     source: str, variable: str, monkeypatch: pytest.MonkeyPatch
 ):
     pytest.importorskip('fastapi')
-    from anyio import to_thread
+    from anyio import Event as AsyncEvent, to_thread
     from fastapi.responses import StreamingResponse
     from starlette.testclient import TestClient
     from zarr.storage import MemoryStore
 
     from weatheasy.web import create_app, state
     from weatheasy.web.config import Settings, SourcesSettings
+    from weatheasy.web.models import DataQuery
+    from weatheasy.web.repository import WeatherRepository
 
     started = Event()
-    release = Event()
+    release: AsyncEvent
 
-    def slow_getter(**_kwargs):
+    async def slow_read(_self: WeatherRepository, _query: DataQuery):
         started.set()
-        if not release.wait(timeout=10):
-            pytest.fail('Storage read was not released')
+        await release.wait()
         return np.array([[11, 12]], dtype=np.float32)
 
-    monkeypatch.setattr(state, f'get_{source}_data', slow_getter)
+    repository = getattr(
+        state,
+        {'era5': 'Era5Repository', 'cfs2': 'Cfs2Repository', 'cmip6': 'Cmip6Repository'}[source],
+    )
+    monkeypatch.setattr(repository, '_read', slow_read)
     settings = Settings(
         sources=SourcesSettings.model_validate({source: {'store': './unused.zarr'}}),
         _env_file=None,
@@ -45,11 +50,11 @@ def test_storage_reads_leave_default_pool_available(
     async def configure_default_pool():
         limiter = to_thread.current_default_thread_limiter()
         limiter.total_tokens = 1
-        return limiter
+        return limiter, AsyncEvent()
 
     with TestClient(app) as client, ThreadPoolExecutor(max_workers=3) as executor:
         assert client.portal is not None
-        default_limiter = client.portal.call(configure_default_pool)
+        default_limiter, release = client.portal.call(configure_default_pool)
         read_limiter = client.app_state[f'{source}_repository'].read_limiter
         read_limiter.total_tokens = 1
         pending_read = executor.submit(
@@ -64,7 +69,7 @@ def test_storage_reads_leave_default_pool_available(
             },
         )
         try:
-            assert started.wait(timeout=3), 'The storage worker must actually be blocked'
+            assert started.wait(timeout=3), 'The asynchronous storage read must actually be blocked'
             assert read_limiter.borrowed_tokens == 1
             assert default_limiter.borrowed_tokens == 0
             discovery = executor.submit(client.get, '/variables').result(timeout=3)
@@ -75,7 +80,7 @@ def test_storage_reads_leave_default_pool_available(
             assert streamed.json() == [11]
             assert not pending_read.done()
         finally:
-            release.set()
+            client.portal.call(release.set)
         response = pending_read.result(timeout=3)
         assert response.status_code == 200
         assert response.json() == [

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     }
 
     sources: Annotated[SourcesSettings, Field(default_factory=SourcesSettings)]
+    storage_read_timeout: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60
+    storage_operation_timeout: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 10
     precision: PositiveInt = 6
     enable_cors: bool = False
 

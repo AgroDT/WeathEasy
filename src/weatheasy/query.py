@@ -46,7 +46,7 @@ def get_cfs2_data(  # noqa: C901
     variables: Sequence[str],
 ) -> NDArray[np.float32]:
     """Read prepared daily fields; PRATE and PRATE_corr are returned in mm/day."""
-    _check_date_range(begin, end)
+    check_date_range(begin, end)
     try:
         updated = group_attrs(store, '')[const.CFS2_KEY_UPDATED]
     except KeyError as err:
@@ -89,7 +89,7 @@ def get_cfs2_data(  # noqa: C901
                     result[variables.index(variable), offset : offset + values.shape[1]] = values[
                         index
                     ]
-    return _daily_precipitation(result, variables, 'PRATE', 21600)
+    return daily_precipitation(result, variables, 'PRATE', 21600)
 
 
 def get_cmip6_data(
@@ -101,7 +101,7 @@ def get_cmip6_data(
     variables: Sequence[str],
 ) -> NDArray[np.float32]:
     """Read daily CMIP6 fields; precipitation pr is returned in mm/day."""
-    _check_date_range(begin, end)
+    check_date_range(begin, end)
     first = date(const.CMIP6_FIRST_YEAR, 1, 1)
     last = date(const.CMIP6_LAST_YEAR, 12, 31)
     for value in (begin, end):
@@ -110,7 +110,7 @@ def get_cmip6_data(
     result = np.stack(
         [_read_point(store, variable, begin, end, coords, [variable])[0] for variable in variables]
     )
-    return _daily_precipitation(result, variables, 'pr', 86400)
+    return daily_precipitation(result, variables, 'pr', 86400)
 
 
 def get_era5_data(
@@ -125,7 +125,7 @@ def get_era5_data(
     # Load the preparation module only when ERA5 data is requested.
     from weatheasy.era5 import available_period  # noqa: PLC0415
 
-    _check_date_range(begin, end)
+    check_date_range(begin, end)
     first, last = available_period(store)
     for value in (begin, end):
         if not first <= value <= last:
@@ -138,10 +138,10 @@ def get_era5_data(
             values = _read_point(store, group, begin, end, coords, selected)
             for index, variable in enumerate(selected):
                 result[variables.index(variable)] = values[index]
-    return _daily_precipitation(result, variables, 'PRATE', 86400)
+    return daily_precipitation(result, variables, 'PRATE', 86400)
 
 
-def _daily_precipitation(
+def daily_precipitation(
     result: NDArray[np.float32], variables: Sequence[str], name: str, factor: int
 ) -> NDArray[np.float32]:
     # CFS2 stores the sum of four six-hour rates; ERA5/CMIP6 store a daily rate.
@@ -182,6 +182,6 @@ def _read_point(  # noqa: PLR0917
         )
 
 
-def _check_date_range(first: date, last: date):
+def check_date_range(first: date, last: date) -> None:
     if first > last:
         raise DateRangeError

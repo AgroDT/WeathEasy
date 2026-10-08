@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import Settings
+from .repository import StorageReadTimeoutError
 from .routes import cfs2_router, cmip6_router, common_router, era5_router
 from .state import AppState, create_state
 from weatheasy import __version__
@@ -15,6 +16,10 @@ from weatheasy.error import BaseValueError
 
 async def handle_value_error(_request: Request, err: BaseValueError) -> JSONResponse:
     return JSONResponse({'detail': str(err)}, 422)
+
+
+async def handle_storage_timeout(_request: Request, _err: StorageReadTimeoutError) -> JSONResponse:
+    return JSONResponse({'detail': 'Storage read timed out'}, 504)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -31,7 +36,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title='WeathEasy',
         version=__version__ or 'unknown',
-        exception_handlers={BaseValueError: handle_value_error},
+        exception_handlers={
+            BaseValueError: handle_value_error,
+            StorageReadTimeoutError: handle_storage_timeout,
+        },
         lifespan=lifespan,
     )
     if settings.enable_cors:
