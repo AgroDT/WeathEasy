@@ -5,10 +5,9 @@ from weatheasy._cli._storage import Storage
 
 
 def run(args: Namespace) -> None:
-    storage = Storage(args.output, args.download_cache)
+    storage = Storage(args.output)
     build_copdem.build_copdem(
         tuple(args.bbox),
         args.resolution,
         storage.store(args.output),
-        storage.files(args.download_cache),
     )

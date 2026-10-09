@@ -36,13 +36,14 @@ def test_build_publishes_spatial_terrain_store(
     ) as src:
         src.write(np.array([[30, 40], [10, 20]], np.float32), 1)
 
-    def fetch_tile(tlat, tlon, cache_dir, session):  # noqa: ANN001, ARG001
-        assert cache_dir.root == tmp_path / 'tiles' / 'copdem'
-        return tile if tlon == 10 else None
+    original_read = build_copdem._read_tile_block
 
-    monkeypatch.setattr(build_copdem, '_fetch_tile', fetch_tile)
+    def read_tile(url, cells):  # noqa: ANN001
+        return original_read(str(tile), cells) if 'E010_' in url else None
+
+    monkeypatch.setattr(build_copdem, '_read_tile_block', read_tile)
     store = MemoryStore() if in_memory else get_store(tmp_path / 'dem.zarr')
-    build_copdem.build_copdem((61, 10, 60, 12), 0.5, store, tmp_path / 'tiles')
+    build_copdem.build_copdem((61, 10, 60, 12), 0.5, store)
     elevation = np.array([[10, 20, 0, 0], [30, 40, 0, 0]], np.float32)
     with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
         np.testing.assert_array_equal(ds.latitude, [60.25, 60.75])
@@ -67,8 +68,6 @@ def test_build_publishes_spatial_terrain_store(
         )
 
     tile.unlink()
-    (tmp_path / 'tiles' / 'copdem').rmdir()
-    (tmp_path / 'tiles').rmdir()
     terrain = load_dem(store)
     np.testing.assert_array_equal(terrain['elevation'], elevation)
     np.testing.assert_array_equal(terrain['lats'], [60.25, 60.75])
@@ -175,91 +174,245 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
     assert artifacts.root == 'models/correction'
 
 
-@pytest.mark.parametrize('remote', [False, True])
-def test_tile_cache_processes_local_file_and_reuses_completed_tile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool
+@pytest.mark.parametrize('stage', ['tile', 'slopes'])
+def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
+    monkeypatch: pytest.MonkeyPatch, stage: str
 ):
-    from contextlib import nullcontext
+    import zarr
 
-    from fsspec.implementations.memory import MemoryFileSystem
-
-    from weatheasy.file_storage import FileStore
-
-    tile = tmp_path / 'fixture.tif'
-    with rasterio.open(
-        tile,
-        'w',
-        driver='GTiff',
-        width=2,
-        height=2,
-        count=1,
-        dtype='float32',
-        crs='EPSG:4326',
-        transform=from_origin(10, 61, 0.5, 0.5),
-    ) as source:
-        source.write(np.array([[30, 40], [10, 20]], np.float32), 1)
-    content = tile.read_bytes()
-    fs = MemoryFileSystem(skip_instance_cache=True)
-    backing = FileStore(fs, f'{tmp_path.name}/raw')
-    location = backing if remote else tmp_path / 'raw'
-    requests = []
+    store = MemoryStore()
     reads = []
-    fs_open = fs.open
+    original_slopes = build_copdem._slopes
 
-    def track_open(path: str, mode: str = 'rb', **kwargs):
-        if mode == 'rb':
-            reads.append(path)
-        return fs_open(path, mode, **kwargs)
+    def read(url: str, cells: int):
+        reads.append(url)
+        if 'E010_' in url:
+            return np.array([[10, 20], [30, 40]], np.float32)
+        if 'E011_' in url:
+            return None
+        if stage == 'tile':
+            msg = 'interrupted tile'
+            raise RuntimeError(msg)
+        return np.full((cells, cells), 50, np.float32)
 
-    monkeypatch.setattr(fs, 'open', track_open)
-
-    def get(url: str, **_kwargs):
-        requests.append(url)
-        return SimpleNamespace(status_code=200, is_success=True, content=content)
-
-    monkeypatch.setattr(build_copdem, '_session', lambda: nullcontext(SimpleNamespace(get=get)))
-    original_read = build_copdem._read_tile_block
-    processed = []
-    name = 'Copernicus_DSM_COG_30_N60_00_E010_00_DEM.tif'
-
-    def read(path: Path, cells: int):
-        processed.append(path)
-        if remote and len(processed) == 1:
-            assert not backing.child('copdem').exists(name)
-            assert reads == []
-        if not remote:
-            assert path == tmp_path / 'raw' / 'copdem' / name
-        return original_read(path, cells)
+    def interrupted_slopes(*_args):
+        msg = 'interrupted slopes'
+        raise RuntimeError(msg)
 
     monkeypatch.setattr(build_copdem, '_read_tile_block', read)
-    for attempt in range(2):
-        store = MemoryStore()
-        build_copdem.build_copdem((61, 10, 60, 11), 0.5, store, location)
-        with xr.open_zarr(store, chunks=None, consolidated=False) as result:
-            np.testing.assert_array_equal(result.elevation, [[10, 20], [30, 40]])
-        if remote:
-            assert backing.child('copdem').exists(name)
-            assert len(reads) == attempt
-    assert len(requests) == 1
-    assert len(processed) == 2
-
-
-def test_unreadable_tile_is_not_published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from contextlib import nullcontext
-
-    from fsspec.implementations.memory import MemoryFileSystem
-
-    from weatheasy.file_storage import FileStore
-
-    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
-    session = SimpleNamespace(
-        get=lambda *_args, **_kwargs: SimpleNamespace(
-            status_code=200,
-            is_success=True,
-            content=b'invalid TIFF',
-        )
+    if stage == 'slopes':
+        monkeypatch.setattr(build_copdem, '_slopes', interrupted_slopes)
+    with pytest.raises(RuntimeError, match='interrupted'):
+        build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
+    group = zarr.open_group(store)
+    np.testing.assert_array_equal(
+        group['tile_status'][:], [[0, 0, 0] if stage == 'tile' else [1, 2, 1]]
     )
-    monkeypatch.setattr(build_copdem, '_session', lambda: nullcontext(session))
-    with pytest.raises(rasterio.errors.RasterioIOError):
-        build_copdem.build_copdem((61, 10, 60, 11), 0.5, MemoryStore(), remote)
-    assert remote.child('copdem').glob('*.tif') == []
+    with pytest.raises(ValueError, match='incomplete'):
+        load_dem(store)
+    reads.clear()
+
+    def resume_read(url: str, cells: int):
+        reads.append(url)
+        if 'E010_' in url:
+            return np.array([[10, 20], [30, 40]], np.float32)
+        if 'E011_' in url:
+            return None
+        return np.full((cells, cells), 50, np.float32)
+
+    monkeypatch.setattr(build_copdem, '_read_tile_block', resume_read)
+    monkeypatch.setattr(build_copdem, '_slopes', original_slopes)
+    build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
+    assert len(reads) == (3 if stage == 'tile' else 0)
+    assert zarr.open_group(store).attrs['build_status'] == 'complete'
+    np.testing.assert_array_equal(group['tile_status'][:], [[1, 2, 1]])
+    np.testing.assert_array_equal(
+        load_dem(store)['elevation'], [[10, 20, 0, 0, 50, 50], [30, 40, 0, 0, 50, 50]]
+    )
+    reads.clear()
+    build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
+    assert reads == []
+    with pytest.raises(ValueError, match='parameters differ'):
+        build_copdem.build_copdem((61, 10, 60, 13), 0.25, store)
+
+
+@pytest.mark.parametrize(
+    ('error', 'missing'),
+    [
+        ('HTTP response code: 404', True),
+        ('HTTP response code: 403', False),
+        ('invalid TIFF', False),
+        ('tile404.tif: invalid TIFF', False),
+    ],
+)
+def test_remote_read_only_treats_404_as_missing(
+    monkeypatch: pytest.MonkeyPatch, error: str, *, missing: bool
+):
+    def fail(url: str):
+        assert url == '/vsicurl/https://example.com/tile.tif'
+        raise rasterio.errors.RasterioIOError(error)
+
+    monkeypatch.setattr(rasterio, 'open', fail)
+    if missing:
+        assert build_copdem._read_tile_block('https://example.com/tile.tif', 2) is None
+    else:
+        with pytest.raises(rasterio.errors.RasterioIOError, match=error):
+            build_copdem._read_tile_block('https://example.com/tile.tif', 2)
+
+
+@pytest.mark.parametrize('stage', ['initialization', 'elevation_write'])
+def test_resume_after_interrupted_store_write(monkeypatch: pytest.MonkeyPatch, stage: str):
+    import zarr
+
+    store = MemoryStore()
+    original_initialize = build_copdem._initialize_zarr
+    original_setitem = zarr.Array.__setitem__
+
+    def interrupted_initialize(*args):
+        original_initialize(*args)
+        msg = 'interrupted initialization'
+        raise RuntimeError(msg)
+
+    def interrupted_setitem(self, key, value):  # noqa: ANN001
+        original_setitem(self, key, value)
+        if self.name == '/elevation' and reads:
+            msg = 'interrupted elevation write'
+            raise RuntimeError(msg)
+
+    reads = []
+
+    def read(url: str, cells: int):
+        reads.append(url)
+        return np.full((cells, cells), 25, np.float32)
+
+    monkeypatch.setattr(build_copdem, '_read_tile_block', read)
+    if stage == 'initialization':
+        monkeypatch.setattr(build_copdem, '_initialize_zarr', interrupted_initialize)
+    else:
+        monkeypatch.setattr(zarr.Array, '__setitem__', interrupted_setitem)
+    with pytest.raises(RuntimeError, match='interrupted'):
+        build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
+    group = zarr.open_group(store)
+    np.testing.assert_array_equal(group['tile_status'][:], [[0]])
+    assert group.attrs['build_status'] != 'complete'
+    monkeypatch.setattr(build_copdem, '_initialize_zarr', original_initialize)
+    monkeypatch.setattr(zarr.Array, '__setitem__', original_setitem)
+    reads.clear()
+    build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
+    assert len(reads) == 1
+    np.testing.assert_array_equal(load_dem(store)['elevation'], [[25, 25], [25, 25]])
+
+
+def test_initialization_does_not_write_field_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import zarr
+
+    path = tmp_path / 'dem.zarr'
+    store = get_store(path)
+
+    def interrupted_read(_url: str, _cells: int):
+        msg = 'stop before first tile'
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(build_copdem, '_read_tile_block', interrupted_read)
+    with pytest.raises(RuntimeError, match='stop before first tile'):
+        build_copdem.build_copdem((62, 10, 60, 12), 0.5, store)
+    files = {str(file.relative_to(path)) for file in path.rglob('*') if file.is_file()}
+    for name in ('elevation', 'slope_we', 'slope_sn', 'tile_status'):
+        assert {file for file in files if file.startswith(f'{name}/')} == {f'{name}/zarr.json'}
+    assert any(file.startswith('latitude/c/') for file in files)
+    assert any(file.startswith('longitude/c/') for file in files)
+    group = zarr.open_group(store)
+    np.testing.assert_array_equal(group['tile_status'][:], np.zeros((2, 2), dtype=np.uint8))
+    assert np.isnan(group['elevation'][:]).all()
+    assert group.attrs['build_status'] == 'building'
+    with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
+        assert ds.rio.crs.to_epsg() == 4326
+        assert ds.rio.bounds() == (10, 60, 12, 62)
+
+
+def test_grouped_chunks_are_written_once_and_resumed_as_whole_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from io import StringIO
+
+    import zarr
+
+    monkeypatch.setattr(build_copdem, '_CHUNK_TILES', 2)
+    path = tmp_path / 'dem.zarr'
+    store = get_store(path)
+    reads = []
+    writes = []
+    original_setitem = zarr.Array.__setitem__
+    original_progress = build_copdem.tqdm
+    bars = []
+
+    def record_progress(**kwargs):
+        kwargs.update(disable=False, file=StringIO())
+        bar = original_progress(**kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(build_copdem, 'tqdm', record_progress)
+    interrupted = True
+
+    def read(url: str, cells: int):
+        reads.append(url)
+        if 'E012_' in url and interrupted:
+            msg = 'interrupted second chunk'
+            raise RuntimeError(msg)
+        values = {
+            'N60_00_E010': 10,
+            'N60_00_E011': None,
+            'N60_00_E012': 30,
+            'N61_00_E010': 40,
+            'N61_00_E011': 50,
+            'N61_00_E012': 60,
+        }
+        tile = url.rsplit('/', 1)[-1].removeprefix('Copernicus_DSM_COG_30_')
+        value = values[tile.removesuffix('_00_DEM.tif')]
+        return None if value is None else np.full((cells, cells), value, np.float32)
+
+    def track_write(self, key, value):  # noqa: ANN001
+        if self.name in ('/elevation', '/tile_status'):
+            writes.append((self.name, value.shape))
+        original_setitem(self, key, value)
+
+    monkeypatch.setattr(build_copdem, '_read_tile_block', read)
+    monkeypatch.setattr(zarr.Array, '__setitem__', track_write)
+    with pytest.raises(RuntimeError, match='interrupted second chunk'):
+        build_copdem.build_copdem((62, 10, 60, 13), 0.5, store)
+    group = zarr.open_group(store)
+    np.testing.assert_array_equal(group['tile_status'][:], [[1, 2, 0], [1, 1, 0]])
+    assert writes == [('/elevation', (4, 4)), ('/tile_status', (2, 2))]
+    assert [(bar.desc, bar.total, bar.n) for bar in bars] == [
+        ('Chunks', 2, 1),
+        ('Tiles', 4, 4),
+        ('Tiles', 2, 0),
+    ]
+    assert all(bar.disable for bar in bars)  # Context managers close bars on failure.
+    bars.clear()
+    interrupted = False
+    reads.clear()
+    writes.clear()
+    build_copdem.build_copdem((62, 10, 60, 13), 0.5, store)
+    assert [(bar.desc, bar.total, bar.initial, bar.n) for bar in bars] == [
+        ('Chunks', 2, 1, 2),
+        ('Tiles', 2, 0, 2),
+    ]
+    assert bars[1].postfix == 'Copernicus_DSM_COG_30_N61_00_E012_00_DEM'
+    assert len(reads) == 2
+    assert all('E012_' in url for url in reads)
+    assert writes == [('/elevation', (4, 2)), ('/tile_status', (2, 1))]
+    np.testing.assert_array_equal(
+        load_dem(store)['elevation'],
+        [
+            [10, 10, 0, 0, 30, 30],
+            [10, 10, 0, 0, 30, 30],
+            [40, 40, 50, 50, 60, 60],
+            [40, 40, 50, 50, 60, 60],
+        ],
+    )
+    assert len(list((path / 'elevation' / 'c').rglob('*/*'))) == 2
+    assert len(list((path / 'tile_status' / 'c').rglob('*/*'))) == 2

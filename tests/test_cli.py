@@ -256,37 +256,17 @@ def test_download_dispatches_prepared_store_and_local_workdir(
     assert calls == [(tmp_path / 'weather', str(tmp_path / 'downloads'))]
 
 
-@pytest.mark.parametrize('remote', [False, True])
-def test_dem_dispatches_spatial_store_and_tile_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    remote: bool,
-):
-    from fsspec.implementations.memory import MemoryFileSystem
+def test_dem_dispatches_spatial_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from zarr.storage import LocalStore
 
     from weatheasy import build_copdem
-    from weatheasy._cli import _storage, main
-    from weatheasy.file_storage import FileStore, get_file_store
+    from weatheasy._cli import main
 
-    fs = MemoryFileSystem()
-    uri = 's3://tiles/raw' if remote else str(tmp_path / 'tiles')
-
-    def files(location: str, *, filesystem=None):  # noqa: ANN001
-        assert filesystem is None or filesystem is fs
-        return (
-            FileStore(fs, location[5:])
-            if location.startswith('s3://')
-            else get_file_store(location)
-        )
-
-    monkeypatch.setattr(_storage, 'get_file_store', files)
     calls = []
 
-    def record(bbox, resolution, store, cache):  # noqa: ANN001
+    def record(bbox, resolution, store):  # noqa: ANN001
         assert isinstance(store, LocalStore)
-        calls.append((bbox, resolution, store.root, cache.root))
+        calls.append((bbox, resolution, store.root))
 
     monkeypatch.setattr(build_copdem, 'build_copdem', record)
     main(
@@ -301,19 +281,10 @@ def test_dem_dispatches_spatial_store_and_tile_cache(
             '0.2',
             '-o',
             str(tmp_path / 'dem.zarr'),
-            '--download-cache',
-            uri,
         ],
         configure_logging=False,
     )
-    assert calls == [
-        (
-            (56, 37, 55, 38),
-            0.2,
-            tmp_path / 'dem.zarr',
-            'tiles/raw' if remote else str(tmp_path / 'tiles'),
-        )
-    ]
+    assert calls == [((56, 37, 55, 38), 0.2, tmp_path / 'dem.zarr')]
 
 
 @pytest.mark.parametrize('source', ['cfs2', 'cmip6', 'era5'])

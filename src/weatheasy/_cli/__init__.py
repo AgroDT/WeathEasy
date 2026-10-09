@@ -106,11 +106,6 @@ def _add_dem(groups: _SubParsersAction[ArgumentParser]) -> None:
     )
     dem.add_argument('--resolution', type=float, default=0.1)
     dem.add_argument('-o', '--output', required=True, help='Zarr path or s3:// URI')
-    dem.add_argument(
-        '--download-cache',
-        default='copdem-cache',
-        help='cache for downloaded tiles, local path or s3:// URI',
-    )
 
 
 def _add_correction(groups: _SubParsersAction[ArgumentParser]) -> None:

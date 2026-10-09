@@ -116,6 +116,9 @@ def point_distances_km(target: NDArray, reference: NDArray) -> NDArray[np.float6
 def load_dem(store: Store) -> Dem:
     """Load terrain features from a prepared local or S3 Zarr store."""
     with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
+        if ds.attrs.get('build_status', 'complete') != 'complete':
+            msg = 'DEM build is incomplete; resume weatheasy dem before using it'
+            raise ValueError(msg)
         dem: Dem = {
             'lats': ds['latitude'].to_numpy().astype(np.float32),
             'lons': ds['longitude'].to_numpy().astype(np.float32),

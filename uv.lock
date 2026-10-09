@@ -1825,6 +1825,7 @@ dependencies = [
     { name = "numpy" },
     { name = "rasterio" },
     { name = "rioxarray" },
+    { name = "tqdm" },
     { name = "xarray" },
     { name = "zarr" },
 ]
@@ -1892,6 +1893,7 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 's3'", specifier = "~=2026.9" },
     { name = "scikit-learn", marker = "extra == 'correction'", specifier = ">=1.5,<2" },
     { name = "scipy", marker = "extra == 'emdna'", specifier = ">=1.14,<2" },
+    { name = "tqdm", specifier = ">=4.70,<5" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.54" },
     { name = "uvloop", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32' and extra == 'web'", specifier = ">=0.22.1" },
     { name = "xarray", specifier = ">=2025.6,<2027" },

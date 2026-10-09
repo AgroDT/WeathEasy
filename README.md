@@ -322,18 +322,38 @@ output path with `--output` (`-o`); both are required.
 ```sh
 weatheasy dem --bbox 56 37 55 38 -o ./copdem.zarr
 # Publish directly to S3 using the same command:
-weatheasy dem --bbox 56 37 55 38 -o s3://weatheasy/copdem.zarr \
-    --download-cache s3://weatheasy/downloads
+weatheasy dem --bbox 56 37 55 38 -o s3://weatheasy/copdem.zarr
 ```
 
-Downloaded source tiles use `--download-cache` (local path or S3 URI), in its
-`copdem/` subdirectory (default root: `copdem-cache`). New tiles are read locally
-before uploading to S3; local cache files are read directly. Tiles can be reused
-after an interrupted build. The published dataset contains `latitude`, `longitude`,
-`elevation` (metres), `slope_we` and `slope_sn` (m/m), with EPSG:4326 and CF metadata
-written through rioxarray. The output is replaced when the build runs again;
-coordinate writers and readers so that training or correction starts after it
-finishes. The dataset does not depend on the tile cache.
+Source COG tiles are read directly from their public HTTPS addresses using
+Rasterio/GDAL range requests; no local or S3 tile cache is created. The output
+contains `latitude`, `longitude`, `elevation` (metres), `slope_we` and `slope_sn`
+(m/m), with EPSG:4326 and CF metadata written through rioxarray.
+
+Repeat the same command to resume an interrupted build. Root attributes record
+`build_config` (bbox, resolution, source, algorithm version and tile block shape) and `build_status`
+(`initializing`, `building`, `computing_slopes`, `complete`). Different parameters
+or an existing output without build metadata are rejected; choose a new output
+path for a different build. Completed builds are left intact.
+
+The retained uint8 `tile_status` array records one value per 1 degree source tile:
+0 pending, 1 done, 2 missing (HTTP 404). Initialization writes only coordinates
+and metadata; elevation, slope and status chunks are created on demand. Unwritten
+fields read as NaN and unwritten statuses as 0. Tiles are assembled in memory into
+blocks of 32 x 32 source tiles, limited by the bbox. The output chunk shape is
+computed from the resolution: at 0.1 degrees a full block contains 320 x 320
+float32 cells (400 KiB before compression).
+Each elevation block is written once, followed by its tile statuses in one matching
+status chunk. An interrupted block is read again in full; no partial block progress
+or intermediate data group is kept. In an interactive terminal, nested tqdm bars
+show completed chunks and tiles in the current chunk, including the current tile
+name. Resumed builds count previously completed chunks immediately. Progress is
+written to stderr and disabled when stderr is not a terminal. Other HTTP/read failures interrupt the build.
+Missing tiles and nodata cells are filled with zero, as ocean/no coverage.
+Slopes are computed after all tiles finish and are recomputed if interrupted.
+Training and correction reject unfinished builds; older DEM datasets without a
+build status remain readable. Use only one writer per output; coordinate readers
+so they start after the build completes. This is not a concurrent-writer protocol.
 
 Both training and application read the same prepared DEM. Their `--dem` argument
 accepts a local Zarr path or S3 URI:
