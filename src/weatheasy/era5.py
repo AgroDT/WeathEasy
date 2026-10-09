@@ -98,29 +98,29 @@ def download_era5_data(
     store: Store,
     download_dir: str | Path | FileStore | None = None,
     *,
-    area: tuple[float, float, float, float] | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Append complete months through the last month with available midnight data.
 
-    area is (north, west, south, east), without antimeridian crossing. The CDS
+    bbox is (north, west, south, east), without antimeridian crossing. The CDS
     publication lag is five days; only whole months are requested. Run as an
     external job. No download is triggered by API or prepared-data reads.
     """
-    area = area or (90.0, -180.0, -90.0, 180.0)
-    north, west, south, east = area
-    if not np.isfinite(area).all() or not (
+    bbox = bbox or (90.0, -180.0, -90.0, 180.0)
+    north, west, south, east = bbox
+    if not np.isfinite(bbox).all() or not (
         -90 <= south < north <= 90 and -180 <= west < east <= 180
     ):
-        msg = 'Invalid ERA5 area (north, west, south, east)'
+        msg = 'Invalid ERA5 bbox (north, west, south, east)'
         raise StorageError(msg)
     if (
         group_exists(store, '')
-        and (stored_area := group_attrs(store, '').get('request_area')) is not None
-        and stored_area != list(area)
+        and (stored_bbox := group_attrs(store, '').get('request_bbox')) is not None
+        and stored_bbox != list(bbox)
     ):
-        msg = 'Existing ERA5 store has a different requested area'
+        msg = 'Existing ERA5 store has a different requested bbox'
         raise StorageError(msg)
-    set_group_attrs(store, '', request_area=list(area))
+    set_group_attrs(store, '', request_bbox=list(bbox))
     path = 'daily'
     previous = last_date(store, path)
     first = next_month(previous) if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
@@ -137,16 +137,16 @@ def download_era5_data(
         raise ImportError(msg) from err
     client = cdsapi.Client()
     with download_cache(download_dir, 'era5') as cache:
-        downloader = _Downloader(client, cache, area)
+        downloader = _Downloader(client, cache, bbox)
         while next_month(first) <= latest:
             following = next_month(first)
             main = downloader.retrieve(first, boundary=False)
             boundary = downloader.retrieve(following, boundary=True)
-            _validate_area(main, area)
+            _validate_bbox(main, bbox)
             ds = process_month(main, boundary, first)
             # write_batch checks exact normalized axes, CRS, fields and units
             # before changing any existing arrays, even for equal-sized regions.
-            ds.attrs['request_area'] = list(area)
+            ds.attrs['request_bbox'] = list(bbox)
             cache.publish(cache.root.glob('*.nc'))
             write_batch(store, path, ds)
             set_group_attrs(store, '', last_month=[first.year, first.month])
@@ -154,12 +154,12 @@ def download_era5_data(
 
 
 class _Downloader:
-    __slots__ = ('area', 'cache', 'client')
+    __slots__ = ('bbox', 'cache', 'client')
 
-    def __init__(self, client: Any, cache: DownloadCache | Path, area: tuple) -> None:
+    def __init__(self, client: Any, cache: DownloadCache | Path, bbox: tuple) -> None:
         self.client = client
         self.cache = DownloadCache(cache) if isinstance(cache, Path) else cache
-        self.area = area
+        self.bbox = bbox
 
     def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
         names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
@@ -203,7 +203,7 @@ class _Downloader:
             'month': f'{month.month:02d}',
             'day': day,
             'time': time_,
-            'area': list(self.area),
+            'area': list(self.bbox),
             'data_format': 'netcdf',
             'download_format': 'unarchived',
         }
@@ -359,18 +359,18 @@ def _reduce(spec: const.Era5Var, values: np.ndarray) -> np.ndarray:
     return spec.daily_stat(values, axis=1)
 
 
-def _validate_area(ds: xr.Dataset, area: tuple) -> None:
-    north, west, south, east = area
+def _validate_bbox(ds: xr.Dataset, bbox: tuple) -> None:
+    north, west, south, east = bbox
     for axis, lower, upper in [('latitude', south, north), ('longitude', west, east)]:
         values = ds[axis].to_numpy()
         if axis == 'longitude':
             values = (values - west) % 360 + west
-        # CDS rounds area limits to source cells. Global longitude omits the
+        # CDS rounds bbox limits to source cells. Global longitude omits the
         # duplicated east seam. Require coverage to within one source step.
         tolerance = const.ERA5_RESOLUTION + 1e-7
         if (
             abs(float(values.min()) - lower) > tolerance
             or abs(float(values.max()) - upper) > tolerance
         ):
-            msg = f'ERA5 {axis} does not match the requested area'
+            msg = f'ERA5 {axis} does not match the requested bbox'
             raise StorageError(msg)

@@ -47,6 +47,7 @@ def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path, cache:
                 'store': 's3://era/weather.zarr',
                 'update': {
                     'enabled': True,
+                    'bbox': [56, 37, 55, 38],
                     'envFrom': [{'secretRef': {'name': 'cds'}}],
                     'correction': {
                         'enabled': True,
@@ -76,6 +77,13 @@ def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path, cache:
                 assert args[args.index('--download-cache') + 1] == (
                     cache if cache is not None else '/var/lib/weatheasy/downloads'
                 )
+                if source == 'era5':
+                    index = args.index('--bbox')
+                    assert args[index + 1 : index + 5] == ['56', '37', '55', '38']
+                else:
+                    assert '--bbox' not in args
+            else:
+                assert '--bbox' not in args
             assert container.get('envFrom', []) == (
                 [{'secretRef': {'name': 'cds'}}] if source == 'era5' else []
             )

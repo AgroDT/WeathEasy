@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-RUSSIA_AREA = (82, 19, 41, 180)  # north, west, south, east
+RUSSIA_BBOX = (82, 19, 41, 180)  # north, west, south, east
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class Source:
     temp_var: str = 'TMP'
     precip_var: str = 'PRATE'
     precip_to_mm: float = 86400.0
-    crop_area: tuple[int, int, int, int] | None = None
+    crop_bbox: tuple[int, int, int, int] | None = None
 
     def path(self, root: zarr.Group) -> str:
         return '/'.join(filter(None, (root.path, self.group_path)))
@@ -68,9 +68,9 @@ class Source:
             )
 
     def _crop(self, dataset: xr.Dataset) -> xr.Dataset:
-        if self.crop_area is None:
+        if self.crop_bbox is None:
             return dataset
-        north, west, south, east = self.crop_area
+        north, west, south, east = self.crop_bbox
         return dataset.sel(latitude=slice(south, north), longitude=slice(west, east))
 
 
@@ -80,6 +80,6 @@ CFS2 = Source(
     'reanalysis/flx',
     'reanalysis/correction',
     precip_to_mm=21600.0,
-    crop_area=RUSSIA_AREA,
+    crop_bbox=RUSSIA_BBOX,
 )
 SOURCES: dict[str, Source] = {ERA5.name: ERA5, CFS2.name: CFS2}

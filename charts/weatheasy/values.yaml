@@ -185,7 +185,7 @@ sources:
       # Source-specific EnvVar entries, appended to global entries.
       extraEnv: []
       # Optional ERA5 bounding box [north, west, south, east].
-      area: []
+      bbox: []
       correction:
         # Apply correction after successful download.
         enabled: false

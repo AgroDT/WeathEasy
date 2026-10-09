@@ -87,7 +87,11 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         )
         if source == 'era5':
             sub.add_argument(
-                '--area', type=float, nargs=4, metavar=('NORTH', 'WEST', 'SOUTH', 'EAST')
+                '--bbox',
+                type=float,
+                nargs=4,
+                metavar=('NORTH', 'WEST', 'SOUTH', 'EAST'),
+                help='bounding box in decimal degrees EPSG:4326, without antimeridian crossing',
             )
 
 

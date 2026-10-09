@@ -569,7 +569,7 @@
                   "description": "Source-specific EnvVar entries, appended to global entries.",
                   "default": []
                 },
-                "area": {
+                "bbox": {
                   "type": "array",
                   "items": {
                     "type": "number"

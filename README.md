@@ -166,6 +166,13 @@ NetCDF for CMIP6 and ERA5). Local directories are used directly. With S3,
 new files are downloaded and processed locally before uploading; cached files
 are fetched only when needed.
 
+For ERA5, use `--bbox NORTH WEST SOUTH EAST` in decimal degrees EPSG:4326
+to limit the download region, without antimeridian crossing:
+
+```sh
+weatheasy download era5 --store ./era5.zarr --bbox 56 37 55 38
+```
+
 A full example for CFSv2:
 
 ```sh
@@ -267,7 +274,7 @@ and scheduled updates with durable data in S3.
 Each source uses its own Zarr v3 store. Within it, CFS2 has
 `reanalysis/{flx,pgb}`, `forecast/{flx,pgb}` and `reanalysis/correction`;
 ERA5 has `daily` and `correction`; CMIP6 has one group per variable.
-Source metadata such as CFS2’s `updated` and ERA5’s `request_area` live at the
+Source metadata such as CFS2’s `updated` and ERA5’s `request_bbox` live at the
 store root. Existing combined stores need their source groups moved into
 separate store roots; there is no automatic migration or legacy-layout fallback.
 

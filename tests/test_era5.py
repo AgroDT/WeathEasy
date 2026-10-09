@@ -172,12 +172,14 @@ def test_public_monthly_download_resume_getter_and_cli(
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
     cds_client.transform = lambda ds, _request, _call: ds.rename({'time': 'valid_time'})
     root = get_storage(str(tmp_path / 'store'))
-    area = (55.3, 37.1, 55.2, 37.3)
-    era5.download_era5_data(get_store(tmp_path / 'store'), tmp_path / 'cache', area=area)
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    era5.download_era5_data(get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 6
+    assert all(request['area'] == list(bbox) for request in cds_client.calls)
+    assert root[''].attrs['request_bbox'] == list(bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     root[''].attrs['last_month'] = [1999, 12]  # crash before convenience marker
-    era5.download_era5_data(root.store, tmp_path / 'cache', area=area)
+    era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 6
     assert root[''].attrs['last_month'] == [2000, 1]
     values = get_era5_data(
@@ -189,10 +191,11 @@ def test_public_monthly_download_resume_getter_and_cli(
     )
     np.testing.assert_allclose(values, [[5], [20]], atol=1e-5)
     before = dict(root[''].attrs)
-    with pytest.raises(StorageError, match='different requested area'):
-        era5.download_era5_data(get_store(tmp_path / 'store'), area=(55.3, 38.1, 55.2, 38.3))
+    with pytest.raises(StorageError, match='different requested bbox'):
+        era5.download_era5_data(get_store(tmp_path / 'store'), bbox=(55.3, 38.1, 55.2, 38.3))
     assert dict(root[''].attrs) == before
     with open_dataset(root.store, 'daily') as ds:
+        assert ds.attrs['request_bbox'] == list(bbox)
         assert ds.spatial_ref.attrs['semi_major_axis'] == 6367470
         assert ds.WIND.attrs['units'] == 'm/s'
     from weatheasy.__main__ import main
@@ -232,9 +235,9 @@ def test_failed_month_and_append_recover(
 
     cds_client.transform = corrupt_march
     root = get_storage(str(tmp_path / 'store'))
-    area = (55.3, 37.1, 55.2, 37.3)
+    bbox = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='timestamps'):
-        era5.download_era5_data(root.store, area=area)
+        era5.download_era5_data(root.store, bbox=bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     assert era5.available_period(root.store)[1] == date(2000, 1, 31)
     broken = False
@@ -247,25 +250,25 @@ def test_failed_month_and_append_recover(
 
     monkeypatch.setattr(xr.Dataset, 'to_zarr', fail_write)
     with pytest.raises(OSError, match='interrupted'):
-        era5.download_era5_data(root.store, area=area)
+        era5.download_era5_data(root.store, bbox=bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     monkeypatch.setattr(xr.Dataset, 'to_zarr', original)
-    era5.download_era5_data(root.store, area=area)
+    era5.download_era5_data(root.store, bbox=bbox)
     assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
     assert root['daily'].attrs['committed_length'] == 60
 
 
-def test_cache_includes_area(tmp_path: Path):
+def test_cache_includes_bbox(tmp_path: Path):
     client = FakeCDSClient()
-    for area in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
-        era5._Downloader(client, tmp_path, area).retrieve(date(2000, 1, 1), boundary=False)
+    for bbox in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
+        era5._Downloader(client, tmp_path, bbox).retrieve(date(2000, 1, 1), boundary=False)
     assert len(client.calls) == 6
     assert len(list(tmp_path.glob('*.nc'))) == 6
 
 
 def test_actual_axes_reject_different_region():
     with pytest.raises(StorageError, match='longitude'):
-        era5._validate_area(source(date(2000, 1, 1)), (55.3, 38.1, 55.2, 38.3))
+        era5._validate_bbox(source(date(2000, 1, 1)), (55.3, 38.1, 55.2, 38.3))
 
 
 def test_split_netcdf_response_preserves_explicit_crs(tmp_path: Path):
@@ -305,7 +308,7 @@ def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             'era5',
             '-d',
             str(tmp_path / 'store'),
-            '--area',
+            '--bbox',
             '55.3',
             '37.1',
             '55.2',
@@ -313,7 +316,7 @@ def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ],
     )
     main(configure_logging=False)
-    assert calls[0][1]['area'] == (55.3, 37.1, 55.2, 37.3)
+    assert calls[0][1]['bbox'] == (55.3, 37.1, 55.2, 37.3)
 
 
 def requested_source(month: date, request: Mapping):
@@ -340,14 +343,14 @@ def test_partial_request_missing_variable_never_publishes(
 
     cds_client.transform = drop_variable
     root = get_storage(str(tmp_path / 'store'))
-    area = (55.3, 37.1, 55.2, 37.3)
+    bbox = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='Missing ERA5'):
-        era5.download_era5_data(root.store, tmp_path / 'cache', area=area)
+        era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert 'last_month' not in root[''].attrs
     assert 'daily' not in root
     assert len(list((tmp_path / 'cache/era5').glob('*.nc'))) == 1
     broken = False
-    era5.download_era5_data(root.store, tmp_path / 'cache', area=area)
+    era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 7  # six successful parts; first reused from cache after failure
     readonly = zarr.open_group(str(tmp_path / 'store'), mode='r')
     result = get_era5_data(
@@ -371,11 +374,11 @@ def test_s3_monthly_cache_reused_by_fresh_preparation(
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
     fs = MemoryFileSystem()
     cache = FileStore(fs, f'{tmp_path.name}/raw')
-    area = (55.3, 37.1, 55.2, 37.3)
-    era5.download_era5_data(get_store(tmp_path / 'first'), cache, area=area)
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    era5.download_era5_data(get_store(tmp_path / 'first'), cache, bbox=bbox)
     assert len(cds_client.calls) == 6
     assert len(cache.child('era5').glob('*.nc')) == 6
-    era5.download_era5_data(get_store(tmp_path / 'second'), cache, area=area)
+    era5.download_era5_data(get_store(tmp_path / 'second'), cache, bbox=bbox)
     assert len(cds_client.calls) == 6
     with era5.open_dataset(get_store(tmp_path / 'second'), 'daily') as ds:
         assert ds.sizes['time'] == 31

@@ -145,11 +145,11 @@ print('stdout-still-open')
     assert result.stdout == f'DATE,{variable}\n2000-01-01,280.25\nstdout-still-open\n'
 
 
-def test_download_rejects_era5_area_for_other_sources():
+def test_download_rejects_era5_bbox_for_other_sources():
     from weatheasy._cli import main
 
     with pytest.raises(SystemExit) as failure:
-        main(['download', 'cmip6', '--area', '56', '37', '55', '38'])
+        main(['download', 'cmip6', '--bbox', '56', '37', '55', '38'])
     assert failure.value.code == 2
 
 

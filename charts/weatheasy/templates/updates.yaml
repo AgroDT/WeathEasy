@@ -23,9 +23,9 @@
     {{- else }}
     - --download-cache
     - {{ $root.Values.downloadCache | quote }}
-    {{- if and (eq .source "era5") $job.area }}
-    - --area
-    {{- range $job.area }}
+    {{- if and (eq .source "era5") $job.bbox }}
+    - --bbox
+    {{- range $job.bbox }}
     - {{ . | quote }}
     {{- end }}
     {{- end }}

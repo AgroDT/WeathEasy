@@ -41,7 +41,7 @@ sources:
       envFrom:
         - secretRef:
             name: weatheasy-cds
-      area: [56, 37, 55, 38]
+      bbox: [56, 37, 55, 38]
       resources:
         requests:
           cpu: "1"

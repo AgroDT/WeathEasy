@@ -252,7 +252,7 @@ remain extensible and are validated by Kubernetes.
 | `sources.era5.update.resources` | object | `{}` | Download container resource requests and limits. |
 | `sources.era5.update.envFrom` | array | `[]` | Source-specific Secret/ConfigMap references, appended to global entries. |
 | `sources.era5.update.extraEnv` | array | `[]` | Source-specific EnvVar entries, appended to global entries. |
-| `sources.era5.update.area` | array | `[]` | Optional ERA5 bounding box [north, west, south, east]. |
+| `sources.era5.update.bbox` | array | `[]` | Optional ERA5 bounding box [north, west, south, east]. |
 | `sources.era5.update.correction.enabled` | boolean | `false` | Apply correction after successful download. |
 | `sources.era5.update.correction.dem` | string | `""` | Published DEM Zarr URI; required when this update and correction are enabled. |
 | `sources.era5.update.correction.artifacts` | string | `""` | Published model artifact directory URI; required when this update and correction are enabled. |
