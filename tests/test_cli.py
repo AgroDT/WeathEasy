@@ -284,15 +284,15 @@ def test_dem_dispatches_spatial_store_and_tile_cache(
     monkeypatch.setattr(_storage, 'get_file_store', files)
     calls = []
 
-    def record(area, resolution, store, cache):  # noqa: ANN001
+    def record(bbox, resolution, store, cache):  # noqa: ANN001
         assert isinstance(store, LocalStore)
-        calls.append((area, resolution, store.root, cache.root))
+        calls.append((bbox, resolution, store.root, cache.root))
 
     monkeypatch.setattr(build_copdem, 'build_copdem', record)
     main(
         [
             'dem',
-            '--area',
+            '--bbox',
             '56',
             '37',
             '55',

@@ -9,10 +9,10 @@ This is a one-off build step (terrain is static); it is NOT part of the realtime
 download path.
 
 Example (full Russia, 0.1°):
-    weatheasy dem --area 82 19 41 180 -o copdem_russia_01deg.zarr
+    weatheasy dem --bbox 82 19 41 180 -o copdem_russia_01deg.zarr
 
 Smoke test (single tile near Moscow):
-    weatheasy dem --area 56 37 55 38 -o copdem_moscow.zarr
+    weatheasy dem --bbox 56 37 55 38 -o copdem_moscow.zarr
 """
 
 from __future__ import annotations
@@ -103,14 +103,14 @@ def _read_tile_block(path: Path, cells_per_degree: int) -> np.ndarray:
 
 
 def build_copdem(
-    area: tuple[int, int, int, int],
+    bbox: tuple[int, int, int, int],
     resolution: float,
     output: Store,
     cache: str | Path | FileStore | None = None,
 ) -> None:
-    north, west, south, east = area
+    north, west, south, east = bbox
     if not (south < north and west < east):
-        msg = f'Invalid --area {area}; expected N W S E with N>S and E>W'
+        msg = f'Invalid --bbox {bbox}; expected N W S E with N>S and E>W'
         raise ValueError(msg)
 
     cells_per_degree = round(1.0 / resolution)
@@ -144,7 +144,7 @@ def build_copdem(
             found += 1
 
     if found == 0:
-        msg = 'No tiles downloaded — check --area covers land within Copernicus DEM coverage'
+        msg = 'No tiles downloaded — check --bbox covers land within Copernicus DEM coverage'
         raise RuntimeError(msg)
 
     nan_cells = int(np.isnan(elev).sum())

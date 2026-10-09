@@ -316,11 +316,13 @@ atomic multi-object transaction on S3.
 ## Terrain for bias correction
 
 Build the static Copernicus DEM once and publish it as a spatial Zarr v3 dataset:
+Specify `--bbox NORTH WEST SOUTH EAST` in whole degrees EPSG:4326 and an explicit
+output path with `--output` (`-o`); both are required.
 
 ```sh
-weatheasy dem --area 56 37 55 38 -o ./copdem.zarr
+weatheasy dem --bbox 56 37 55 38 -o ./copdem.zarr
 # Publish directly to S3 using the same command:
-weatheasy dem --area 56 37 55 38 -o s3://weatheasy/copdem.zarr \
+weatheasy dem --bbox 56 37 55 38 -o s3://weatheasy/copdem.zarr \
     --download-cache s3://weatheasy/downloads
 ```
 

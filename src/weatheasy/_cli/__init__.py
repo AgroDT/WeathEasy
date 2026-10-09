@@ -97,12 +97,15 @@ def _add_dem(groups: _SubParsersAction[ArgumentParser]) -> None:
     )
     dem.set_defaults(handler='dem')
     dem.add_argument(
-        '--area', type=int, nargs=4, default=[82, 19, 41, 180], metavar=('N', 'W', 'S', 'E')
+        '--bbox',
+        type=int,
+        nargs=4,
+        required=True,
+        metavar=('NORTH', 'WEST', 'SOUTH', 'EAST'),
+        help='bounding box in whole degrees EPSG:4326, without antimeridian crossing',
     )
     dem.add_argument('--resolution', type=float, default=0.1)
-    dem.add_argument(
-        '-o', '--output', default='copdem_russia_01deg.zarr', help='Zarr path or s3:// URI'
-    )
+    dem.add_argument('-o', '--output', required=True, help='Zarr path or s3:// URI')
     dem.add_argument(
         '--download-cache',
         default='copdem-cache',
