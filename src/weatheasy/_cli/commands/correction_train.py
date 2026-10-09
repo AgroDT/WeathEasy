@@ -12,5 +12,10 @@ def run(args: Namespace) -> None:
     dem = storage.store(args.dem)
     artifacts = storage.files(args.artifacts)
     source = SOURCES[args.source]
-    stations = read_stations(storage.files(args.stations))
+    columns = ['station_id', 'lat', 'lon', 'date']
+    if args.only in (None, 'temp'):
+        columns.append('temperature')
+    if args.only in (None, 'precip'):
+        columns.append('precipitation')
+    stations = read_stations(storage.files(args.stations), columns=columns)
     training.build_artifacts(source, weather, stations, dem, artifacts, only=args.only)

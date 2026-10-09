@@ -1,4 +1,4 @@
-"""File inputs at the EMDNA command boundary."""
+"""File inputs at the correction and EMDNA command boundaries."""
 
 from __future__ import annotations
 
@@ -25,9 +25,10 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 
-def read_stations(station_file: FileStore) -> pd.DataFrame:
+def read_stations(station_file: FileStore, *, columns: list[str] | None = None) -> pd.DataFrame:
+    """Read station Parquet with optional column projection."""
     with station_file.open() as stream:
-        return pd.read_csv(stream)
+        return pd.read_parquet(stream, engine='pyarrow', columns=columns)
 
 
 @contextmanager

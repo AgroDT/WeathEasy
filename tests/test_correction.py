@@ -536,7 +536,7 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
     root, first = raw_store(tmp_path)
     dem_path = tmp_path / 'dem.zarr'
     dem_store(dem_path, *ERA5.grid(root))
-    stations = tmp_path / 'stations.csv'
+    stations = tmp_path / 'stations.parquet'
     rows = [
         (
             station,
@@ -552,7 +552,7 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
     pd.DataFrame(
         rows,
         columns=['station_id', 'lat', 'lon', 'date', 'temperature', 'precipitation'],
-    ).to_csv(stations, index=False)
+    ).to_parquet(stations, index=False, compression='zstd')
     monkeypatch.setitem(training._XGB_PARAMS, 'n_estimators', 8)
     common = [
         'era5',

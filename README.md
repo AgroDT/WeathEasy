@@ -340,7 +340,7 @@ accepts a local Zarr path or S3 URI:
 
 ```sh
 weatheasy correction train era5 --store s3://weatheasy/era5.zarr \
-    --stations ./stations.csv --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
+    --stations ./stations.parquet --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
 weatheasy correction apply era5 --store s3://weatheasy/era5.zarr \
     --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
 ```
@@ -350,11 +350,15 @@ NumPy and manifest files under `<source>/temp` and `<source>/precip`. Applicatio
 reads these files directly through a filesystem; a downloaded local model bundle
 is unnecessary. Manifests are published after all files and validate their hashes
 before correction starts. Coordinate retraining and application to avoid reading
-a model while its files are being replaced. The station CSV also accepts a local
-path or S3 URI.
+a model while its files are being replaced. Station Parquet files accept local
+paths or S3 URIs.
 
 Library training receives station observations as a `pandas.DataFrame`; reading
-the CSV belongs to the CLI. Create a prepared `FileStore` with
+the Parquet file belongs to the CLI. Training CLI inputs require `station_id`,
+`lat`, `lon`, `date`, and `temperature` (°C) / `precipitation` (mm/day), according
+to `--only`; only these columns are loaded. Calendar columns `year`/`month`/`day`
+are supported by the library API, but the training CLI requires `date`.
+Create a prepared `FileStore` with
 `weatheasy.file_storage.get_file_store` for model artifacts and pass it to training
 or correction.
 The correction CLI shares one synchronous S3 filesystem with an asynchronous
@@ -445,22 +449,22 @@ export AWS_SECRET_ACCESS_KEY=minioadmin
 Install `weatheasy[emdna]` and run either processor independently:
 
 ```sh
-weatheasy emdna temperature stations.csv -o temperature-results
-weatheasy emdna precipitation stations.csv -o precipitation-results
+weatheasy emdna temperature stations.parquet -o temperature-results
+weatheasy emdna precipitation stations.parquet -o precipitation-results
 ```
 
-Station CSV, ERA5 input directory, and output directory accept local paths or
+Station Parquet, ERA5 input directory, and output directory accept local paths or
 `s3://` URIs. S3 locations share one filesystem client within the command. For example:
 
 ```sh
-weatheasy emdna temperature s3://weatheasy/stations.csv \
+weatheasy emdna temperature s3://weatheasy/stations.parquet \
     -o s3://weatheasy/emdna-temperature --era5 s3://weatheasy/era5-daily
 ```
 
 Library processors receive station observations as a `pandas.DataFrame`, optional
 ERA5 data as an `xarray.Dataset`, and a prepared `FileStore` for the output directory.
 Observations accept `date` or the `year`/`month`/`day` columns; inputs remain owned
-by the caller. The CLI reads CSV and processes one ERA5 month at a time.
+by the caller. The CLI reads Parquet and processes one ERA5 month at a time.
 Remote NetCDF inputs are staged on the job's local temporary disk for reading;
 each monthly file is reused across its dates and removed when the month finishes.
 

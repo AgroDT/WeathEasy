@@ -1,4 +1,4 @@
-"""Small offline EMDNA sequences with real CSV, daily NetCDF, and NPZ files."""
+"""Small offline EMDNA sequences with real Parquet, daily NetCDF, and NPZ files."""
 
 import copy
 from datetime import date
@@ -42,14 +42,14 @@ def stations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                     'precipitation': day + sid,
                 }
             )
-    path = tmp_path / 'stations.csv'
-    pd.DataFrame(rows).to_csv(path, index=False)
+    path = tmp_path / 'stations.parquet'
+    pd.DataFrame(rows).to_parquet(path, index=False)
     return path
 
 
 def processor(kind: type[EMDNABase], stations: Path, output: Path, **kwargs):
     return kind(
-        pd.read_csv(stations),
+        pd.read_parquet(stations),
         get_file_store(output),
         min_stations=3,
         max_stations=4,
@@ -136,10 +136,10 @@ def test_resume_matches_uninterrupted_and_new_dates(
             for key in ('ensemble', 'scrf_state', 'rng_state'):
                 np.testing.assert_array_equal(actual[key], expected[key])
     # A new CSV date is discovered automatically on the next invocation.
-    frame = pd.read_csv(stations)
+    frame = pd.read_parquet(stations)
     extra = frame[frame.day == 3].copy()
     extra['day'] = 4
-    pd.concat([frame, extra]).to_csv(stations, index=False)
+    pd.concat([frame, extra]).to_parquet(stations, index=False)
     newer = processor(kind, stations, tmp_path / 'resume')
     assert len(newer.process_period()) == 1
     assert (tmp_path / 'resume' / f'emdna_{prefix}_20260104.npz').exists()
@@ -300,9 +300,9 @@ def test_precipitation_cross_state_survives_restart(stations: Path, tmp_path: Pa
 
 
 def test_insufficient_day_does_not_advance_progress(stations: Path, tmp_path: Path):
-    frame = pd.read_csv(stations)
+    frame = pd.read_parquet(stations)
     frame = frame[~((frame.day == 2) & (frame.station_id > 0))]
-    frame.to_csv(stations, index=False)
+    frame.to_parquet(stations, index=False)
     model = processor(TemperatureProcessor, stations, tmp_path / 'out')
     assert [result['status'] for result in model.process_period()] == [
         'success',
@@ -316,7 +316,7 @@ def test_resume_rejects_different_ensemble(stations: Path, tmp_path: Path):
     model = processor(TemperatureProcessor, stations, tmp_path / 'out')
     model.process_period(end=date(2026, 1, 1))
     incompatible = TemperatureProcessor(
-        pd.read_csv(stations),
+        pd.read_parquet(stations),
         get_file_store(tmp_path / 'out'),
         min_stations=3,
         max_stations=4,
@@ -339,8 +339,8 @@ def test_remote_inputs_restart_and_failed_publish(
     fs = MemoryFileSystem()
     inputs = FileStore(fs, f'/emdna-{prefix}-inputs')
     output = FileStore(fs, f'/emdna-{prefix}-results')
-    with inputs.open('stations.csv', 'wb') as stream:
-        stream.write(stations.read_bytes())
+    with inputs.open('stations.parquet', 'wb') as stream:
+        pd.read_parquet(stations).to_parquet(stream, index=False, compression='zstd')
     local = processor(kind, stations, tmp_path / 'full')
     daily_netcdf(tmp_path / '202601_daily.nc', local, '2026-01-01')
     with inputs.open('202601_daily.nc', 'wb') as stream:
@@ -351,7 +351,7 @@ def test_remote_inputs_restart_and_failed_publish(
 
     def remote_processor():
         return kind(
-            read_stations(inputs.child('stations.csv')),
+            read_stations(inputs.child('stations.parquet')),
             output,
             min_stations=3,
             max_stations=4,
@@ -405,8 +405,8 @@ def test_cli_preserves_s3_uris_and_shares_filesystem(monkeypatch: pytest.MonkeyP
     fs = MemoryFileSystem()
     resolutions = []
     captured = {}
-    with fs.open('bucket/stations.csv', 'wb') as stream:
-        stream.write(b'date\n2026-01-01\n')
+    with fs.open('bucket/stations.parquet', 'wb') as stream:
+        pd.DataFrame({'date': ['2026-01-01']}).to_parquet(stream, index=False)
 
     def resolve(uri: str, *, filesystem: AbstractFileSystem | None = None):
         resolutions.append((uri, filesystem))
@@ -434,7 +434,7 @@ def test_cli_preserves_s3_uris_and_shares_filesystem(monkeypatch: pytest.MonkeyP
             'weatheasy',
             'emdna',
             'temperature',
-            's3://bucket/stations.csv',
+            's3://bucket/stations.parquet',
             '-o',
             's3://bucket/results',
             '--era5',
@@ -443,8 +443,8 @@ def test_cli_preserves_s3_uris_and_shares_filesystem(monkeypatch: pytest.MonkeyP
     )
     cli.main(configure_logging=False)
     assert resolutions == [
-        ('s3://bucket/stations.csv', None),
-        ('s3://bucket/stations.csv', fs),
+        ('s3://bucket/stations.parquet', None),
+        ('s3://bucket/stations.parquet', fs),
         ('s3://bucket/results', fs),
         ('s3://bucket/era5', fs),
     ]
@@ -460,7 +460,7 @@ def test_in_memory_inputs_are_not_mutated_or_read_from_files(
     monkeypatch: pytest.MonkeyPatch,
     kind: type[EMDNABase],
 ):
-    observations = pd.read_csv(stations)
+    observations = pd.read_parquet(stations)
     observations['date'] = pd.to_datetime(observations[['year', 'month', 'day']])
     observations = observations.drop(columns=['year', 'month', 'day'])
     expected = observations.copy(deep=True)
@@ -471,7 +471,7 @@ def test_in_memory_inputs_are_not_mutated_or_read_from_files(
     def unexpected_read(*_args, **_kwargs):
         pytest.fail('Library processing must use the prepared in-memory inputs')
 
-    monkeypatch.setattr(pd, 'read_csv', unexpected_read)
+    monkeypatch.setattr(pd, 'read_parquet', unexpected_read)
     monkeypatch.setattr(xr, 'open_dataset', unexpected_read)
     model = kind(
         observations,
@@ -491,12 +491,12 @@ def test_cli_monthly_batches_stop_after_failure_and_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    frame = pd.read_csv(stations)
+    frame = pd.read_parquet(stations)
     february = frame[frame.day == 1].copy()
     february['month'] = 2
     frame = pd.concat([frame, february], ignore_index=True)
     frame = frame[~((frame.month == 1) & (frame.day == 2) & (frame.station_id > 0))]
-    frame.to_csv(stations, index=False)
+    frame.to_parquet(stations, index=False)
     monkeypatch.setattr(
         'sys.argv',
         [
@@ -518,12 +518,12 @@ def test_cli_monthly_batches_stop_after_failure_and_restart(
         cli.main(configure_logging=False)
     assert failure.value.code == 1
     assert not (tmp_path / 'out' / 'emdna_temp_20260201.npz').exists()
-    complete = pd.read_csv(stations)
+    complete = pd.read_parquet(stations)
     missing = complete[
         (complete.month == 1) & (complete.day == 1) & (complete.station_id > 0)
     ].copy()
     missing['day'] = 2
-    pd.concat([complete, missing]).to_csv(stations, index=False)
+    pd.concat([complete, missing]).to_parquet(stations, index=False)
     cli.main(configure_logging=False)
     assert (tmp_path / 'out' / 'emdna_temp_20260201.npz').exists()
 
@@ -533,7 +533,7 @@ def test_monthly_file_adapter_uses_each_dataset_and_closes_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    observations = pd.read_csv(stations)
+    observations = pd.read_parquet(stations)
     january = observations[observations.day == 1].copy()
     february = observations[observations.day <= 2].copy()
     february['month'] = 2

@@ -124,7 +124,7 @@ def _add_correction(groups: _SubParsersAction[ArgumentParser]) -> None:
         sub.add_argument('--dem', required=True, help='DEM Zarr path or s3:// URI')
         sub.add_argument('--artifacts', default='artifacts', help='model directory or s3:// URI')
         if action == 'train':
-            sub.add_argument('--stations', required=True, help='station CSV path or s3:// URI')
+            sub.add_argument('--stations', required=True, help='station Parquet path or s3:// URI')
             sub.add_argument('--only', choices=('temp', 'precip'))
         else:
             sub.add_argument('--begin', type=date.fromisoformat)
@@ -137,7 +137,7 @@ def _add_emdna(groups: _SubParsersAction[ArgumentParser]) -> None:
     for kind in ('temperature', 'precipitation'):
         sub = kinds.add_parser(kind, formatter_class=ArgumentDefaultsHelpFormatter)
         sub.set_defaults(handler='emdna')
-        sub.add_argument('stations', help='station CSV path or s3:// URI')
+        sub.add_argument('stations', help='station Parquet path or s3:// URI')
         sub.add_argument('begin', nargs='?', type=date.fromisoformat)
         sub.add_argument('end', nargs='?', type=date.fromisoformat)
         sub.add_argument(

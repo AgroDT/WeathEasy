@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 import rasterio
 import xarray as xr
@@ -110,16 +111,37 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
 
     def open_station_file(self: FileStore, name: str = '', mode: str = 'rb') -> BytesIO:
         assert self.fs is shared_filesystem
-        assert self.root == 'observations/stations.csv'
+        assert self.root == 'observations/stations.parquet'
         assert name == ''
         assert mode == 'rb'
-        return BytesIO(b'station_id,lat,lon,date,temperature\n1,55,37,2026-01-01,8\n')
+        stream = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    'station_id': 1,
+                    'lat': 55,
+                    'lon': 37,
+                    'date': '2026-01-01',
+                    'temperature': 8,
+                    'precipitation': 3,
+                }
+            ]
+        ).to_parquet(stream, index=False)
+        stream.seek(0)
+        return stream
 
     monkeypatch.setattr(FileStore, 'open', open_station_file)
 
     def build_artifacts(source, root, stations, terrain, artifacts, *, only):  # noqa: ANN001, ARG001
         assert stations.to_dict('records') == [
-            {'station_id': 1, 'lat': 55, 'lon': 37, 'date': '2026-01-01', 'temperature': 8}
+            {
+                'station_id': 1,
+                'lat': 55,
+                'lon': 37,
+                'date': '2026-01-01',
+                'temperature': 8,
+                'precipitation': 3,
+            }
         ]
         received.append((root, terrain, artifacts))
 
@@ -141,7 +163,7 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(
         's3://models/correction',
     ]
     if action == 'train':
-        arguments.extend(['--stations', 's3://observations/stations.csv'])
+        arguments.extend(['--stations', 's3://observations/stations.parquet'])
     cli.main(arguments)
     assert len(received) == 1
     root, terrain, artifacts = received[0]
