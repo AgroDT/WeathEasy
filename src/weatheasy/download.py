@@ -35,54 +35,111 @@ if TYPE_CHECKING:
     from weatheasy.file_storage import FileStore
 
 
-def download_cfs2_data(store: Store, download_dir: str | Path | FileStore | None = None) -> None:
+def download_cfs2_data(
+    store: Store,
+    download_dir: str | Path | FileStore | None = None,
+    *,
+    work_dir: str | Path | None = None,
+    work_max_age_days: int = 7,
+) -> None:
     set_group_attrs(store, '')
     today = utc_now().date()
-
-    if updated := group_attrs(store, '').get(const.CFS2_KEY_UPDATED):
-        time_since_updated = today - date.fromisoformat(str(updated))
-        if time_since_updated < const.ONE_DAY:
-            _LOG.info('No forecast update required')
-            return
-
+    updated = group_attrs(store, '').get(const.CFS2_KEY_UPDATED)
+    pending = not updated or today - date.fromisoformat(str(updated)) >= const.ONE_DAY
     yesterday = today - const.ONE_DAY
     forecast_begin = today - const.CFS2_REANALYSIS_LAST_DATE_OFFSET
     forecast_end = yesterday + const.CFS2_FORECAST_DAYS
 
     with ExitStack() as stack:
-        session = stack.enter_context(_session())
-        reanalysis = stack.enter_context(download_cache(download_dir, const.CFS2_REANALYSIS_DIR))
-        forecast = stack.enter_context(
-            download_cache(download_dir, const.CFS2_FORECAST_DIR, today.isoformat())
+        reanalysis = stack.enter_context(
+            download_cache(
+                download_dir, const.CFS2_REANALYSIS_DIR, work_dir=work_dir, target=str(store)
+            )
         )
+        forecast_cache = stack.enter_context(
+            download_cache(
+                download_dir, const.CFS2_FORECAST_DIR, work_dir=work_dir, target=str(store)
+            )
+        )
+        previous = [last_date(store, f'reanalysis/{kind}') for kind in ('flx', 'pgb')]
+        first = min(
+            value + const.ONE_DAY if value else const.CFS2_REANALYSIS_FIRST_DATE
+            for value in previous
+        )
+
+        def needed_reanalysis(name: str) -> bool:
+            try:
+                day = date.fromisoformat(name.rsplit('/', 1)[-1].split('.', maxsplit=1)[0])
+            except ValueError:
+                return False
+            return pending and first <= day < forecast_begin
+
+        reanalysis.cleanup(needed_reanalysis, max_age_days=work_max_age_days)
+        forecast_names = (
+            {
+                f'{today.isoformat()}/{kind}{day}{hour}.grb2'
+                for kind, day, hour in product(
+                    ('flx', 'pgb'),
+                    _cfs2_forecast_dates(forecast_begin, forecast_end),
+                    const.CFS2_HHS,
+                )
+            }
+            if pending
+            else set()
+        )
+        forecast_cache.cleanup(forecast_names.__contains__, max_age_days=work_max_age_days)
+        if not pending:
+            _LOG.info('No forecast update required')
+            return
+        forecast = forecast_cache.child(today.isoformat())
+        session = stack.enter_context(_session())
         _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis)
         _download_cfs2_forecast(forecast_begin, yesterday, session, forecast)
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast)
         _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast.root)
         set_group_attrs(store, '', updated=today.isoformat())
+        forecast.release(forecast.root.glob('*.grb2'))
 
 
-def download_cmip6_data(store: Store, download_dir: str | Path | FileStore | None = None) -> None:
+def download_cmip6_data(
+    store: Store,
+    download_dir: str | Path | FileStore | None = None,
+    *,
+    work_dir: str | Path | None = None,
+    work_max_age_days: int = 7,
+) -> None:
     set_group_attrs(store, '')
-    with _session() as session, download_cache(download_dir, const.CMIP6_DIR) as cache:
+    with download_cache(
+        download_dir, const.CMIP6_DIR, work_dir=work_dir, target=str(store)
+    ) as cache:
+        first_years = {}
         for var in const.CMIP6_VARS:
-            path = var
-            previous = last_date(store, path)
-            first_year = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
-            for year in range(first_year, const.CMIP6_LAST_YEAR + 1):
-                source = _load_cmip6_dataset(cache, var, year, session)
-                dataset = read_netcdf(source, variables=[var], crs='EPSG:4326')
-                # Daily CMIP6 timestamps may label the interval at noon. Store
-                # calendar days, matching the public date-based query contract.
-                dataset = dataset.assign_coords(
-                    time=xr.DataArray(
-                        dataset.time.to_numpy().astype('datetime64[D]').astype('datetime64[ns]'),
-                        dims='time',
-                        attrs=dataset.time.attrs,
+            previous = last_date(store, var)
+            first_years[var] = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
+        needed = {
+            f'{var}_{year}.nc'
+            for var, first in first_years.items()
+            for year in range(first, const.CMIP6_LAST_YEAR + 1)
+        }
+        cache.cleanup(needed.__contains__, max_age_days=work_max_age_days)
+        with _session() as session:
+            for var, first in first_years.items():
+                for year in range(first, const.CMIP6_LAST_YEAR + 1):
+                    source = _load_cmip6_dataset(cache, var, year, session)
+                    dataset = read_netcdf(source, variables=[var], crs='EPSG:4326')
+                    # Normalize provider noon labels to calendar days.
+                    dataset = dataset.assign_coords(
+                        time=xr.DataArray(
+                            dataset.time.to_numpy()
+                            .astype('datetime64[D]')
+                            .astype('datetime64[ns]'),
+                            dims='time',
+                            attrs=dataset.time.attrs,
+                        )
                     )
-                )
-                _LOG.info('Saving %s/%s', path, year)
-                write_batch(store, path, dataset)
+                    _LOG.info('Saving %s/%s', var, year)
+                    write_batch(store, var, dataset)
+                    cache.release([source])
 
 
 _MODULE_NAME = 'weatheasy.download'
@@ -118,6 +175,7 @@ def _download_cfs2_reanalysis(
                 write_batch(store, path, daily)
         else:
             _LOG.warning('%s was not found on the server', date_)
+        download_dir.release(paths or [])
         date_ += const.ONE_DAY
 
 
@@ -232,8 +290,8 @@ class _Cfs2ReanalysisDownloader:
                     msg = f'Failed to download {url}'
                     raise RuntimeError(msg)
                 _LOG.info('Writing %s', path)
-                path.write_bytes(response.content)
-                self._download_dir.publish([path])
+                self._download_dir.write(path, response.content)
+            self._download_dir.publish([path])
             paths.append(path)
         return paths
 
@@ -261,6 +319,7 @@ class _Cfs2ForecastDownloader:
                 _CFS2_DOWNLOADED_FILENAME_TEMPLATE.format(kind, date_str, hhs)
             )
             if path.is_file():
+                self._download_dir.publish([path])
                 _LOG.info('Skipping already downloaded %s', path)
                 continue
             elapsed = time.time() - self._last_call
@@ -276,7 +335,7 @@ class _Cfs2ForecastDownloader:
                     _LOG.critical('Exceeded overrate limit for nomads.ncep.noaa.gov')
                     sys.exit(1)
                 _LOG.info('Writing %s', path)
-                path.write_bytes(response.content)
+                self._download_dir.write(path, response.content)
                 self._download_dir.publish([path])
             else:
                 _LOG.critical('Failed to download %s', response.url)
@@ -292,6 +351,7 @@ def _load_cmip6_dataset(cache: DownloadCache, var: str, year: int, session: Clie
     filename = f'{var}_{year}.nc'
     path = cache.file(filename)
     if path.is_file():
+        cache.publish([path])
         _LOG.info('Reading %s', path)
         return path
 
@@ -306,6 +366,6 @@ def _load_cmip6_dataset(cache: DownloadCache, var: str, year: int, session: Clie
         _LOG.critical('Failed to download %s', url)
         sys.exit(1)
     _LOG.info('Writing %s', path)
-    path.write_bytes(response.content)
+    cache.write(path, response.content)
     cache.publish([path])
     return path

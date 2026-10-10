@@ -85,6 +85,17 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         sub.add_argument(
             '--download-cache', help='cache for downloaded files, local path or s3:// URI'
         )
+        sub.add_argument(
+            '--work-dir',
+            type=Path,
+            help='local directory for remote cache files; unset uses the platform state directory',
+        )
+        sub.add_argument(
+            '--work-max-age-days',
+            type=int,
+            default=7,
+            help='retention of unneeded working files in days; needed files are always retained',
+        )
         if source == 'era5':
             sub.add_argument(
                 '--max-pending-requests',

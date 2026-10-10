@@ -165,7 +165,24 @@ Optionally you can provide a local path or `s3://<bucket>/<prefix>` to
 GRIB for ERA5-Land, and NetCDF for CMIP6). Local directories are used directly. With S3,
 new files are downloaded locally and uploaded to the cache before processing,
 so a processing failure does not require downloading from the source again.
-Cached files are fetched only when needed.
+Cached files are fetched only when needed. Remote-cache working copies remain on
+local disk across failed runs and are removed after their prepared results commit.
+Use `--work-dir` to choose this directory. Defaults are
+`$XDG_STATE_HOME/weatheasy/downloads` (otherwise `~/.local/state/weatheasy/downloads`)
+on Linux, `%LOCALAPPDATA%\weatheasy\downloads` (otherwise
+`~\AppData\Local\weatheasy\downloads`) on Windows, and
+`~/Library/Application Support/weatheasy/downloads` on macOS.
+Before each run, the loader checks which files are still needed from the committed
+results and current request parameters. Only unneeded files older than
+`--work-max-age-days` (default: 7) are removed; needed files are retained regardless
+of age. Abandoned `.part` downloads are discarded and fetched again. Local
+`--download-cache` directories require no second cache and are never cleaned by
+this working-copy policy. Working files are grouped by source, remote cache and
+prepared-result store; each group contains a `.weatheasy-cache.json` identifying its settings without
+credentials. Changing the remote cache or result store creates a separate group;
+retired groups can be removed explicitly after abandoning the corresponding job.
+Run only one job per source at a time; remote cache keys are assumed to contain
+immutable downloads.
 
 For ERA5, use `--bbox NORTH WEST SOUTH EAST` in decimal degrees EPSG:4326
 to limit the download region, without antimeridian crossing:

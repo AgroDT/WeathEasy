@@ -10,6 +10,8 @@ def run(args: Namespace) -> None:
     era5.download_era5_data(
         storage.store(args.store),
         cache,
+        work_dir=args.work_dir,
+        work_max_age_days=args.work_max_age_days,
         bbox=tuple(args.bbox) if args.bbox else None,
         max_pending_requests=args.max_pending_requests,
     )

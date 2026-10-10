@@ -23,6 +23,8 @@
     {{- else }}
     - --download-cache
     - {{ $root.Values.downloadCache | quote }}
+    - --work-dir
+    - /var/lib/weatheasy
     {{- if and (eq .source "era5") $job.bbox }}
     - --bbox
     {{- range $job.bbox }}

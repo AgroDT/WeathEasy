@@ -101,6 +101,8 @@ def download_era5_data(
     store: Store,
     download_dir: str | Path | FileStore | None = None,
     *,
+    work_dir: str | Path | None = None,
+    work_max_age_days: int = 7,
     bbox: tuple[float, float, float, float] | None = None,
     max_pending_requests: int = 3,
 ) -> None:
@@ -137,27 +139,32 @@ def download_era5_data(
         if group_attrs(store, '').get('last_month') != marker:
             # Recover a crash after committing daily data but before journal cleanup.
             set_group_attrs(store, '', last_month=marker)
-    if next_month(first) > latest:
-        set_group_attrs(store, '', era5_requests={})
-        return
-    try:
-        # The CDS client is optional and needed only for a pending download.
-        import cdsapi  # noqa: PLC0415
-    except ImportError as err:
-        msg = 'ERA5 preparation requires weatheasy[prepare]'
-        raise ImportError(msg) from err
-    # Keep cdsapi configuration/logging while using its DSS backend's job API.
-    client = cast('Any', cdsapi.Client(wait_until_complete=False)).client
-    with download_cache(download_dir, 'era5') as cache:
-        downloader = _Downloader(client, cache, bbox, store, max_pending_requests)
+    with download_cache(download_dir, 'era5', work_dir=work_dir, target=str(store)) as cache:
+        downloader = _Downloader(None, cache, bbox, store, max_pending_requests)
+        downloader.cleanup(first, latest, max_age_days=work_max_age_days)
+        if next_month(first) > latest:
+            set_group_attrs(store, '', era5_requests={})
+            return
+        try:
+            # The CDS client is optional and needed only for a pending download.
+            import cdsapi  # noqa: PLC0415
+        except ImportError as err:
+            msg = 'ERA5 preparation requires weatheasy[prepare]'
+            raise ImportError(msg) from err
+        # Keep cdsapi configuration/logging while using its DSS backend's job API.
+        downloader.client = cast('Any', cdsapi.Client(wait_until_complete=False)).client
         while next_month(first) <= latest:
             following = next_month(first)
             started = time.monotonic()
             downloader.plan(first, latest)
             LOGGER.info('Preparing ERA5-Land %s', first.strftime('%Y-%m'))
             main, boundary = downloader.retrieve_month(first)
-            _validate_boundary(main, boundary)
-            write_batches(store, path, _daily_batches(main, boundary, first, bbox))
+            try:
+                _validate_boundary(main, boundary)
+                write_batches(store, path, _daily_batches(main, boundary, first, bbox))
+            finally:
+                main.close()
+                boundary.close()
             downloader.commit(first)
             LOGGER.info('Prepared ERA5-Land %s in %.1f s', first, time.monotonic() - started)
             first = following
@@ -228,6 +235,19 @@ class _Downloader:
             for offset in range(0, len(variables), 8)
         ]
 
+    def cleanup(self, first: date, latest: date, *, max_age_days: int) -> None:
+        """Protect every pending month and its boundary before age-based cleanup."""
+        needed = set()
+        month = first
+        while next_month(month) <= latest:
+            needed.update(
+                part.filename
+                for part in self._parts(month, boundary=False)
+                + self._parts(next_month(month), boundary=True)
+            )
+            month = next_month(month)
+        self.cache.cleanup(needed.__contains__, max_age_days=max_age_days)
+
     def plan(self, month: date, latest: date) -> None:
         # Only this month and the next may occupy the submission window.
         for owner in (month, next_month(month)):
@@ -271,7 +291,7 @@ class _Downloader:
                 if key in wanted and remote.results_ready:
                     part = self.parts[key]
                     path = self.cache.file(part.filename)
-                    pending = path.with_suffix('.pending')
+                    pending = path.with_name(path.name + '.part')
                     LOGGER.info('Downloading ERA5-Land GRIB: %s', path.name)
                     started = time.monotonic()
                     remote.download(str(pending))
@@ -298,9 +318,7 @@ class _Downloader:
         set_group_attrs(
             self.store, '', last_month=[month.year, month.month], era5_requests=self.requests
         )
-        if self.cache.remote is not None or self.cache.temporary:
-            for part in parts:
-                (self.cache.root / part.filename).unlink(missing_ok=True)
+        self.cache.release(self.cache.root / part.filename for part in parts)
 
     def _part(
         self,

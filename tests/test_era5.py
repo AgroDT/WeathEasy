@@ -1,4 +1,6 @@
+import os
 import sys
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -13,6 +15,14 @@ from weatheasy.era5_grib import read_grib
 from weatheasy.query import Coords, get_era5_data
 from weatheasy.storage import StorageError, get_store, open_dataset
 from weatheasy.util import get_storage
+
+
+@pytest.fixture(autouse=True)
+def isolated_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'state'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'local-app-data'))
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('USERPROFILE', str(tmp_path / 'home'))
 
 
 FIXTURES = Path(__file__).parent / 'fixtures' / 'era5'
@@ -627,11 +637,25 @@ def test_processing_failure_preserves_download_before_grib_read(
     location = backing if remote else tmp_path / 'cache'
     read = era5.read_grib
     reads = []
+    remote_reads = []
+    original_open = backing.fs.open
+
+    def track_open(path, mode='rb', **kwargs):  # noqa: ANN001
+        if mode == 'rb':
+            remote_reads.append(path)
+        return original_open(path, mode, **kwargs)
+
+    monkeypatch.setattr(backing.fs, 'open', track_open)
 
     def fail_read(path, _required):  # noqa: ANN001
         reads.append(path)
         if remote:
             assert backing.child('era5').exists(path.name)
+            old = time.time() - 30 * 86400
+            os.utime(path, (old, old))
+            obsolete = path.parent / 'obsolete.grib'
+            obsolete.write_bytes(b'obsolete')
+            os.utime(obsolete, (old, old))
         else:
             assert path.parent == tmp_path / 'cache' / 'era5'
             assert path.is_file()
@@ -644,10 +668,15 @@ def test_processing_failure_preserves_download_before_grib_read(
     with pytest.raises(ValueError, match='GRIB processing interrupted'):
         era5.download_era5_data(store, location, bbox=bbox)
     assert len(reads) == 1
+    assert reads[0].is_file()
     assert len(cds_client.calls) == 4
     assert era5.last_date(store, 'daily') is None
     monkeypatch.setattr(era5, 'read_grib', read)
     era5.download_era5_data(get_store(tmp_path / 'store'), location, bbox=bbox)
+    if remote:
+        assert remote_reads == []
+        assert not reads[0].exists()
+        assert not (reads[0].parent / 'obsolete.grib').exists()
     assert len(cds_client.calls) == 6
     assert set(cds_client.resumed) == {'job-2', 'job-3', 'job-4'}
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))

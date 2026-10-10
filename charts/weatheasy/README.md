@@ -171,8 +171,16 @@ Jobs are not covered by the CronJob's concurrency policy.
 
 Containers run as UID/GID 1000 with a read-only root filesystem. A writable
 `emptyDir` is mounted at `/var/lib/weatheasy` (home and working directory), with a
-second one at `/tmp`. `fsGroup` provides access to these volumes. Nothing published
-is kept in them, so Pods can be rescheduled on another node.
+second one at `/tmp`. `fsGroup` provides access to these volumes. Download jobs use
+`/var/lib/weatheasy` directly as their local working directory for remote caches.
+
+Set `workVolume.existingClaim` to an existing disk-backed PVC to retain working
+files across failed Job Pods and subsequent scheduled runs. Its capacity must
+accommodate the source downloads, and it must support the workloads mounting it.
+Without a PVC, the default `emptyDir` loses working files when its Pod is deleted;
+the remote download-cache still retains published originals. Cleanup runs inside
+the download command after determining which files the current job needs; the
+chart does not create a separate cleanup CronJob.
 
 Tune `workVolume.sizeLimit` and `tmpVolume.sizeLimit`, as well as container
 `ephemeral-storage` resource requests/limits when necessary. `nodeSelector`,
@@ -210,6 +218,7 @@ remain extensible and are validated by Kubernetes.
 | `affinity` | object | `{}` | Kubernetes affinity settings. |
 | `podAnnotations` | object | `{}` | Annotations on API and update Pods. |
 | `workVolume.sizeLimit` | string | `"10Gi"` | Size limit of writable home/work directory emptyDir. |
+| `workVolume.existingClaim` | string | `""` | Existing PVC mounted at /var/lib/weatheasy. Required to retain working downloads across Job Pods; empty uses emptyDir. |
 | `tmpVolume.sizeLimit` | string | `"1Gi"` | Size limit of /tmp emptyDir. |
 | `api.enabled` | boolean | `true` | Create API Deployment and Service. |
 | `api.replicas` | integer | `1` | Number of API replicas. |

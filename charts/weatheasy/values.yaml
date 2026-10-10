@@ -72,6 +72,8 @@ podAnnotations: {}
 workVolume:
   # Size limit of writable home/work directory emptyDir.
   sizeLimit: 10Gi
+  # Existing PVC mounted at /var/lib/weatheasy. Required to retain working downloads across Job Pods; empty uses emptyDir.
+  existingClaim: ''
 
 tmpVolume:
   # Size limit of /tmp emptyDir.

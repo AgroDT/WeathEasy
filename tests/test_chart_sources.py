@@ -77,6 +77,7 @@ def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path, cache:
                 assert args[args.index('--download-cache') + 1] == (
                     cache if cache is not None else '/var/lib/weatheasy/downloads'
                 )
+                assert args[args.index('--work-dir') + 1] == '/var/lib/weatheasy'
                 if source == 'era5':
                     index = args.index('--bbox')
                     assert args[index + 1 : index + 5] == ['56', '37', '55', '38']
@@ -116,3 +117,23 @@ def test_update_only_chart_needs_no_other_sources(tmp_path: Path):
     manifests = list(yaml.safe_load_all(result.stdout))
     assert not any(m['kind'] == 'Deployment' for m in manifests)
     assert len([m for m in manifests if m['kind'] == 'CronJob']) == 1
+
+
+def test_working_downloads_use_existing_pvc_without_extra_jobs(tmp_path: Path):
+    result = render(
+        tmp_path,
+        {
+            'downloadCache': 's3://weather/raw',
+            'workVolume': {'existingClaim': 'weather-work'},
+            'sources': {'era5': {'store': 's3://weather/era5', 'update': {'enabled': True}}},
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    manifests = list(yaml.safe_load_all(result.stdout))
+    jobs = [m for m in manifests if m['kind'] == 'CronJob']
+    assert len(jobs) == 1
+    spec = jobs[0]['spec']['jobTemplate']['spec']['template']['spec']
+    work = next(v for v in spec['volumes'] if v['name'] == 'work')
+    assert work == {'name': 'work', 'persistentVolumeClaim': {'claimName': 'weather-work'}}
+    container = spec['containers'][0]
+    assert {'name': 'work', 'mountPath': '/var/lib/weatheasy'} in container['volumeMounts']

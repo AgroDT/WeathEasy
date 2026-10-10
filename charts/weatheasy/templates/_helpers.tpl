@@ -51,8 +51,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 {{- define "weatheasy.volumes" -}}
 - name: work
+  {{- if .Values.workVolume.existingClaim }}
+  persistentVolumeClaim:
+    claimName: {{ .Values.workVolume.existingClaim | quote }}
+  {{- else }}
   emptyDir:
     sizeLimit: {{ .Values.workVolume.sizeLimit }}
+  {{- end }}
 - name: tmp
   emptyDir:
     sizeLimit: {{ .Values.tmpVolume.sizeLimit }}

@@ -170,6 +170,11 @@
           "type": "string",
           "description": "Size limit of writable home/work directory emptyDir.",
           "default": "10Gi"
+        },
+        "existingClaim": {
+          "type": "string",
+          "description": "Existing PVC mounted at /var/lib/weatheasy. Required to retain working downloads across Job Pods; empty uses emptyDir.",
+          "default": ""
         }
       },
       "additionalProperties": false
