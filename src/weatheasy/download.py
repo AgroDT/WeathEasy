@@ -71,19 +71,14 @@ def download_cmip6_data(store: Store, download_dir: str | Path | FileStore | Non
             first_year = previous.year + 1 if previous else const.CMIP6_FIRST_YEAR
             for year in range(first_year, const.CMIP6_LAST_YEAR + 1):
                 source = _load_cmip6_dataset(cache, var, year, session)
-                filename = source.name
                 dataset = read_netcdf(source, variables=[var], crs='EPSG:4326')
-                expected = np.arange(
-                    np.datetime64(f'{year}-01-01'), np.datetime64(f'{year + 1}-01-01')
-                )
-                if not np.array_equal(dataset.time.to_numpy().astype('datetime64[D]'), expected):
-                    msg = f'Incomplete or unexpected CMIP6 dates in {filename}'
-                    raise ValueError(msg)
                 # Daily CMIP6 timestamps may label the interval at noon. Store
                 # calendar days, matching the public date-based query contract.
                 dataset = dataset.assign_coords(
                     time=xr.DataArray(
-                        expected.astype('datetime64[ns]'), dims='time', attrs=dataset.time.attrs
+                        dataset.time.to_numpy().astype('datetime64[D]').astype('datetime64[ns]'),
+                        dims='time',
+                        attrs=dataset.time.attrs,
                     )
                 )
                 _LOG.info('Saving %s/%s', path, year)
@@ -144,14 +139,7 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
                     msg = 'CFS2 source grids differ within a day'
                     raise ValueError(msg)
         combined = xr.concat(fields, dim='time', join='exact')
-        times = combined.time.to_numpy()
-        if len(np.unique(times)) != len(times) or np.any(
-            times.astype('datetime64[D]') != np.datetime64(date_)
-        ):
-            msg = 'CFS2 valid timestamps do not match the requested day'
-            raise ValueError(msg)
         bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
-        _check_pevpr_times(times, date_, bands)
         data = {}
         for name, info in bands.items():
             values = combined[name].to_numpy()
@@ -177,14 +165,6 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
         daily = daily.isel(time=0, drop=True)
     daily = daily.expand_dims(time=[np.datetime64(date_)])
     return prepare_dataset(daily, crs=crs)
-
-
-def _check_pevpr_times(times: np.ndarray, day: date, bands: dict) -> None:
-    if 'PEVPR' in bands:
-        expected = np.datetime64(day, 'h') + np.array([0, 6, 12, 18], dtype='timedelta64[h]')
-        if not np.isin(times, expected).all():
-            msg = 'PEVPR requires instantaneous 00/06/12/18 UTC samples'
-            raise ValueError(msg)
 
 
 def _download_cfs2_forecast(

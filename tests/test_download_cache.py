@@ -11,7 +11,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 from weatheasy import const, download
 from weatheasy.file_storage import FileStore
 from weatheasy.raw_cache import download_cache
-from weatheasy.storage import get_store
+from weatheasy.storage import get_store, open_dataset
 
 
 class TrackingFileSystem(MemoryFileSystem):
@@ -76,13 +76,19 @@ def test_incomplete_download_does_not_publish(tmp_path: Path):
 
 
 @pytest.mark.parametrize('remote', [False, True])
+@pytest.mark.parametrize('full_year', [False, True])
 def test_cmip6_public_download_processes_working_file_and_reuses_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool, full_year: bool
 ):
-    times = np.arange('2000-01-01', '2001-01-01', dtype='datetime64[D]')
+    days = (
+        np.arange('2000-01-01', '2001-01-01', dtype='datetime64[D]')
+        if full_year
+        else np.array(['2000-02-28', '2000-02-29', '2000-03-02'], dtype='datetime64[D]')
+    )
+    times = days.astype('datetime64[h]') + np.timedelta64(12, 'h')
     source = tmp_path / 'fixture.nc'
     xr.Dataset(
-        {'tas': (('time', 'lat', 'lon'), np.full((366, 2, 2), 280.0), {'units': 'K'})},
+        {'tas': (('time', 'lat', 'lon'), np.full((len(times), 2, 2), 280.0), {'units': 'K'})},
         coords={'time': times, 'lat': [0.125, 0.375], 'lon': [0.125, 0.375]},
     ).to_netcdf(source)
     content = source.read_bytes()
@@ -123,6 +129,9 @@ def test_cmip6_public_download_processes_working_file_and_reuses_cache(
         assert backing.child('cmip6').exists('tas_2000.nc')
         assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc']
     download.download_cmip6_data(get_store(tmp_path / 'prepared2'), location)
+    with open_dataset(get_store(tmp_path / 'prepared2'), 'tas') as result:
+        np.testing.assert_array_equal(result.time, days.astype('datetime64[ns]'))
+        np.testing.assert_allclose(result.tas, 280)
     assert len(requests) == 1
     assert len(processed) == 3
     if remote:

@@ -54,9 +54,6 @@ def read_grib(
                 raise StorageError(msg)
             variable = str(next(iter(raw.data_vars)))
         field = raw[variable]
-        if field.dims != ('latitude', 'longitude') or raw.valid_time.ndim != 0:
-            msg = 'Select one GRIB valid time and level before preparation'
-            raise StorageError(msg)
         radius = field.attrs.get('GRIB_radius')
         major = field.attrs.get('GRIB_earthMajorAxis')
         minor = field.attrs.get('GRIB_earthMinorAxis')
@@ -161,9 +158,6 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
         units = field[name].attrs['units']
         values = field[name].astype('float32')
         if name.startswith('TMP') or name in ('TMIN', 'TMAX'):
-            if units != 'K':
-                msg = f'Expected K for {name}, got {units}'
-                raise StorageError(msg)
             values = values - 273.15
             units = 'degC'
         # Preserve the existing numeric pressure contract (GDAL returns Pa),

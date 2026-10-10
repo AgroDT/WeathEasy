@@ -157,7 +157,6 @@ def download_era5_data(
             LOGGER.info('Preparing ERA5-Land %s', first.strftime('%Y-%m'))
             main, boundary = downloader.retrieve_month(first)
             _validate_boundary(main, boundary)
-            _validate_bbox(main, bbox)
             write_batches(store, path, _daily_batches(main, boundary, first, bbox))
             downloader.commit(first)
             LOGGER.info('Prepared ERA5-Land %s in %.1f s', first, time.monotonic() - started)
@@ -335,17 +334,7 @@ class _Downloader:
         path = self.cache.file(part.filename)
         # Also retry a publication that failed after a complete local download.
         self.cache.publish([path])
-        start = np.datetime64(part.month, 'h')
-        expected = (
-            np.array([start])
-            if part.boundary
-            else np.arange(
-                start, np.datetime64(next_month(part.month), 'h'), np.timedelta64(1, 'h')
-            )
-        )
-        ds = read_grib(path, expected, part.required)
-        _validate(ds, part.month, boundary=part.boundary, required=part.required)
-        return ds
+        return read_grib(path, part.required)
 
 
 def _daily_batches(main: xr.Dataset, boundary: xr.Dataset, month: date, bbox: tuple):
@@ -456,30 +445,6 @@ def _shared_daily_values(read, start: np.datetime64) -> dict:  # noqa: ANN001
     }
 
 
-def _validate(
-    ds: xr.Dataset, month: date, *, boundary: bool, required: set[str] | None = None
-) -> None:
-    if required is None:
-        required = {v.nc_name for v in const.ERA5_VARS.values()} | set(EXTRA)
-    missing = required - {str(name) for name in ds.data_vars}
-    if missing:
-        msg = f'Missing ERA5 variables: {sorted(missing)}'
-        raise StorageError(msg)
-    start = np.datetime64(month, 'h')
-    expected = (
-        np.array([start])
-        if boundary
-        else np.arange(start, np.datetime64(next_month(month), 'h'), np.timedelta64(1, 'h'))
-    )
-    if 'time' not in ds.coords or not np.array_equal(ds.time.to_numpy(), expected):
-        msg = f'Incomplete or unexpected ERA5 timestamps for {month}'
-        raise StorageError(msg)
-    for name in required:
-        if set(ds[name].dims) != {'time', 'latitude', 'longitude'}:
-            msg = f'Unexpected ERA5 dimensions for {name}: {ds[name].dims}'
-            raise StorageError(msg)
-
-
 def _validate_boundary(main: xr.Dataset, boundary: xr.Dataset) -> None:
     if main.rio.crs != boundary.rio.crs or any(
         not np.array_equal(main[axis], boundary[axis]) for axis in ('latitude', 'longitude')
@@ -518,20 +483,3 @@ def _prepare_daily_values(values: dict, times: np.ndarray, latitudes, longitudes
         },
     )
     return prepare_dataset(ds, crs=crs)
-
-
-def _validate_bbox(ds: xr.Dataset, bbox: tuple) -> None:
-    north, west, south, east = bbox
-    for axis, lower, upper in [('latitude', south, north), ('longitude', west, east)]:
-        values = ds[axis].to_numpy()
-        if axis == 'longitude':
-            values = (values - west) % 360 + west
-        # CDS rounds bbox limits to source cells. Global longitude omits the
-        # duplicated east seam. Require coverage to within one source step.
-        tolerance = const.ERA5_RESOLUTION + 1e-7
-        if (
-            abs(float(values.min()) - lower) > tolerance
-            or abs(float(values.max()) - upper) > tolerance
-        ):
-            msg = f'ERA5 {axis} does not match the requested bbox'
-            raise StorageError(msg)

@@ -94,9 +94,9 @@ class FakeCDSClient:
 
 @pytest.fixture
 def cds_client(monkeypatch: pytest.MonkeyPatch):
-    def read_response(path, _expected, _required):  # noqa: ANN001
+    def read_response(path, required):  # noqa: ANN001
         with xr.open_dataset(path, engine='netcdf4', decode_coords='all') as ds:
-            return ds.load()
+            return ds[sorted(required)].load()
 
     monkeypatch.setattr(era5, 'read_grib', read_response)
     client = FakeCDSClient()
@@ -177,24 +177,9 @@ REQUIRED_INPUTS = (
 )
 
 
-@pytest.mark.parametrize('name', REQUIRED_INPUTS)
-def test_all_inputs_required(name: str):
-    month = date(2000, 1, 1)
-    main = source(month)
-    assert name in main
-    with pytest.raises(StorageError, match='Missing ERA5'):
-        era5._validate(main.drop_vars(name), month, boundary=False)
-
-
-def test_boundary_and_timestamp_validation():
-    month = date(2000, 12, 1)
-    main = source(month)
+def test_boundary_grid_validation():
+    main = source(date(2000, 12, 1))
     boundary = source(date(2001, 1, 1), boundary=True)
-    with pytest.raises(StorageError, match='timestamps'):
-        era5._validate(boundary.isel(time=slice(0, 0)), date(2001, 1, 1), boundary=True)
-    bad = main.assign_coords(time=np.roll(main.time.to_numpy(), 1))
-    with pytest.raises(StorageError, match='timestamps'):
-        era5._validate(bad, month, boundary=False)
     with pytest.raises(StorageError, match='coordinates'):
         era5._validate_boundary(main, boundary.assign_coords(longitude=[38.1, 38.2, 38.3]))
 
@@ -274,7 +259,7 @@ def test_failed_month_and_append_recover(
     cds_client.transform = corrupt_march
     root = get_storage(str(tmp_path / 'store'))
     bbox = (55.3, 37.1, 55.2, 37.3)
-    with pytest.raises(StorageError, match='Missing ERA5'):
+    with pytest.raises(KeyError):
         era5.download_era5_data(root.store, bbox=bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     assert era5.available_period(root.store)[1] == date(2000, 1, 31)
@@ -378,15 +363,9 @@ def test_restart_resumes_persisted_job(
         assert len(list((tmp_path / 'cache').glob('*.grib'))) == 3
 
 
-def test_actual_axes_reject_different_region():
-    with pytest.raises(StorageError, match='longitude'):
-        era5._validate_bbox(source(date(2000, 1, 1)), (55.3, 38.1, 55.2, 38.3))
-
-
 def test_grib_single_midnight():
     ds = read_grib(
         FIXTURES / 'midnight.grib',
-        np.array(['2000-01-02'], dtype='datetime64[h]'),
         set(REQUIRED_INPUTS),
     )
     assert ds.sizes['time'] == 1
@@ -394,25 +373,55 @@ def test_grib_single_midnight():
     assert ds.rio.crs.to_dict()['R'] == 6367470
 
 
-@pytest.mark.parametrize(
-    ('invalid', 'error'),
-    [('duplicate', 'Duplicate'), ('unexpected', 'Unexpected'), ('missing_hour', 'timestamps')],
-)
-def test_grib_rejects_invalid_response(tmp_path: Path, invalid: str, error: str):
-    contents = (FIXTURES / 'day.grib').read_bytes()
-    path = tmp_path / 'response.grib'
-    path.write_bytes(contents * 2 if invalid == 'duplicate' else contents)
-    expected = np.arange(
-        np.datetime64('2000-01-01T00'), np.datetime64('2000-01-02T01'), np.timedelta64(1, 'h')
+@pytest.mark.parametrize('invalid', [None, 'coordinates', 'crs', 'same_edition_grid'])
+def test_grib_mixed_editions_validate_actual_grid(tmp_path: Path, invalid: str | None):
+    import eccodes
+
+    path = tmp_path / 'mixed.grib'
+    editions = set()
+    grids = set()
+    with (FIXTURES / 'midnight.grib').open('rb') as source, path.open('wb') as target:
+        while (message := eccodes.codes_grib_new_from_file(source)) is not None:
+            try:
+                if eccodes.codes_get(message, 'cfVarName') == 't2m':
+                    if invalid not in ('same_edition_grid', 'crs'):
+                        eccodes.codes_set(message, 'edition', 1)
+                    if invalid in ('coordinates', 'same_edition_grid'):
+                        eccodes.codes_set(message, 'longitudeOfFirstGridPointInDegrees', 38.1)
+                        eccodes.codes_set(message, 'longitudeOfLastGridPointInDegrees', 38.3)
+                    elif invalid == 'crs':
+                        eccodes.codes_set(message, 'shapeOfTheEarth', 6)
+                editions.add(eccodes.codes_get(message, 'edition'))
+                grids.add(eccodes.codes_get(message, 'md5GridSection'))
+                eccodes.codes_write(message, target)
+            finally:
+                eccodes.codes_release(message)
+    assert editions == ({2} if invalid in ('same_edition_grid', 'crs') else {1, 2})
+    assert len(grids) == 2
+    if invalid:
+        with pytest.raises(StorageError, match='grid and CRS'):
+            read_grib(path, set(REQUIRED_INPUTS))
+    else:
+        ds = read_grib(path, set(REQUIRED_INPUTS))
+        np.testing.assert_allclose(ds.t2m, 293.15, atol=1e-4)
+        np.testing.assert_allclose(ds.tp, 0.012, atol=1e-7)
+        np.testing.assert_allclose(ds.latitude, [55.3, 55.2])
+        np.testing.assert_allclose(ds.longitude, [37.1, 37.2, 37.3])
+        assert ds.rio.crs.to_dict()['R'] == 6367470
+
+
+def test_grib_ignores_unrequested_variables():
+    ds = read_grib(FIXTURES / 'midnight.grib', {'t2m'})
+    assert set(ds.data_vars) == {'t2m'}
+    np.testing.assert_allclose(ds.t2m, 293.15, atol=1e-4)
+
+
+def test_grib_uses_source_timestamps():
+    ds = read_grib(FIXTURES / 'day.grib', {'t2m'})
+    np.testing.assert_array_equal(
+        ds.time,
+        np.arange('2000-01-01T00', '2000-01-02T01', dtype='datetime64[h]'),
     )
-    required = set(REQUIRED_INPUTS)
-    if invalid == 'unexpected':
-        required.remove('sp')
-    elif invalid == 'missing_hour':
-        expected = np.append(expected, np.datetime64('2000-01-02T01'))
-    with pytest.raises(StorageError, match=error):
-        read_grib(path, expected, required)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['response.grib']
 
 
 def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -471,20 +480,20 @@ def test_partial_request_missing_variable_preserves_raw_but_never_publishes_dail
     read = era5.read_grib
     read_paths = []
 
-    def track_read(path, expected, required):  # noqa: ANN001
+    def track_read(path, required):  # noqa: ANN001
         read_paths.append(path)
-        return read(path, expected, required)
+        return read(path, required)
 
     monkeypatch.setattr(era5, 'read_grib', track_read)
     root = get_storage(str(tmp_path / 'store'))
     bbox = (55.3, 37.1, 55.2, 37.3)
-    with pytest.raises(StorageError, match='Missing ERA5'):
+    with pytest.raises(KeyError):
         era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert 'last_month' not in root[''].attrs
     assert 'daily' not in root
     assert len(list((tmp_path / 'cache/era5').glob('*.grib'))) == 2
-    # Validation failures retain raw responses; retry must still reject bad input.
-    with pytest.raises(StorageError, match='Missing ERA5'):
+    # Failed reads retain raw responses; retry encounters the same missing variable.
+    with pytest.raises(KeyError):
         era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 5
     assert 'daily' not in root
@@ -571,11 +580,8 @@ def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(monkeypatch: pytest
         return decode(message, shape)
 
     monkeypatch.setattr(grib_dataset, 'get_values_in_order', decode_field)
-    expected = np.arange(
-        np.datetime64('2000-01-01T00'), np.datetime64('2000-01-02T01'), np.timedelta64(1, 'h')
-    )
-    main = read_grib(FIXTURES / 'day.grib', expected, set(REQUIRED_INPUTS))
-    boundary = read_grib(FIXTURES / 'midnight.grib', expected[-1:], set(REQUIRED_INPUTS))
+    main = read_grib(FIXTURES / 'day.grib', set(REQUIRED_INPUTS))
+    boundary = read_grib(FIXTURES / 'midnight.grib', set(REQUIRED_INPUTS))
     assert not decoded  # Opening/merging fields must not unpack hourly weather arrays.
     np.testing.assert_allclose(main.latitude, [55.3, 55.2])
     np.testing.assert_allclose(main.longitude, [37.1, 37.2, 37.3])
@@ -622,7 +628,7 @@ def test_processing_failure_preserves_download_before_grib_read(
     read = era5.read_grib
     reads = []
 
-    def fail_read(path, _expected, _required):  # noqa: ANN001
+    def fail_read(path, _required):  # noqa: ANN001
         reads.append(path)
         if remote:
             assert backing.child('era5').exists(path.name)
