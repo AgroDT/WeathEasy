@@ -34,7 +34,7 @@ from weatheasy.error import S3ImportError
 
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
+    from collections.abc import Hashable, Iterable
     from os import PathLike
 
     from fsspec.asyn import AsyncFileSystem
@@ -282,6 +282,26 @@ def write_batch(
     The caller supplies a ready local or S3 store. Writes use xarray; direct Zarr
     writes update the commit marker and recover interrupted in-place appends.
     """
+    write_batches(store, group, [dataset], tile_size=tile_size)
+
+
+def write_batches(  # noqa: C901
+    store: Store,
+    group: str,
+    datasets: Iterable[xr.Dataset],
+    *,
+    tile_size: int = 128,
+) -> None:
+    """Write bounded time batches as one transaction, retaining only the current batch.
+
+    The iterator must finish successfully before any new dates are published.
+    On failure the original committed length is retained; retry removes the
+    entire uncommitted tail. Each batch must have the same spatial schema.
+    """
+    batches = iter(datasets)
+    dataset = next(batches, None)
+    if dataset is None:
+        return
     if tile_size < 1 or dataset.attrs.get('storage_schema') != SCHEMA:
         msg = 'A prepared dataset and positive tile_size are required'
         raise StorageError(msg)
@@ -315,6 +335,30 @@ def write_batch(
     attrs = dict(ds.attrs, grid_signature=signature, committed_length=count, write_state='writing')
     target.attrs.update(attrs)
     ds.attrs = attrs
+    _write_time_batch(store, group, ds, count=count, tile_size=tile_size)
+    written = ds.sizes['time']
+    previous = ds.time.to_numpy()[-1]
+    del ds, dataset
+    for dataset in batches:
+        if dataset.attrs.get('storage_schema') != SCHEMA or _signature(dataset) != signature:
+            msg = 'A batch has a conflicting grid, CRS, variables or units'
+            raise StorageError(msg)
+        if dataset.time.to_numpy()[0] <= previous:
+            msg = 'New timestamps must follow all previous batches'
+            raise StorageError(msg)
+        ds = dataset.copy()
+        ds.attrs = attrs
+        _write_time_batch(store, group, ds, count=count + written, tile_size=tile_size)
+        written += ds.sizes['time']
+        previous = ds.time.to_numpy()[-1]
+        del ds, dataset
+    target = root.get_group(group)
+    target.attrs.update(committed_length=count + written, write_state='complete')
+
+
+def _write_time_batch(
+    store: Store, group: str, ds: xr.Dataset, *, count: int, tile_size: int
+) -> None:
     if count:
         # a- leaves fixed spatial coordinates untouched.
         ds.to_zarr(
@@ -357,8 +401,6 @@ def write_batch(
             consolidated=False,
             write_empty_chunks=False,
         )
-    target = root.get_group(group)
-    target.attrs.update(committed_length=count + ds.sizes['time'], write_state='complete')
 
 
 def open_dataset(store: Store, group: str) -> xr.Dataset:

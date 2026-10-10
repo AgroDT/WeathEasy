@@ -161,8 +161,8 @@ any not-AWS S3 storages you also need to export `AWS_ENDPOINT_URL_S3`. See the
 for details.
 
 Optionally you can provide a local path or `s3://<bucket>/<prefix>` to
-`--download-cache` to preserve original downloaded files (GRIB2 for CFSv2 and
-NetCDF for CMIP6 and ERA5). Local directories are used directly. With S3,
+`--download-cache` to preserve original downloaded files (GRIB2 for CFSv2,
+GRIB for ERA5-Land, and NetCDF for CMIP6). Local directories are used directly. With S3,
 new files are downloaded and processed locally before uploading; cached files
 are fetched only when needed.
 
@@ -172,6 +172,16 @@ to limit the download region, without antimeridian crossing:
 ```sh
 weatheasy download era5 --store ./era5.zarr --bbox 56 37 55 38
 ```
+
+ERA5-Land requests use the native GRIB format, avoiding server-side NetCDF
+conversion. The loader opens fields lazily through xarray/cfgrib and decodes
+one hourly spatial field at a time, reducing inputs into one day of output. A day spans multiple
+Zarr chunks, up to `(1, 128, 128)` each; GRIB fields are not repeatedly decoded
+for individual spatial tiles. Memory depends on the requested grid, not the
+number of days in a month. Source CRS, NaNs and next-midnight accumulations are
+preserved. The month is published only after every daily write and raw-cache
+upload succeeds; interrupted months are retried without duplicating dates.
+Existing NetCDF cache entries are retained but are not reused by the GRIB loader.
 
 A full example for CFSv2:
 
@@ -287,8 +297,8 @@ after importing rioxarray.
 
 Weather arrays use NaN for both the Zarr fill value and CF `_FillValue`.
 Empty chunks are not written during either creation or append; missing chunks
-therefore remain NaN when read. NetCDF preparation is still eager; Dask is not
-required.
+therefore remain NaN when read. CMIP6 NetCDF preparation is still eager;
+ERA5-Land GRIB preparation uses bounded daily batches. Dask is not required.
 
 CFS2 forecast grids have permanent group paths
 `forecast/flx` and `forecast/pgb`, including when the root store is an

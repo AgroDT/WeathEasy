@@ -9,9 +9,13 @@ import pytest
 import xarray as xr
 
 from weatheasy import const, era5
+from weatheasy.era5_grib import read_grib
 from weatheasy.query import Coords, get_era5_data
 from weatheasy.storage import StorageError, get_store, open_dataset
 from weatheasy.util import get_storage
+
+
+FIXTURES = Path(__file__).parent / 'fixtures' / 'era5'
 
 
 def source(month: date, *, boundary: bool = False):
@@ -48,7 +52,7 @@ def source(month: date, *, boundary: bool = False):
         values[name] = (('time', 'latitude', 'longitude'), array)
     return xr.Dataset(
         values, coords={'time': times, 'latitude': [55.3, 55.2], 'longitude': [37.1, 37.2, 37.3]}
-    )
+    ).rio.write_crs('+proj=longlat +R=6367470 +no_defs')
 
 
 class FakeCDSClient:
@@ -61,17 +65,24 @@ class FakeCDSClient:
         )
 
     def retrieve(self, _dataset: xr.Dataset, request: Mapping):
+        assert request['data_format'] == 'grib'
         assert len(request['variable']) <= 8
         assert len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
         self.calls.append(request)
         month = date(int(request['year']), int(request['month']), 1)
         ds = requested_source(month, request)
         ds = self.transform(ds, request, len(self.calls))
-        return SimpleNamespace(download=ds.to_netcdf)
+        # Transport tests use a lightweight response; static GRIB tests below exercise cfgrib.
+        return SimpleNamespace(download=lambda path: ds.to_netcdf(path, engine='netcdf4'))
 
 
 @pytest.fixture
 def cds_client(monkeypatch: pytest.MonkeyPatch):
+    def read_response(path, _expected, _required):  # noqa: ANN001
+        with xr.open_dataset(path, engine='netcdf4', decode_coords='all') as ds:
+            return ds.load()
+
+    monkeypatch.setattr(era5, 'read_grib', read_response)
     client = FakeCDSClient()
     monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=lambda: client))
     return client
@@ -85,7 +96,13 @@ def test_daily_units_midnight_wind_and_coordinates(month: date):
     main['tp'][23::24] = 0.001
     boundary['tp'][:] = 0.012
     main['t2m'][0, 0, 0] = np.nan
-    result = era5.process_month(main, boundary, month)
+    result = xr.concat(
+        [
+            era5.process_day(main, boundary, month + i * const.ONE_DAY)
+            for i in range((era5.next_month(month) - month).days)
+        ],
+        dim='time',
+    )
     assert result.sizes['time'] == (era5.next_month(month) - month).days
     np.testing.assert_allclose(result.WIND, 5)
     np.testing.assert_allclose(result.UGRD, 0)
@@ -107,10 +124,11 @@ def test_daily_units_midnight_wind_and_coordinates(month: date):
     np.testing.assert_allclose(result.RH[1:], 100)
     assert np.isnan(result.TMP[0, 1, 0])
     assert result.spatial_ref.attrs['semi_major_axis'] == 6367470
+    np.testing.assert_allclose(main.skt, 280)  # Reduction must not modify its input arrays.
     np.testing.assert_allclose(result.latitude, [55.2, 55.3])
 
 
-# Required ERA5-Land NetCDF fields, independently of the production variable registry.
+# Required ERA5-Land fields, independently of the production variable registry.
 REQUIRED_INPUTS = (
     'd2m',
     'pev',
@@ -145,9 +163,7 @@ def test_all_inputs_required(name: str):
     main = source(month)
     assert name in main
     with pytest.raises(StorageError, match='Missing ERA5'):
-        era5.process_month(
-            main.drop_vars(name), source(era5.next_month(month), boundary=True), month
-        )
+        era5._validate(main.drop_vars(name), month, boundary=False)
 
 
 def test_boundary_and_timestamp_validation():
@@ -155,12 +171,12 @@ def test_boundary_and_timestamp_validation():
     main = source(month)
     boundary = source(date(2001, 1, 1), boundary=True)
     with pytest.raises(StorageError, match='timestamps'):
-        era5.process_month(main, boundary.isel(time=slice(0, 0)), month)
+        era5._validate(boundary.isel(time=slice(0, 0)), date(2001, 1, 1), boundary=True)
     bad = main.assign_coords(time=np.roll(main.time.to_numpy(), 1))
     with pytest.raises(StorageError, match='timestamps'):
-        era5.process_month(bad, boundary, month)
+        era5._validate(bad, month, boundary=False)
     with pytest.raises(StorageError, match='coordinates'):
-        era5.process_month(main, boundary.assign_coords(longitude=[38.1, 38.2, 38.3]), month)
+        era5._validate_boundary(main, boundary.assign_coords(longitude=[38.1, 38.2, 38.3]))
 
 
 def test_public_monthly_download_resume_getter_and_cli(
@@ -170,7 +186,6 @@ def test_public_monthly_download_resume_getter_and_cli(
 ):
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
-    cds_client.transform = lambda ds, _request, _call: ds.rename({'time': 'valid_time'})
     root = get_storage(str(tmp_path / 'store'))
     bbox = (55.3, 37.1, 55.2, 37.3)
     era5.download_era5_data(get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox)
@@ -231,12 +246,12 @@ def test_failed_month_and_append_recover(
     broken = True
 
     def corrupt_march(ds: xr.Dataset, request: Mapping, _call: int) -> xr.Dataset:
-        return ds.isel(time=slice(0, 0)) if broken and request['month'] == '03' else ds
+        return ds.drop_vars(list(ds.data_vars)) if broken and request['month'] == '03' else ds
 
     cds_client.transform = corrupt_march
     root = get_storage(str(tmp_path / 'store'))
     bbox = (55.3, 37.1, 55.2, 37.3)
-    with pytest.raises(StorageError, match='timestamps'):
+    with pytest.raises(StorageError, match='Missing ERA5'):
         era5.download_era5_data(root.store, bbox=bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     assert era5.available_period(root.store)[1] == date(2000, 1, 31)
@@ -258,12 +273,12 @@ def test_failed_month_and_append_recover(
     assert root['daily'].attrs['committed_length'] == 60
 
 
-def test_cache_includes_bbox(tmp_path: Path):
-    client = FakeCDSClient()
+def test_cache_includes_bbox(tmp_path: Path, cds_client: FakeCDSClient):
+    client = cds_client
     for bbox in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
         era5._Downloader(client, tmp_path, bbox).retrieve(date(2000, 1, 1), boundary=False)
     assert len(client.calls) == 6
-    assert len(list(tmp_path.glob('*.nc'))) == 6
+    assert len(list(tmp_path.glob('*.grib'))) == 6
 
 
 def test_actual_axes_reject_different_region():
@@ -271,23 +286,36 @@ def test_actual_axes_reject_different_region():
         era5._validate_bbox(source(date(2000, 1, 1)), (55.3, 38.1, 55.2, 38.3))
 
 
-def test_split_netcdf_response_preserves_explicit_crs(tmp_path: Path):
-    import zipfile
+def test_grib_single_midnight():
+    ds = read_grib(
+        FIXTURES / 'midnight.grib',
+        np.array(['2000-01-02'], dtype='datetime64[h]'),
+        set(REQUIRED_INPUTS),
+    )
+    assert ds.sizes['time'] == 1
+    np.testing.assert_allclose(ds.tp, 0.012, atol=1e-7)
+    assert ds.rio.crs.to_dict()['R'] == 6367470
 
-    month = date(2000, 1, 1)
-    ds = source(month).rio.write_crs('EPSG:4326')
-    files = [tmp_path / 'instant.nc', tmp_path / 'accumulated.nc']
-    accumulated = {v.nc_name for v in const.ERA5_VARS.values() if v.accumulated} | {'ssr', 'str'}
-    ds[sorted(set(ds.data_vars) - accumulated)].to_netcdf(files[0])
-    ds[sorted(accumulated)].to_netcdf(files[1])
-    archive_path = tmp_path / 'response.nc'
-    with zipfile.ZipFile(archive_path, 'w') as archive:
-        for file in files:
-            archive.write(file, file.name)
-    restored = era5._read_response(archive_path)
-    boundary = source(era5.next_month(month), boundary=True).rio.write_crs('EPSG:4326')
-    result = era5.process_month(restored, boundary, month)
-    assert result.rio.crs.to_epsg() == 4326
+
+@pytest.mark.parametrize(
+    ('invalid', 'error'),
+    [('duplicate', 'Duplicate'), ('unexpected', 'Unexpected'), ('missing_hour', 'timestamps')],
+)
+def test_grib_rejects_invalid_response(tmp_path: Path, invalid: str, error: str):
+    contents = (FIXTURES / 'day.grib').read_bytes()
+    path = tmp_path / 'response.grib'
+    path.write_bytes(contents * 2 if invalid == 'duplicate' else contents)
+    expected = np.arange(
+        np.datetime64('2000-01-01T00'), np.datetime64('2000-01-02T01'), np.timedelta64(1, 'h')
+    )
+    required = set(REQUIRED_INPUTS)
+    if invalid == 'unexpected':
+        required.remove('sp')
+    elif invalid == 'missing_hour':
+        expected = np.append(expected, np.datetime64('2000-01-02T01'))
+    with pytest.raises(StorageError, match=error):
+        read_grib(path, expected, required)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['response.grib']
 
 
 def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -348,7 +376,7 @@ def test_partial_request_missing_variable_never_publishes(
         era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert 'last_month' not in root[''].attrs
     assert 'daily' not in root
-    assert len(list((tmp_path / 'cache/era5').glob('*.nc'))) == 1
+    assert len(list((tmp_path / 'cache/era5').glob('*.grib'))) == 1
     broken = False
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 7  # six successful parts; first reused from cache after failure
@@ -377,8 +405,58 @@ def test_s3_monthly_cache_reused_by_fresh_preparation(
     bbox = (55.3, 37.1, 55.2, 37.3)
     era5.download_era5_data(get_store(tmp_path / 'first'), cache, bbox=bbox)
     assert len(cds_client.calls) == 6
-    assert len(cache.child('era5').glob('*.nc')) == 6
+    assert len(cache.child('era5').glob('*.grib')) == 6
     era5.download_era5_data(get_store(tmp_path / 'second'), cache, bbox=bbox)
     assert len(cds_client.calls) == 6
     with era5.open_dataset(get_store(tmp_path / 'second'), 'daily') as ds:
         assert ds.sizes['time'] == 31
+
+
+def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(monkeypatch: pytest.MonkeyPatch):
+    from collections import Counter
+
+    from cfgrib import dataset as grib_dataset
+
+    decoded = Counter()
+    decode = grib_dataset.get_values_in_order
+
+    def decode_field(message, shape):  # noqa: ANN001
+        decoded[message['cfVarName']] += 1
+        assert shape == (2, 3)
+        return decode(message, shape)
+
+    monkeypatch.setattr(grib_dataset, 'get_values_in_order', decode_field)
+    expected = np.arange(
+        np.datetime64('2000-01-01T00'), np.datetime64('2000-01-02T01'), np.timedelta64(1, 'h')
+    )
+    main = read_grib(FIXTURES / 'day.grib', expected, set(REQUIRED_INPUTS))
+    boundary = read_grib(FIXTURES / 'midnight.grib', expected[-1:], set(REQUIRED_INPUTS))
+    assert not decoded  # Opening/merging fields must not unpack hourly weather arrays.
+    np.testing.assert_allclose(main.latitude, [55.3, 55.2])
+    np.testing.assert_allclose(main.longitude, [37.1, 37.2, 37.3])
+    assert np.isnan(main.t2m.isel(time=0).to_numpy()[0, 0])
+    assert decoded == {'t2m': 1}  # Select the hour before materializing the field.
+    decoded.clear()
+    result = era5.process_day(main.isel(time=slice(0, 24)), boundary, date(2000, 1, 1))
+    for name in ('t2m', 'd2m', 'sp', 'u10', 'v10', 'skt', 'swvl1'):
+        assert decoded[name] == 24
+    assert decoded['tp'] == 1
+    for name, expected in {
+        'WIND': 5,
+        'UGRD': 0,
+        'VGRD': 0,
+        'PRES': 1000,
+        'PEVPR': 4,
+        'LHTFL': 100,
+        'SHTFL': 50,
+        'DSWRF': 100,
+        'DLWRF': 200,
+        'USWRF': 25,
+        'ULWRF': 210,
+        'WEASD': 20,
+    }.items():
+        np.testing.assert_allclose(result[name], expected, atol=1e-4)
+    np.testing.assert_allclose(result.PRATE * 86400, 12, atol=1e-4)
+    assert np.isnan(result.TMP[0, 1, 0])
+    assert np.isnan(result.TMIN[0, 1, 0])
+    assert result.spatial_ref.attrs['semi_major_axis'] == 6367470

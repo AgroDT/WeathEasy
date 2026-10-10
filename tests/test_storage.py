@@ -20,6 +20,7 @@ from weatheasy.storage import (
     prepare_dataset,
     select_point,
     write_batch,
+    write_batches,
 )
 from weatheasy.util import get_storage
 
@@ -183,6 +184,33 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pyt
     recovered = open_dataset(store, 'grid')
     np.testing.assert_array_equal(recovered.TMP[0], field().TMP[0])
     np.testing.assert_array_equal(recovered.TMP[1], field().TMP[0])
+
+
+def test_streamed_month_is_published_only_after_iterator_finishes_and_retry_recovers():
+    from weatheasy.storage import last_date
+
+    store = MemoryStore()
+    write_batch(store, 'grid', field())
+    before = open_dataset(store, 'grid').load()
+
+    def broken_batches():
+        yield field(day='2026-01-02')
+        assert zarr.open_group(store)['grid'].attrs['committed_length'] == 1
+        with pytest.raises(StorageError, match='completed'):
+            open_dataset(store, 'grid')
+        # Represents failure while decoding the next day or publishing its cache.
+        msg = 'interrupted before the month is complete'
+        raise OSError(msg)
+
+    with pytest.raises(OSError, match='interrupted'):
+        write_batches(store, 'grid', broken_batches())
+    assert str(last_date(store, 'grid')) == '2026-01-01'
+    write_batches(store, 'grid', (field(day=f'2026-01-0{day}') for day in (2, 3)))
+    with open_dataset(store, 'grid') as result:
+        assert result.sizes['time'] == 3
+        np.testing.assert_array_equal(result.TMP[0], before.TMP[0])
+        np.testing.assert_array_equal(result.TMP[1], field().TMP[0])
+        np.testing.assert_array_equal(result.TMP[2], field().TMP[0])
 
 
 def test_zarr_read_does_not_import_grib_decoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
