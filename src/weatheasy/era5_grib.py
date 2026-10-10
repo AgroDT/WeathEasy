@@ -34,7 +34,7 @@ def read_grib(path: Path, required: set[str]) -> xr.Dataset:
                     'filter_by_keys': {'cfVarName': name},
                     'time_dims': ('valid_time',),
                     'squeeze': False,
-                    'read_keys': ['radius', 'earthMajorAxis', 'earthMinorAxis'],
+                    'read_keys': ['edition', 'radius'],
                     'cache_geo_coords': False,
                     'errors': 'raise',
                     'values_dtype': np.dtype('float64'),
@@ -62,9 +62,11 @@ def read_grib(path: Path, required: set[str]) -> xr.Dataset:
 
 
 def _field_crs(field: xr.DataArray) -> CRS:
+    # ECMWF uses R=6371229 in the model/GRIB2, but GRIB1 encodes R=6367470.
+    # These describe the same ERA5-Land nodes; normalize metadata, not values.
+    # https://confluence.ecmwf.int/spaces/CKB/pages/76414402/ERA5+data+documentation
     radius = field.attrs.get('GRIB_radius')
-    if radius:
-        return CRS.from_string(f'+proj=longlat +R={radius} +no_defs')
-    major = field.attrs['GRIB_earthMajorAxis']
-    minor = field.attrs['GRIB_earthMinorAxis']
-    return CRS.from_string(f'+proj=longlat +a={major} +b={minor} +no_defs')
+    if field.attrs.get('GRIB_gridType') != 'regular_ll' or radius not in (6367470, 6371229):
+        msg = f'Unsupported ERA5 GRIB grid and CRS: {field.attrs.get("GRIB_gridType")}, R={radius}'
+        raise StorageError(msg)
+    return CRS.from_string('+proj=longlat +R=6371229 +no_defs')

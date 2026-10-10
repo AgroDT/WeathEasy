@@ -400,9 +400,20 @@ def process_day(main: xr.Dataset, boundary: xr.Dataset, day: date) -> xr.Dataset
     values.update(_shared_daily_values(read, start))
     values['USWRF'] = ((midnight('ssrd') - midnight('ssr')) / 86400).astype(np.float32)
     values['ULWRF'] = ((midnight('strd') - midnight('str')) / 86400).astype(np.float32)
-    return _prepare_daily_values(
+    result = _prepare_daily_values(
         values, np.array([np.datetime64(day)]), main.latitude, main.longitude, main.rio.crs
     )
+    source_grib = {
+        label: {
+            name: {'edition': field.attrs['GRIB_edition'], 'radius': field.attrs['GRIB_radius']}
+            for name, field in source.data_vars.items()
+            if 'GRIB_radius' in field.attrs
+        }
+        for label, source in (('main', main), ('boundary', boundary))
+    }
+    if any(source_grib.values()):
+        result.attrs['source_grib'] = source_grib
+    return result
 
 
 def _reduce_grib_field(read, spec: const.Era5Var, start: np.datetime64):  # noqa: ANN001

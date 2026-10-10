@@ -380,10 +380,12 @@ def test_grib_single_midnight():
     )
     assert ds.sizes['time'] == 1
     np.testing.assert_allclose(ds.tp, 0.012, atol=1e-7)
-    assert ds.rio.crs.to_dict()['R'] == 6367470
+    assert ds.rio.crs.to_dict()['R'] == 6371229
 
 
-@pytest.mark.parametrize('invalid', [None, 'coordinates', 'crs', 'same_edition_grid'])
+@pytest.mark.parametrize(
+    'invalid', [None, 'known_radius', 'coordinates', 'crs', 'same_edition_grid']
+)
 def test_grib_mixed_editions_validate_actual_grid(tmp_path: Path, invalid: str | None):
     import eccodes
 
@@ -400,15 +402,17 @@ def test_grib_mixed_editions_validate_actual_grid(tmp_path: Path, invalid: str |
                         eccodes.codes_set(message, 'longitudeOfFirstGridPointInDegrees', 38.1)
                         eccodes.codes_set(message, 'longitudeOfLastGridPointInDegrees', 38.3)
                     elif invalid == 'crs':
-                        eccodes.codes_set(message, 'shapeOfTheEarth', 6)
+                        eccodes.codes_set(message, 'shapeOfTheEarth', 8)
+                if invalid == 'known_radius' and eccodes.codes_get(message, 'cfVarName') == 'sde':
+                    eccodes.codes_set(message, 'shapeOfTheEarth', 6)
                 editions.add(eccodes.codes_get(message, 'edition'))
                 grids.add(eccodes.codes_get(message, 'md5GridSection'))
                 eccodes.codes_write(message, target)
             finally:
                 eccodes.codes_release(message)
     assert editions == ({2} if invalid in ('same_edition_grid', 'crs') else {1, 2})
-    assert len(grids) == 2
-    if invalid:
+    assert len(grids) == (3 if invalid == 'known_radius' else 2)
+    if invalid not in (None, 'known_radius'):
         with pytest.raises(StorageError, match='grid and CRS'):
             read_grib(path, set(REQUIRED_INPUTS))
     else:
@@ -417,7 +421,13 @@ def test_grib_mixed_editions_validate_actual_grid(tmp_path: Path, invalid: str |
         np.testing.assert_allclose(ds.tp, 0.012, atol=1e-7)
         np.testing.assert_allclose(ds.latitude, [55.3, 55.2])
         np.testing.assert_allclose(ds.longitude, [37.1, 37.2, 37.3])
-        assert ds.rio.crs.to_dict()['R'] == 6367470
+        assert ds.rio.crs.to_dict()['R'] == 6371229
+        assert ds.t2m.attrs['GRIB_edition'] == 1
+        assert ds.t2m.attrs['GRIB_radius'] == 6367470
+        assert ds.tp.attrs['GRIB_radius'] == 6367470
+        assert ds.sde.attrs['GRIB_edition'] == 2
+        assert ds.sde.attrs['GRIB_radius'] == (6371229 if invalid == 'known_radius' else 6367470)
+        np.testing.assert_allclose(ds.sde, 0.1, atol=1e-7)
 
 
 def test_grib_ignores_unrequested_variables():
@@ -576,7 +586,9 @@ def test_s3_monthly_cache_reused_by_fresh_preparation(
         assert ds.sizes['time'] == 31
 
 
-def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(monkeypatch: pytest.MonkeyPatch):
+def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     from collections import Counter
 
     from cfgrib import dataset as grib_dataset
@@ -620,7 +632,14 @@ def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(monkeypatch: pytest
     np.testing.assert_allclose(result.PRATE * 86400, 12, atol=1e-4)
     assert np.isnan(result.TMP[0, 1, 0])
     assert np.isnan(result.TMIN[0, 1, 0])
-    assert result.spatial_ref.attrs['semi_major_axis'] == 6367470
+    assert result.spatial_ref.attrs['semi_major_axis'] == 6371229
+    assert result.attrs['source_grib']['main']['t2m'] == {'edition': 2, 'radius': 6367470}
+    assert result.attrs['source_grib']['boundary']['tp'] == {'edition': 2, 'radius': 6367470}
+    store = get_store(tmp_path / 'daily.zarr')
+    era5.write_batches(store, 'daily', [result])
+    with open_dataset(store, 'daily') as stored:
+        assert stored.attrs['source_grib'] == result.attrs['source_grib']
+        assert stored.rio.crs.to_dict()['R'] == 6371229
 
 
 @pytest.mark.parametrize('remote', [False, True])
