@@ -56,24 +56,39 @@ def source(month: date, *, boundary: bool = False):
 
 
 class FakeCDSClient:
-    __slots__ = ('calls', 'transform')
+    __slots__ = ('calls', 'jobs', 'resumed', 'transform')
 
     def __init__(self) -> None:
         self.calls = []
+        self.jobs = {}
+        self.resumed = []
         self.transform: Callable[[xr.Dataset, Mapping, int], xr.Dataset] = (
             lambda ds, _request, _call: ds
         )
 
-    def retrieve(self, _dataset: xr.Dataset, request: Mapping):
+    def submit(self, _dataset: str, request: Mapping):
         assert request['data_format'] == 'grib'
         assert len(request['variable']) <= 8
         assert len(request['variable']) * len(request['day']) * len(request['time']) * 2 <= 12000
         self.calls.append(request)
-        month = date(int(request['year']), int(request['month']), 1)
-        ds = requested_source(month, request)
-        ds = self.transform(ds, request, len(self.calls))
+        call = len(self.calls)
         # Transport tests use a lightweight response; static GRIB tests below exercise cfgrib.
-        return SimpleNamespace(download=lambda path: ds.to_netcdf(path, engine='netcdf4'))
+        remote = SimpleNamespace(
+            request_id=f'job-{call}',
+            status='successful',
+            download=lambda path: self._download(request, call, path),
+        )
+        self.jobs[remote.request_id] = remote
+        return remote
+
+    def get_remote(self, request_id: str):
+        self.resumed.append(request_id)
+        return self.jobs[request_id]
+
+    def _download(self, request: Mapping, call: int, path: str) -> None:
+        month = date(int(request['year']), int(request['month']), 1)
+        ds = self.transform(requested_source(month, request), request, call)
+        ds.to_netcdf(path, engine='netcdf4')
 
 
 @pytest.fixture
@@ -84,7 +99,11 @@ def cds_client(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(era5, 'read_grib', read_response)
     client = FakeCDSClient()
-    monkeypatch.setitem(sys.modules, 'cdsapi', SimpleNamespace(Client=lambda: client))
+    monkeypatch.setitem(
+        sys.modules,
+        'cdsapi',
+        SimpleNamespace(Client=lambda **_kwargs: SimpleNamespace(client=client)),
+    )
     return client
 
 
@@ -193,10 +212,13 @@ def test_public_monthly_download_resume_getter_and_cli(
     assert all(request['area'] == list(bbox) for request in cds_client.calls)
     assert root[''].attrs['request_bbox'] == list(bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
+    assert root[''].attrs['era5_requests'] == {}
     root[''].attrs['last_month'] = [1999, 12]  # crash before convenience marker
+    root[''].attrs['era5_requests'] = {'committed-month': 'job-6'}
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 6
     assert root[''].attrs['last_month'] == [2000, 1]
+    assert root[''].attrs['era5_requests'] == {}
     values = get_era5_data(
         store=root.store,
         begin=date(2000, 1, 31),
@@ -255,6 +277,7 @@ def test_failed_month_and_append_recover(
         era5.download_era5_data(root.store, bbox=bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     assert era5.available_period(root.store)[1] == date(2000, 1, 31)
+    assert len(root[''].attrs['era5_requests']) == 4
     broken = False
     original = xr.Dataset.to_zarr
 
@@ -271,14 +294,87 @@ def test_failed_month_and_append_recover(
     era5.download_era5_data(root.store, bbox=bbox)
     assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
     assert root['daily'].attrs['committed_length'] == 60
+    assert len(cds_client.calls) == 12  # Six jobs per month, including retries after crashes.
+    assert root[''].attrs['era5_requests'] == {}
 
 
 def test_cache_includes_bbox(tmp_path: Path, cds_client: FakeCDSClient):
     client = cds_client
     for bbox in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
-        era5._Downloader(client, tmp_path, bbox).retrieve(date(2000, 1, 1), boundary=False)
+        era5._Downloader(client, tmp_path, bbox, get_store(tmp_path / 'store')).retrieve(
+            date(2000, 1, 1), boundary=False
+        )
     assert len(client.calls) == 6
     assert len(list(tmp_path.glob('*.grib'))) == 6
+
+
+@pytest.mark.parametrize(
+    ('state', 'replacement'),
+    [
+        ('accepted', 0),
+        ('running', 0),
+        ('successful', 0),
+        ('failed', 1),
+        (404, 1),
+        (410, 1),
+        (401, None),
+        (503, None),
+    ],
+)
+def test_restart_resumes_persisted_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cds_client: FakeCDSClient,
+    state: str | int,
+    replacement: int | None,
+):
+    from requests import HTTPError, Response
+
+    store_path = tmp_path / 'store'
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    download = FakeCDSClient._download
+
+    def interrupt(_self, _request, _call, path):  # noqa: ANN001
+        # The journal must already be on disk before the SDK waits/downloads.
+        saved = era5.group_attrs(get_store(store_path), '')['era5_requests']
+        assert list(saved.values()) == ['job-1']
+        Path(path).write_bytes(b'partial download')
+        msg = 'download interrupted'
+        raise OSError(msg)
+
+    monkeypatch.setattr(FakeCDSClient, '_download', interrupt)
+    with pytest.raises(OSError, match='download interrupted'):
+        era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path)).retrieve(
+            date(2000, 1, 1), boundary=True
+        )
+    saved = era5.group_attrs(get_store(store_path), '')['era5_requests']
+    monkeypatch.setattr(FakeCDSClient, '_download', download)
+    if isinstance(state, int):
+
+        def lookup_error(_self, request_id):  # noqa: ANN001
+            assert request_id == 'job-1'
+            response = Response()
+            response.status_code = state
+            raise HTTPError(response=response)
+
+        monkeypatch.setattr(FakeCDSClient, 'get_remote', lookup_error)
+    else:
+        cds_client.jobs['job-1'].status = state
+    # A new downloader/store handle must reconstruct its state from Zarr.
+    restarted = era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path))
+    if replacement is None:
+        with pytest.raises(HTTPError):
+            restarted.retrieve(date(2000, 1, 1), boundary=True)
+        assert len(cds_client.calls) == 1
+        assert era5.group_attrs(get_store(store_path), '')['era5_requests'] == saved
+    else:
+        result = restarted.retrieve(date(2000, 1, 1), boundary=True)
+        assert len(cds_client.calls) == 3 + replacement
+        assert result.sizes['time'] == 1
+        current = era5.group_attrs(get_store(store_path), '')['era5_requests']
+        assert len(current) == 3
+        assert ('job-1' not in current.values()) == bool(replacement)
+        assert len(list((tmp_path / 'cache').glob('*.grib'))) == 3
 
 
 def test_actual_axes_reject_different_region():
@@ -379,7 +475,8 @@ def test_partial_request_missing_variable_never_publishes(
     assert len(list((tmp_path / 'cache/era5').glob('*.grib'))) == 1
     broken = False
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
-    assert len(cds_client.calls) == 7  # six successful parts; first reused from cache after failure
+    assert len(cds_client.calls) == 6  # Reuse the interrupted job as well as the cached file.
+    assert cds_client.resumed == ['job-2']
     readonly = zarr.open_group(str(tmp_path / 'store'), mode='r')
     result = get_era5_data(
         store=readonly.store,
@@ -389,6 +486,37 @@ def test_partial_request_missing_variable_never_publishes(
         variables=['WIND'],
     )
     np.testing.assert_allclose(result, [[5]])
+
+
+def test_cache_publish_failure_retains_jobs_until_month_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cds_client: FakeCDSClient,
+):
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+    publish = era5.DownloadCache.publish
+
+    def fail_publish(_self, _paths):  # noqa: ANN001
+        msg = 'cache upload interrupted'
+        raise OSError(msg)
+
+    monkeypatch.setattr(era5.DownloadCache, 'publish', fail_publish)
+    store = get_store(tmp_path / 'store')
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    with pytest.raises(OSError, match='cache upload interrupted'):
+        era5.download_era5_data(store, bbox=bbox)
+    attrs = era5.group_attrs(store, '')
+    assert 'last_month' not in attrs
+    assert set(attrs['era5_requests'].values()) == {f'job-{n}' for n in range(1, 7)}
+    assert era5.last_date(store, 'daily') is None
+    monkeypatch.setattr(era5.DownloadCache, 'publish', publish)
+    # Both temporary raw directories disappear: the retry must recover all six jobs.
+    era5.download_era5_data(get_store(tmp_path / 'store'), bbox=bbox)
+    assert len(cds_client.calls) == 6
+    assert set(cds_client.resumed) == {f'job-{n}' for n in range(1, 7)}
+    assert era5.group_attrs(store, '')['era5_requests'] == {}
+    assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
 
 
 def test_s3_monthly_cache_reused_by_fresh_preparation(

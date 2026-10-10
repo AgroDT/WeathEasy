@@ -13,7 +13,7 @@ import json
 import logging
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
@@ -127,7 +127,10 @@ def download_era5_data(
     first = next_month(previous) if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
     latest = utc_now().date() - 5 * const.ONE_DAY
     if previous:
-        set_group_attrs(store, '', last_month=[previous.year, previous.month])
+        marker = [previous.year, previous.month]
+        if group_attrs(store, '').get('last_month') != marker:
+            # Recover a crash after committing daily data but before journal cleanup.
+            set_group_attrs(store, '', last_month=marker, era5_requests={})
     if next_month(first) > latest:
         return
     try:
@@ -136,9 +139,10 @@ def download_era5_data(
     except ImportError as err:
         msg = 'ERA5 preparation requires weatheasy[prepare]'
         raise ImportError(msg) from err
-    client = cdsapi.Client()
+    # Keep cdsapi configuration/logging while using its DSS backend's job API.
+    client = cast('Any', cdsapi.Client(wait_until_complete=False)).client
     with download_cache(download_dir, 'era5') as cache:
-        downloader = _Downloader(client, cache, bbox)
+        downloader = _Downloader(client, cache, bbox, store)
         while next_month(first) <= latest:
             following = next_month(first)
             LOGGER.info('Preparing ERA5-Land %s', first.strftime('%Y-%m'))
@@ -147,17 +151,43 @@ def download_era5_data(
             _validate_boundary(main, boundary)
             _validate_bbox(main, bbox)
             write_batches(store, path, _daily_batches(main, boundary, first, bbox, cache))
-            set_group_attrs(store, '', last_month=[first.year, first.month])
+            set_group_attrs(store, '', last_month=[first.year, first.month], era5_requests={})
+            downloader.requests.clear()
             first = following
 
 
 class _Downloader:
-    __slots__ = ('bbox', 'cache', 'client')
+    __slots__ = ('bbox', 'cache', 'client', 'requests', 'store')
 
-    def __init__(self, client: Any, cache: DownloadCache | Path, bbox: tuple) -> None:
+    def __init__(self, client: Any, cache: DownloadCache | Path, bbox: tuple, store: Store) -> None:
         self.client = client
         self.cache = DownloadCache(cache) if isinstance(cache, Path) else cache
         self.bbox = bbox
+        self.store = store
+        self.requests: dict[str, str] = (
+            group_attrs(store, '').get('era5_requests', {}) if group_exists(store, '') else {}
+        )
+
+    def _request(self, key: str, request: dict) -> Any:
+        from requests import HTTPError  # noqa: PLC0415
+
+        if request_id := self.requests.get(key):
+            try:
+                remote = self.client.get_remote(request_id)
+            except HTTPError as exc:
+                if exc.response is None or exc.response.status_code not in (404, 410):
+                    raise
+                LOGGER.info('ERA5-Land request %s is no longer available; resubmitting', request_id)
+            else:
+                if remote.status not in ('failed', 'rejected', 'dismissed', 'deleted'):
+                    LOGGER.info('Resuming ERA5-Land request %s', request_id)
+                    return remote
+                LOGGER.info('ERA5-Land request %s has failed or expired; resubmitting', request_id)
+        remote = self.client.submit('reanalysis-era5-land', request)
+        self.requests[key] = remote.request_id
+        # Persist before waiting/downloading, independently of raw-cache publication.
+        set_group_attrs(self.store, '', era5_requests=self.requests)
+        return remote
 
     def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
         names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
@@ -218,7 +248,7 @@ class _Downloader:
                 ' boundary midnight' if boundary else '',
                 ', '.join(variables),
             )
-            self.client.retrieve('reanalysis-era5-land', request).download(str(pending))
+            self._request(key, request).download(str(pending))
             # Cache only readable/complete responses. Failed downloads are retried by
             # the next external job; credentials and CDS transport remain with cdsapi.
             ds = read_grib(pending, expected, required)

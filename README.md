@@ -183,6 +183,13 @@ preserved. The month is published only after every daily write and raw-cache
 upload succeeds; interrupted months are retried without duplicating dates.
 Existing NetCDF cache entries are retained but are not reused by the GRIB loader.
 
+The target Zarr's root attribute `era5_requests` maps request hashes to CDS job
+IDs, saved immediately after submission. Restarts reuse downloaded files or
+resume the saved jobs, including jobs still queued/running. Missing or terminally
+failed jobs are replaced; network/authentication errors retain their IDs. The
+journal is cleared after the month and raw-cache uploads commit successfully.
+Run one writer per target store.
+
 A full example for CFSv2:
 
 ```sh
