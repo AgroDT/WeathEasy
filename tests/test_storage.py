@@ -14,11 +14,14 @@ from zarr.storage import FsspecStore, LocalStore, MemoryStore, StoreLike
 
 from weatheasy.storage import (
     StorageError,
+    delete_group,
     get_store,
     merge_fields,
     open_dataset,
     prepare_dataset,
+    remove_group_attr,
     select_point,
+    set_group_attrs,
     write_batch,
     write_batches,
 )
@@ -58,7 +61,7 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
     with xr.open_zarr(
         path,
         group='ACCESS-CM2/historical/r1i1p1f1',
-        consolidated=False,
+        consolidated=True,
         chunks=None,
         decode_coords='all',
     ) as result:
@@ -83,11 +86,77 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
     assert arr.chunks == (1, 2, 2)
     # A new process importing only xarray can read the artifact.
     script = """import xarray as xr, sys
-x=xr.open_zarr(sys.argv[1],group='ACCESS-CM2/historical/r1i1p1f1',chunks=None,consolidated=False,decode_coords='all')
+x=xr.open_zarr(sys.argv[1],group='ACCESS-CM2/historical/r1i1p1f1',chunks=None,consolidated=True,decode_coords='all')
 assert x.TMP.sel(latitude=55.375,longitude=0.375).item()==3
 assert 'weatheasy' not in sys.modules
 """
     subprocess.run([sys.executable, '-c', script, str(path)], check=True)  # noqa: S603
+
+
+def test_append_refreshes_consolidated_shape_and_commit_marker():
+    store = MemoryStore()
+    write_batch(store, 'forecast/flx', field())
+    write_batch(store, 'forecast/flx', field(day='2026-01-02'))
+    with xr.open_zarr(
+        store, group='forecast/flx', consolidated=True, chunks=None, decode_coords='all'
+    ) as ds:
+        assert ds.sizes['time'] == ds.attrs['committed_length'] == 2
+        assert ds.attrs['write_state'] == 'complete'
+        np.testing.assert_array_equal(
+            ds.time, np.array(['2026-01-01', '2026-01-02'], dtype='datetime64[ns]')
+        )
+        assert ds.TMP.isel(time=1, latitude=1, longitude=1).item() == 3
+
+
+@pytest.mark.parametrize('group', ['', 'forecast/flx'])
+def test_attribute_update_refreshes_consolidated_metadata(group: str):
+    store = MemoryStore()
+    write_batch(store, 'forecast/flx', field())
+    set_group_attrs(store, group, description='original')
+
+    set_group_attrs(store, group, description='updated')
+
+    root = zarr.open_group(store, use_consolidated=True)
+    target = root[group] if group else root
+    assert target.attrs['description'] == 'updated'
+
+
+def test_readiness_removal_refreshes_consolidated_metadata():
+    store = MemoryStore()
+    write_batch(store, 'forecast/flx', field())
+    set_group_attrs(store, '', updated='2026-01-02')
+    assert zarr.open_group(store, use_consolidated=True).attrs['updated'] == '2026-01-02'
+
+    remove_group_attr(store, '', 'updated')
+
+    assert 'updated' not in zarr.open_group(store, use_consolidated=True).attrs
+
+
+def test_group_deletion_refreshes_consolidated_metadata_and_preserves_other_groups():
+    store = MemoryStore()
+    write_batch(store, 'forecast/flx', field())
+    write_batch(store, 'reanalysis/pgb', field())
+    assert 'forecast/flx' in zarr.open_group(store, use_consolidated=True)
+
+    delete_group(store, 'forecast')
+
+    root = zarr.open_group(store, use_consolidated=True)
+    assert 'forecast' not in root
+    assert 'reanalysis/pgb' in root
+    with xr.open_zarr(store, group='reanalysis/pgb', consolidated=True, chunks=None) as ds:
+        assert ds.TMP.isel(time=0, latitude=1, longitude=1).item() == 3
+
+
+def test_group_recreation_replaces_consolidated_dates():
+    store = MemoryStore()
+    write_batch(store, 'forecast/flx', field())
+    delete_group(store, 'forecast')
+
+    write_batch(store, 'forecast/flx', field(day='2026-01-03'))
+
+    with xr.open_zarr(store, group='forecast/flx', consolidated=True, chunks=None) as ds:
+        assert ds.sizes['time'] == 1
+        assert ds.time.to_numpy()[0] == np.datetime64('2026-01-03')
 
 
 def test_point_selection_preserves_cmip6_latitude_orientation():
@@ -178,12 +247,17 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pyt
         write_batch(store, 'grid', field(day='2026-01-02'))
     with pytest.raises(StorageError, match='completed'):
         open_dataset(store, 'grid')
+    assert zarr.open_group(store).metadata.consolidated_metadata is None
+    assert zarr.open_group(store)['grid'].attrs['write_state'] == 'writing'
     assert zarr.open_group(store)['grid'].attrs['committed_length'] == 1
     monkeypatch.setattr(xr.Dataset, 'to_zarr', real_write)
     write_batch(store, 'grid', field(day='2026-01-02'))
     recovered = open_dataset(store, 'grid')
     np.testing.assert_array_equal(recovered.TMP[0], field().TMP[0])
     np.testing.assert_array_equal(recovered.TMP[1], field().TMP[0])
+    with xr.open_zarr(store, group='grid', consolidated=True, chunks=None) as ds:
+        assert ds.sizes['time'] == ds.attrs['committed_length'] == 2
+        assert ds.attrs['write_state'] == 'complete'
 
 
 def test_streamed_month_is_published_only_after_iterator_finishes_and_retry_recovers():
@@ -276,9 +350,12 @@ def test_open_dataset_resolves_s3_uri_for_metadata_and_xarray(
             }
         )
 
-    def open_group(store: StoreLike, *, mode: str, zarr_format: int) -> SimpleNamespace:
+    def open_group(
+        store: StoreLike, *, mode: str, zarr_format: int, use_consolidated: bool
+    ) -> SimpleNamespace:
         assert mode == 'r'
         assert zarr_format == 3
+        assert use_consolidated is False
         seen.append(store)
         return SimpleNamespace(get_group=get_group)
 
@@ -304,12 +381,15 @@ def test_get_storage_preserves_shared_s3_filesystem(monkeypatch: pytest.MonkeyPa
     s3fs = pytest.importorskip('s3fs')
     filesystem = s3fs.S3FileSystem(asynchronous=True)
 
-    def open_group(store: StoreLike, *, mode: str, zarr_format: int) -> StoreLike:
+    def open_group(
+        store: StoreLike, *, mode: str, zarr_format: int, use_consolidated: bool
+    ) -> StoreLike:
         assert isinstance(store, FsspecStore)
         assert store.fs is filesystem
         assert store.path == 'weather-bucket/zarr'
         assert mode == 'a'
         assert zarr_format == 3
+        assert use_consolidated is False
         return store
 
     monkeypatch.setattr(zarr, 'open_group', open_group)

@@ -89,7 +89,7 @@ class BuildConfig(TypedDict):
 def _build_group(
     output: Store, config: BuildConfig, lats: np.ndarray, lons: np.ndarray
 ) -> zarr.Group:
-    group = zarr.open_group(output, mode='a', zarr_format=3)
+    group = zarr.open_group(output, mode='a', zarr_format=3, use_consolidated=False)
     previous = group.attrs.get('build_config')
     if previous is None:
         if list(group.keys()) or dict(group.attrs):
@@ -152,6 +152,7 @@ def build_copdem(
     }
     group = _build_group(output, config, lats, lons)
     if group.attrs['build_status'] == 'complete':
+        zarr.consolidate_metadata(output)
         _LOG.info('DEM is already complete: %s', output)
         return
 
@@ -178,6 +179,7 @@ def build_copdem(
     cast('zarr.Array', group['slope_we'])[:] = slope_we
     cast('zarr.Array', group['slope_sn'])[:] = slope_sn
     group.attrs['build_status'] = 'complete'
+    zarr.consolidate_metadata(output)
     _LOG.info('Completed %s  grid=%dx%d', output, n_lat, n_lon)
 
 

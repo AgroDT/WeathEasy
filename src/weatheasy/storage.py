@@ -76,7 +76,7 @@ def get_store(uri: str | PathLike[str], *, filesystem: AsyncFileSystem | None = 
 
 def group_attrs(store: Store, group: str) -> dict[str, Any]:
     """Read metadata from a group without exposing Zarr objects to readers."""
-    root = zarr.open_group(store, mode='r', zarr_format=3)
+    root = zarr.open_group(store, mode='r', zarr_format=3, use_consolidated=False)
     target = root.get_group(group) if group else root
     return dict(target.attrs)
 
@@ -84,7 +84,7 @@ def group_attrs(store: Store, group: str) -> dict[str, Any]:
 def group_exists(store: Store, group: str) -> bool:
     """Check whether a group exists without creating it."""
     try:
-        root = zarr.open_group(store, mode='r', zarr_format=3)
+        root = zarr.open_group(store, mode='r', zarr_format=3, use_consolidated=False)
     except FileNotFoundError:
         return False
     if not group:
@@ -99,30 +99,36 @@ def group_exists(store: Store, group: str) -> bool:
 
 def pristine_group(store: Store, group: str) -> bool:
     """Recognize an empty loader-created group; incomplete writes are not empty."""
-    root = zarr.open_group(store, mode='r', zarr_format=3)
+    root = zarr.open_group(store, mode='r', zarr_format=3, use_consolidated=False)
     target = root.get_group(group)
     return not target.attrs and not any(target.keys())
 
 
 def set_group_attrs(store: Store, group: str, **attrs: Any) -> None:
     """Create a metadata group if needed and update its attributes."""
-    root = zarr.open_group(store, mode='a', zarr_format=3)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
+    root.update_attributes(dict(root.attrs))
     target = root.require_group(group) if group else root
     target.attrs.update(attrs)
+    zarr.consolidate_metadata(store)
 
 
 def remove_group_attr(store: Store, group: str, key: str) -> None:
     """Remove a readiness marker before mutating its published data."""
-    root = zarr.open_group(store, mode='a', zarr_format=3)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
+    root.update_attributes(dict(root.attrs))
     target = root.get_group(group) if group else root
     target.attrs.pop(key, None)
+    zarr.consolidate_metadata(store)
 
 
 def delete_group(store: Store, group: str) -> None:
     """Remove a group in place, retaining the current published path."""
-    root = zarr.open_group(store, mode='a', zarr_format=3)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
     if group in root:
+        root.update_attributes(dict(root.attrs))
         del root[group]
+        zarr.consolidate_metadata(store)
 
 
 def _normalize_spatial_axes(ds: xr.Dataset) -> xr.Dataset:
@@ -307,7 +313,7 @@ def write_batches(  # noqa: C901
         raise StorageError(msg)
     ds = dataset.copy()
     signature = _signature(ds)
-    root = zarr.open_group(store, mode='a', zarr_format=3)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
     target = root.require_group(group)
     count = int(cast('int', target.attrs.get('committed_length', 0)))
     if 'storage_schema' in target.attrs:
@@ -328,10 +334,14 @@ def write_batches(  # noqa: C901
             if ds.time.to_numpy()[0] <= last:
                 msg = 'New timestamps must follow all committed timestamps'
                 raise StorageError(msg)
-            _truncate_uncommitted(target, count)
     elif list(target.keys()) or target.attrs:
         msg = 'Existing group is not a coordinate-aware weatheasy store'
         raise StorageError(msg)
+    # Saving metadata opened without consolidation removes the old snapshot
+    # before any array is resized. Readers must see live metadata during writes.
+    root.update_attributes(dict(root.attrs))
+    if count:
+        _truncate_uncommitted(target, count)
     attrs = dict(ds.attrs, grid_signature=signature, committed_length=count, write_state='writing')
     target.attrs.update(attrs)
     ds.attrs = attrs
@@ -354,6 +364,7 @@ def write_batches(  # noqa: C901
         del ds, dataset
     target = root.get_group(group)
     target.attrs.update(committed_length=count + written, write_state='complete')
+    zarr.consolidate_metadata(store)
 
 
 def _write_time_batch(
@@ -405,7 +416,7 @@ def _write_time_batch(
 
 def open_dataset(store: Store, group: str) -> xr.Dataset:
     """Open a fully committed group without GRIB ingestion dependencies or Dask."""
-    root = zarr.open_group(store, mode='r', zarr_format=3)
+    root = zarr.open_group(store, mode='r', zarr_format=3, use_consolidated=False)
     target = root.get_group(group)
     if (
         target.attrs.get('storage_schema') != SCHEMA
@@ -425,7 +436,7 @@ def open_dataset(store: Store, group: str) -> xr.Dataset:
 
 def last_date(store: Store, group: str) -> date | None:
     """Last committed day, including after a failed append awaiting retry."""
-    root = zarr.open_group(store, mode='a', zarr_format=3)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
     if group not in root:
         return None
     target = root.get_group(group)

@@ -331,7 +331,10 @@ after importing rioxarray.
 
 Weather arrays use NaN for both the Zarr fill value and CF `_FillValue`.
 Empty chunks are not written during either creation or append; missing chunks
-therefore remain NaN when read. CMIP6 NetCDF preparation is still eager;
+therefore remain NaN when read. Metadata is consolidated after successful writes
+and refreshed after group or attribute changes. During a write, the previous
+consolidated snapshot is removed; only groups with `write_state="complete"`
+are ready for consumption. CMIP6 NetCDF preparation is still eager;
 ERA5-Land GRIB preparation uses bounded daily batches. Dask is not required.
 
 CFS2 forecast grids have permanent group paths
@@ -346,7 +349,7 @@ import xarray as xr
 forecast = xr.open_zarr(
     "s3://weatheasy/cfs2.zarr",
     group="forecast/flx",
-    consolidated=False,
+    consolidated=True,
     chunks=None,
     decode_coords="all",
 )
@@ -438,7 +441,7 @@ can supply their filesystem when resolving S3 artifact directories.
 
 Create a prepared DEM `Store` with `weatheasy.storage.get_store` and pass it to
 `build_copdem`, training or correction. Direct xarray consumers can open the DEM
-with `xr.open_zarr(store, consolidated=False, chunks=None, decode_coords="all")`.
+with `xr.open_zarr(store, consolidated=True, chunks=None, decode_coords="all")`.
 
 ## AquaCrop weather
 

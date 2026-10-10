@@ -45,7 +45,7 @@ def test_build_publishes_spatial_terrain_store(
     store = MemoryStore() if in_memory else get_store(tmp_path / 'dem.zarr')
     build_copdem.build_copdem((61, 10, 60, 12), 0.5, store)
     elevation = np.array([[10, 20, 0, 0], [30, 40, 0, 0]], np.float32)
-    with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
+    with xr.open_zarr(store, consolidated=True, chunks=None, decode_coords='all') as ds:
         np.testing.assert_array_equal(ds.latitude, [60.25, 60.75])
         np.testing.assert_array_equal(ds.longitude, [10.25, 10.75, 11.25, 11.75])
         np.testing.assert_array_equal(ds.elevation, elevation)

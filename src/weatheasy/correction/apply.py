@@ -12,7 +12,7 @@ import xarray as xr
 
 from .precip import PrecipCorrector
 from .temperature import TemperatureCorrector
-from weatheasy.storage import last_date, open_dataset, prepare_dataset, write_batch
+from weatheasy.storage import delete_group, last_date, open_dataset, prepare_dataset, write_batch
 
 
 if TYPE_CHECKING:
@@ -81,7 +81,7 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
             source.name,
             raw_first,
         )
-        del root[source.correction_path]
+        delete_group(root.store, path)
         frontier = None
         begin = raw_first  # Old progress no longer applies to the recreated arrays.
     else:

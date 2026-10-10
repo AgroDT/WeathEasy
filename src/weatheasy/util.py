@@ -38,7 +38,9 @@ def get_storage(root: str | Path, *, filesystem: AsyncFileSystem | None = None) 
     """
     from weatheasy.storage import get_store  # noqa: PLC0415
 
-    return zarr.open_group(get_store(root, filesystem=filesystem), mode='a', zarr_format=3)
+    return zarr.open_group(
+        get_store(root, filesystem=filesystem), mode='a', zarr_format=3, use_consolidated=False
+    )
 
 
 def float_formatter_factory(nan: str, precision: int) -> FormatFloat:
