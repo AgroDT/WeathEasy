@@ -11,6 +11,8 @@ import calendar
 import hashlib
 import json
 import logging
+import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -100,6 +102,7 @@ def download_era5_data(
     download_dir: str | Path | FileStore | None = None,
     *,
     bbox: tuple[float, float, float, float] | None = None,
+    max_pending_requests: int = 3,
 ) -> None:
     """Append complete months through the last month with available midnight data.
 
@@ -107,6 +110,9 @@ def download_era5_data(
     publication lag is five days; only whole months are requested. Run as an
     external job. No download is triggered by API or prepared-data reads.
     """
+    if max_pending_requests < 1:
+        msg = 'max_pending_requests must be at least 1'
+        raise ValueError(msg)
     bbox = bbox or (90.0, -180.0, -90.0, 180.0)
     north, west, south, east = bbox
     if not np.isfinite(bbox).all() or not (
@@ -130,8 +136,9 @@ def download_era5_data(
         marker = [previous.year, previous.month]
         if group_attrs(store, '').get('last_month') != marker:
             # Recover a crash after committing daily data but before journal cleanup.
-            set_group_attrs(store, '', last_month=marker, era5_requests={})
+            set_group_attrs(store, '', last_month=marker)
     if next_month(first) > latest:
+        set_group_attrs(store, '', era5_requests={})
         return
     try:
         # The CDS client is optional and needed only for a pending download.
@@ -142,28 +149,52 @@ def download_era5_data(
     # Keep cdsapi configuration/logging while using its DSS backend's job API.
     client = cast('Any', cdsapi.Client(wait_until_complete=False)).client
     with download_cache(download_dir, 'era5') as cache:
-        downloader = _Downloader(client, cache, bbox, store)
+        downloader = _Downloader(client, cache, bbox, store, max_pending_requests)
         while next_month(first) <= latest:
             following = next_month(first)
+            started = time.monotonic()
+            downloader.plan(first, latest)
             LOGGER.info('Preparing ERA5-Land %s', first.strftime('%Y-%m'))
-            main = downloader.retrieve(first, boundary=False)
-            boundary = downloader.retrieve(following, boundary=True)
+            main, boundary = downloader.retrieve_month(first)
             _validate_boundary(main, boundary)
             _validate_bbox(main, bbox)
             write_batches(store, path, _daily_batches(main, boundary, first, bbox))
-            set_group_attrs(store, '', last_month=[first.year, first.month], era5_requests={})
-            downloader.requests.clear()
+            downloader.commit(first)
+            LOGGER.info('Prepared ERA5-Land %s in %.1f s', first, time.monotonic() - started)
             first = following
 
 
-class _Downloader:
-    __slots__ = ('bbox', 'cache', 'client', 'requests', 'store')
+@dataclass(frozen=True)
+class _Part:
+    month: date
+    boundary: bool
+    request: dict
+    required: set[str]
+    key: str
 
-    def __init__(self, client: Any, cache: DownloadCache | Path, bbox: tuple, store: Store) -> None:
+    @property
+    def filename(self) -> str:
+        return f'{self.month:%Y%m}-{self.key}.grib'
+
+
+class _Downloader:
+    __slots__ = ('bbox', 'cache', 'client', 'limit', 'parts', 'pending', 'requests', 'store')
+
+    def __init__(
+        self,
+        client: Any,
+        cache: DownloadCache | Path,
+        bbox: tuple,
+        store: Store,
+        max_pending_requests: int = 3,
+    ) -> None:
         self.client = client
         self.cache = DownloadCache(cache) if isinstance(cache, Path) else cache
         self.bbox = bbox
         self.store = store
+        self.limit = max_pending_requests
+        self.parts: dict[str, _Part] = {}
+        self.pending: dict[str, Any] = {}
         self.requests: dict[str, str] = (
             group_attrs(store, '').get('era5_requests', {}) if group_exists(store, '') else {}
         )
@@ -189,32 +220,97 @@ class _Downloader:
         set_group_attrs(self.store, '', era5_requests=self.requests)
         return remote
 
-    def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
+    def _parts(self, month: date, *, boundary: bool) -> list[_Part]:
         names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
         names.update({cds: nc for nc, cds in EXTRA.items()})
         variables = sorted(names)
-        pieces = []
-        # Retain bounded request sizes; GRIB skips the server's NetCDF conversion.
-        for offset in range(0, len(variables), 8):
-            subset = variables[offset : offset + 8]
-            pieces.append(
-                self._retrieve_part(
-                    month,
-                    subset,
-                    {names[name] for name in subset},
-                    boundary=boundary,
-                )
-            )
-        return xr.merge(pieces, join='exact', compat='identical')
+        return [
+            self._part(month, variables[offset : offset + 8], names, boundary=boundary)
+            for offset in range(0, len(variables), 8)
+        ]
 
-    def _retrieve_part(
+    def plan(self, month: date, latest: date) -> None:
+        # Only this month and the next may occupy the submission window.
+        for owner in (month, next_month(month)):
+            if next_month(owner) <= latest:
+                for part in self._parts(owner, boundary=False) + self._parts(
+                    next_month(owner), boundary=True
+                ):
+                    self.parts[part.key] = part
+        self.requests = {key: value for key, value in self.requests.items() if key in self.parts}
+        set_group_attrs(self.store, '', era5_requests=self.requests)
+        self._fill()
+
+    def _fill(self) -> None:
+        for key, part in self.parts.items():
+            if len(self.pending) >= self.limit:
+                break
+            if key not in self.pending and not self.cache.exists(part.filename):
+                self.pending[key] = self._request(key, part.request)
+
+    def retrieve_month(self, month: date) -> tuple[xr.Dataset, xr.Dataset]:
+        main = self._parts(month, boundary=False)
+        boundary = self._parts(next_month(month), boundary=True)
+        pieces = self._retrieve(main + boundary)
+        return (
+            xr.merge(pieces[: len(main)], join='exact', compat='identical'),
+            xr.merge(pieces[len(main) :], join='exact', compat='identical'),
+        )
+
+    def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
+        return xr.merge(
+            self._retrieve(self._parts(month, boundary=boundary)), join='exact', compat='identical'
+        )
+
+    def _retrieve(self, parts: list[_Part]) -> list[xr.Dataset]:
+        self.parts.update((part.key, part) for part in parts)
+        self._fill()
+        wanted = {part.key for part in parts if not self.cache.exists(part.filename)}
+        pieces = {part.key: self._read(part) for part in parts if part.key not in wanted}
+        while wanted:
+            for key, remote in self.pending.items():
+                if key in wanted and remote.results_ready:
+                    part = self.parts[key]
+                    path = self.cache.file(part.filename)
+                    pending = path.with_suffix('.pending')
+                    LOGGER.info('Downloading ERA5-Land GRIB: %s', path.name)
+                    started = time.monotonic()
+                    remote.download(str(pending))
+                    LOGGER.info('Downloaded %s in %.1f s', path.name, time.monotonic() - started)
+                    pending.replace(path)
+                    del self.pending[key]
+                    wanted.remove(key)
+                    # Let CDS work while this file is uploaded and processed.
+                    self._fill()
+                    started = time.monotonic()
+                    self.cache.publish([path])
+                    LOGGER.info('Cached %s in %.1f s', path.name, time.monotonic() - started)
+                    pieces[key] = self._read(part)
+                    break
+            else:
+                time.sleep(10)
+        return [pieces[part.key] for part in parts]
+
+    def commit(self, month: date) -> None:
+        parts = self._parts(month, boundary=False) + self._parts(next_month(month), boundary=True)
+        for part in parts:
+            self.requests.pop(part.key, None)
+            self.parts.pop(part.key, None)
+        set_group_attrs(
+            self.store, '', last_month=[month.year, month.month], era5_requests=self.requests
+        )
+        if self.cache.remote is not None or self.cache.temporary:
+            for part in parts:
+                (self.cache.root / part.filename).unlink(missing_ok=True)
+
+    def _part(
         self,
         month: date,
         variables: list[str],
-        required: set[str],
+        names: dict[str, str],
         *,
         boundary: bool,
-    ) -> xr.Dataset:
+    ) -> _Part:
         if boundary:
             day = ['01']
             time_ = ['00:00']
@@ -233,28 +329,22 @@ class _Downloader:
             'download_format': 'unarchived',
         }
         key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:20]
-        path = self.cache.file(f'{month:%Y%m}-{key}.grib')
-        start = np.datetime64(month, 'h')
+        return _Part(month, boundary, request, {names[name] for name in variables}, key)
+
+    def _read(self, part: _Part) -> xr.Dataset:
+        path = self.cache.file(part.filename)
+        # Also retry a publication that failed after a complete local download.
+        self.cache.publish([path])
+        start = np.datetime64(part.month, 'h')
         expected = (
             np.array([start])
-            if boundary
-            else np.arange(start, np.datetime64(next_month(month), 'h'), np.timedelta64(1, 'h'))
-        )
-        if not path.exists():
-            pending = path.with_suffix('.pending')
-            LOGGER.info(
-                'Requesting ERA5-Land %s%s: %s',
-                month.strftime('%Y-%m'),
-                ' boundary midnight' if boundary else '',
-                ', '.join(variables),
+            if part.boundary
+            else np.arange(
+                start, np.datetime64(next_month(part.month), 'h'), np.timedelta64(1, 'h')
             )
-            self._request(key, request).download(str(pending))
-            pending.replace(path)
-            self.cache.publish([path])
-        else:
-            LOGGER.info('Reusing ERA5-Land GRIB cache: %s', path.name)
-        ds = read_grib(path, expected, required)
-        _validate(ds, month, boundary=boundary, required=required)
+        )
+        ds = read_grib(path, expected, part.required)
+        _validate(ds, part.month, boundary=part.boundary, required=part.required)
         return ds
 
 

@@ -76,6 +76,7 @@ class FakeCDSClient:
         remote = SimpleNamespace(
             request_id=f'job-{call}',
             status='successful',
+            results_ready=True,
             download=lambda path: self._download(request, call, path),
         )
         self.jobs[remote.request_id] = remote
@@ -277,7 +278,7 @@ def test_failed_month_and_append_recover(
         era5.download_era5_data(root.store, bbox=bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     assert era5.available_period(root.store)[1] == date(2000, 1, 31)
-    assert len(root[''].attrs['era5_requests']) == 4
+    assert len(root[''].attrs['era5_requests']) == 6
     broken = False
     original = xr.Dataset.to_zarr
 
@@ -344,7 +345,7 @@ def test_restart_resumes_persisted_job(
 
     monkeypatch.setattr(FakeCDSClient, '_download', interrupt)
     with pytest.raises(OSError, match='download interrupted'):
-        era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path)).retrieve(
+        era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1).retrieve(
             date(2000, 1, 1), boundary=True
         )
     saved = era5.group_attrs(get_store(store_path), '')['era5_requests']
@@ -361,7 +362,7 @@ def test_restart_resumes_persisted_job(
     else:
         cds_client.jobs['job-1'].status = state
     # A new downloader/store handle must reconstruct its state from Zarr.
-    restarted = era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path))
+    restarted = era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1)
     if replacement is None:
         with pytest.raises(HTTPError):
             restarted.retrieve(date(2000, 1, 1), boundary=True)
@@ -441,6 +442,7 @@ def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     main(configure_logging=False)
     assert calls[0][1]['bbox'] == (55.3, 37.1, 55.2, 37.3)
+    assert calls[0][1]['max_pending_requests'] == 3
 
 
 def requested_source(month: date, request: Mapping):
@@ -484,15 +486,14 @@ def test_partial_request_missing_variable_preserves_raw_but_never_publishes_dail
     # Validation failures retain raw responses; retry must still reject bad input.
     with pytest.raises(StorageError, match='Missing ERA5'):
         era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
-    assert len(cds_client.calls) == 2
-    assert cds_client.resumed == []
+    assert len(cds_client.calls) == 5
     assert 'daily' not in root
     # Explicitly discard the invalid response before fetching corrected source data.
     read_paths[-1].unlink()
     broken = False
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 6  # Reuse the interrupted job as well as the cached file.
-    assert cds_client.resumed == ['job-2']
+    assert 'job-2' in cds_client.resumed
     readonly = zarr.open_group(str(tmp_path / 'store'), mode='r')
     result = get_era5_data(
         store=readonly.store,
@@ -524,13 +525,13 @@ def test_cache_publish_failure_retains_jobs_until_month_commits(
         era5.download_era5_data(store, bbox=bbox)
     attrs = era5.group_attrs(store, '')
     assert 'last_month' not in attrs
-    assert set(attrs['era5_requests'].values()) == {'job-1'}
+    assert set(attrs['era5_requests'].values()) == {'job-1', 'job-2', 'job-3', 'job-4'}
     assert era5.last_date(store, 'daily') is None
     monkeypatch.setattr(era5.DownloadCache, 'publish', publish)
     # The temporary raw directory disappears: retry recovers the first job.
     era5.download_era5_data(get_store(tmp_path / 'store'), bbox=bbox)
     assert len(cds_client.calls) == 6
-    assert set(cds_client.resumed) == {'job-1'}
+    assert set(cds_client.resumed) == {'job-1', 'job-2', 'job-3', 'job-4'}
     assert era5.group_attrs(store, '')['era5_requests'] == {}
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
 
@@ -637,10 +638,44 @@ def test_processing_failure_preserves_download_before_grib_read(
     with pytest.raises(ValueError, match='GRIB processing interrupted'):
         era5.download_era5_data(store, location, bbox=bbox)
     assert len(reads) == 1
-    assert len(cds_client.calls) == 1
+    assert len(cds_client.calls) == 4
     assert era5.last_date(store, 'daily') is None
     monkeypatch.setattr(era5, 'read_grib', read)
     era5.download_era5_data(get_store(tmp_path / 'store'), location, bbox=bbox)
     assert len(cds_client.calls) == 6
-    assert cds_client.resumed == []
+    assert set(cds_client.resumed) == {'job-2', 'job-3', 'job-4'}
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
+
+
+@pytest.mark.parametrize('limit', [1, 3])
+def test_submission_window_and_restart_keep_next_month_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient, limit: int
+):
+    downloaded = []
+
+    def download(_self, _request, call, path):  # noqa: ANN001
+        downloaded.append(call)
+        Path(path).write_bytes(b'GRIB')
+        # The oldest job finishes after a newer result has been downloaded.
+        cds_client.jobs['job-1'].results_ready = True
+
+    monkeypatch.setattr(FakeCDSClient, '_download', download)
+    monkeypatch.setattr(era5._Downloader, '_read', lambda _self, _part: xr.Dataset())
+    store = get_store(tmp_path / 'store')
+    cache = tmp_path / 'cache'
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    loader = era5._Downloader(cds_client, cache, bbox, store, limit)
+    loader.plan(date(2000, 1, 1), date(2000, 3, 10))
+    assert len(cds_client.calls) == limit
+    if limit == 3:
+        cds_client.jobs['job-1'].results_ready = False
+    loader.retrieve_month(date(2000, 1, 1))
+    assert downloaded == ([1, 2, 3, 4, 5, 6] if limit == 1 else [2, 1, 3, 4, 5, 6])
+    assert len(cds_client.calls) == 6 + limit
+    loader.commit(date(2000, 1, 1))
+    saved = era5.group_attrs(store, '')['era5_requests']
+    assert set(saved.values()) == {f'job-{i}' for i in range(7, 7 + limit)}
+    restarted = era5._Downloader(cds_client, cache, bbox, store, limit)
+    restarted.plan(date(2000, 2, 1), date(2000, 3, 10))
+    assert len(cds_client.calls) == 6 + limit
+    assert set(cds_client.resumed) == set(saved.values())

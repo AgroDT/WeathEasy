@@ -87,6 +87,12 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         )
         if source == 'era5':
             sub.add_argument(
+                '--max-pending-requests',
+                type=int,
+                default=3,
+                help='maximum outstanding CDS requests (default: 3)',
+            )
+            sub.add_argument(
                 '--bbox',
                 type=float,
                 nargs=4,

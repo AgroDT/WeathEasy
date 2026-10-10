@@ -184,11 +184,20 @@ preserved. The month is published only after every daily write and raw-cache
 upload succeeds; interrupted months are retried without duplicating dates.
 Existing NetCDF cache entries are retained but are not reused by the GRIB loader.
 
+The loader keeps up to three outstanding CDS requests by default. Set
+`--max-pending-requests N` to change the window (`1` sends requests sequentially).
+Ready results are downloaded independently of submission order within each
+month, and the window is refilled before raw-cache uploads. Requests
+may be submitted for the current and next month; processing and Zarr writes
+remain sequential. Temporary GRIB working copies are removed after their month
+commits; a persistent local download cache is retained.
+
 The target Zarr's root attribute `era5_requests` maps request hashes to CDS job
 IDs, saved immediately after submission. Restarts reuse downloaded files or
 resume the saved jobs, including jobs still queued/running. Missing or terminally
 failed jobs are replaced; network/authentication errors retain their IDs. The
-journal is cleared after the month and raw-cache uploads commit successfully.
+journal drops only the completed month after its data and raw-cache uploads
+commit successfully, preserving jobs submitted for the next month.
 Run one writer per target store.
 
 A full example for CFSv2:

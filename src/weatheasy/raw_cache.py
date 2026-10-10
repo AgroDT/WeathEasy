@@ -20,10 +20,19 @@ if TYPE_CHECKING:
 class DownloadCache:
     """Reuse working paths and publish files as soon as downloads complete."""
 
-    def __init__(self, root: Path, remote: FileStore | None = None) -> None:
+    def __init__(
+        self, root: Path, remote: FileStore | None = None, *, temporary: bool = False
+    ) -> None:
         self.root = root
         self.remote = remote
+        self.temporary = temporary
         self._new: set[Path] = set()
+
+    def exists(self, name: str) -> bool:
+        """Check availability without fetching a remote working copy."""
+        return (self.root / name).is_file() or (
+            self.remote is not None and self.remote.exists(name)
+        )
 
     def file(self, name: str) -> Path:
         path = self.root / name
@@ -69,4 +78,4 @@ def download_cache(location: str | Path | FileStore | None, *parts: str) -> Iter
             yield DownloadCache(root)
             return
     with TemporaryDirectory() as temporary:
-        yield DownloadCache(Path(temporary), store)
+        yield DownloadCache(Path(temporary), store, temporary=True)
