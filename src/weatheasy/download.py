@@ -59,7 +59,6 @@ def download_cfs2_data(store: Store, download_dir: str | Path | FileStore | None
         _download_cfs2_forecast(forecast_begin, yesterday, session, forecast)
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast)
         _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast.root)
-        forecast.publish(forecast.root.glob('*.grb2'))
         set_group_attrs(store, '', updated=today.isoformat())
 
 
@@ -88,7 +87,6 @@ def download_cmip6_data(store: Store, download_dir: str | Path | FileStore | Non
                     )
                 )
                 _LOG.info('Saving %s/%s', path, year)
-                cache.publish([source])
                 write_batch(store, path, dataset)
 
 
@@ -122,7 +120,6 @@ def _download_cfs2_reanalysis(
                 if last is not None and date_ <= last:
                     continue
                 daily = _daily_cfs2(paths, kind, date_)
-                download_dir.publish(paths)
                 write_batch(store, path, daily)
         else:
             _LOG.warning('%s was not found on the server', date_)
@@ -256,6 +253,7 @@ class _Cfs2ReanalysisDownloader:
                     raise RuntimeError(msg)
                 _LOG.info('Writing %s', path)
                 path.write_bytes(response.content)
+                self._download_dir.publish([path])
             paths.append(path)
         return paths
 
@@ -299,6 +297,7 @@ class _Cfs2ForecastDownloader:
                     sys.exit(1)
                 _LOG.info('Writing %s', path)
                 path.write_bytes(response.content)
+                self._download_dir.publish([path])
             else:
                 _LOG.critical('Failed to download %s', response.url)
 
@@ -328,4 +327,5 @@ def _load_cmip6_dataset(cache: DownloadCache, var: str, year: int, session: Clie
         sys.exit(1)
     _LOG.info('Writing %s', path)
     path.write_bytes(response.content)
+    cache.publish([path])
     return path

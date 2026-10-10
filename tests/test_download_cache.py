@@ -25,7 +25,7 @@ class TrackingFileSystem(MemoryFileSystem):
         return super().open(path, mode, **kwargs)
 
 
-def test_remote_cache_publishes_after_processing_and_fetches_once(tmp_path: Path):
+def test_remote_cache_publishes_download_and_fetches_once(tmp_path: Path):
     fs = TrackingFileSystem(skip_instance_cache=True)
     remote = FileStore(fs, f'{tmp_path.name}/raw')
     with download_cache(remote, 'era5') as cache:
@@ -61,17 +61,17 @@ def test_local_cache_uses_original_path_without_copy(
     assert original.read_bytes() == b'original'
 
 
-def test_failed_processing_does_not_publish(tmp_path: Path):
+def test_incomplete_download_does_not_publish(tmp_path: Path):
     remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
 
-    def process():
+    def interrupted_download():
         with download_cache(remote) as cache:
             cache.file('bad.nc').write_bytes(b'incomplete')
-            msg = 'bad data'
+            msg = 'download interrupted'
             raise ValueError(msg)
 
-    with pytest.raises(ValueError, match='bad data'):
-        process()
+    with pytest.raises(ValueError, match='download interrupted'):
+        interrupted_download()
     assert not remote.exists('bad.nc')
 
 
@@ -106,22 +106,27 @@ def test_cmip6_public_download_processes_working_file_and_reuses_cache(
     def read(path: Path, **kwargs):
         processed.append(path)
         if remote and len(processed) == 1:
-            assert not backing.child('cmip6').exists('tas_2000.nc')
+            assert backing.child('cmip6').exists('tas_2000.nc')
             assert fs.reads == []
         if not remote:
             assert path == tmp_path / 'downloads' / 'cmip6' / 'tas_2000.nc'
+        if len(processed) == 1:
+            msg = 'processing interrupted'
+            raise ValueError(msg)
         return original_read(path, **kwargs)
 
     monkeypatch.setattr(download, 'read_netcdf', read)
+    with pytest.raises(ValueError, match='processing interrupted'):
+        download.download_cmip6_data(get_store(tmp_path / 'prepared1'), location)
     download.download_cmip6_data(get_store(tmp_path / 'prepared1'), location)
     if remote:
         assert backing.child('cmip6').exists('tas_2000.nc')
-        assert fs.reads == []
+        assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc']
     download.download_cmip6_data(get_store(tmp_path / 'prepared2'), location)
     assert len(requests) == 1
-    assert len(processed) == 2
+    assert len(processed) == 3
     if remote:
-        assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc']
+        assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc'] * 2
 
 
 def test_cfs2_downloaders_reuse_remote_files_without_http(tmp_path: Path):
@@ -139,7 +144,7 @@ def test_cfs2_downloaders_reuse_remote_files_without_http(tmp_path: Path):
             paths = download._Cfs2ReanalysisDownloader(session, cache)(date(2000, 1, 1))
             assert len(paths) == 4
             assert all(path.read_bytes() == b'GRIB' for path in paths)
-            cache.publish(paths)
+            assert len(remote.child('reanalysis').glob('**/*.grib2')) == 4
         with download_cache(remote, 'forecast') as cache:
             downloader = download._Cfs2ForecastDownloader(
                 session, cache, date(2000, 1, 1), date(2000, 1, 2)
@@ -149,7 +154,7 @@ def test_cfs2_downloaders_reuse_remote_files_without_http(tmp_path: Path):
             paths = list(cache.root.glob('*.grb2'))
             assert len(paths) == 4
             assert all(path.read_bytes() == b'GRIB' for path in paths)
-            cache.publish(paths)
+            assert len(remote.child('forecast').glob('*.grb2')) == 4
         assert len(calls) == 8
         assert len(fs.reads) == attempt * 8
 
@@ -159,21 +164,23 @@ def test_upload_failure_leaves_cmip6_preparation_retryable(
 ):
     from weatheasy.storage import last_date
 
-    source = tmp_path / 'source.nc'
-    source.write_bytes(b'input')
     monkeypatch.setattr(const, 'CMIP6_VARS', ['tas'])
     monkeypatch.setattr(const, 'CMIP6_FIRST_YEAR', 2000)
     monkeypatch.setattr(const, 'CMIP6_LAST_YEAR', 2000)
-    monkeypatch.setattr(download, '_load_cmip6_dataset', lambda *_args: source)
-    dataset = xr.Dataset(
-        {'tas': (('time', 'latitude', 'longitude'), np.full((366, 2, 2), 280.0))},
-        coords={
-            'time': np.arange('2000-01-01', '2001-01-01', dtype='datetime64[D]'),
-            'latitude': [0.125, 0.375],
-            'longitude': [0.125, 0.375],
-        },
+    monkeypatch.setattr(
+        download,
+        '_session',
+        lambda: nullcontext(
+            SimpleNamespace(
+                get=lambda *_args, **_kwargs: SimpleNamespace(is_success=True, content=b'input')
+            )
+        ),
     )
-    monkeypatch.setattr(download, 'read_netcdf', lambda *_args, **_kwargs: dataset)
+
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail('processing must start only after cache publication')
+
+    monkeypatch.setattr(download, 'read_netcdf', unexpected_read)
 
     def fail_upload(*_args):
         msg = 'upload failed'

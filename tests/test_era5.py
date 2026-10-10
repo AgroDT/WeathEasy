@@ -451,7 +451,7 @@ def requested_source(month: date, request: Mapping):
     ]
 
 
-def test_partial_request_missing_variable_never_publishes(
+def test_partial_request_missing_variable_preserves_raw_but_never_publishes_daily(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cds_client: FakeCDSClient,
@@ -466,13 +466,29 @@ def test_partial_request_missing_variable_never_publishes(
         return ds.drop_vars([next(iter(ds.data_vars))]) if broken and call == 2 else ds
 
     cds_client.transform = drop_variable
+    read = era5.read_grib
+    read_paths = []
+
+    def track_read(path, expected, required):  # noqa: ANN001
+        read_paths.append(path)
+        return read(path, expected, required)
+
+    monkeypatch.setattr(era5, 'read_grib', track_read)
     root = get_storage(str(tmp_path / 'store'))
     bbox = (55.3, 37.1, 55.2, 37.3)
     with pytest.raises(StorageError, match='Missing ERA5'):
         era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert 'last_month' not in root[''].attrs
     assert 'daily' not in root
-    assert len(list((tmp_path / 'cache/era5').glob('*.grib'))) == 1
+    assert len(list((tmp_path / 'cache/era5').glob('*.grib'))) == 2
+    # Validation failures retain raw responses; retry must still reject bad input.
+    with pytest.raises(StorageError, match='Missing ERA5'):
+        era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
+    assert len(cds_client.calls) == 2
+    assert cds_client.resumed == []
+    assert 'daily' not in root
+    # Explicitly discard the invalid response before fetching corrected source data.
+    read_paths[-1].unlink()
     broken = False
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
     assert len(cds_client.calls) == 6  # Reuse the interrupted job as well as the cached file.
@@ -508,13 +524,13 @@ def test_cache_publish_failure_retains_jobs_until_month_commits(
         era5.download_era5_data(store, bbox=bbox)
     attrs = era5.group_attrs(store, '')
     assert 'last_month' not in attrs
-    assert set(attrs['era5_requests'].values()) == {f'job-{n}' for n in range(1, 7)}
+    assert set(attrs['era5_requests'].values()) == {'job-1'}
     assert era5.last_date(store, 'daily') is None
     monkeypatch.setattr(era5.DownloadCache, 'publish', publish)
-    # Both temporary raw directories disappear: the retry must recover all six jobs.
+    # The temporary raw directory disappears: retry recovers the first job.
     era5.download_era5_data(get_store(tmp_path / 'store'), bbox=bbox)
     assert len(cds_client.calls) == 6
-    assert set(cds_client.resumed) == {f'job-{n}' for n in range(1, 7)}
+    assert set(cds_client.resumed) == {'job-1'}
     assert era5.group_attrs(store, '')['era5_requests'] == {}
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
 
@@ -588,3 +604,43 @@ def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(monkeypatch: pytest
     assert np.isnan(result.TMP[0, 1, 0])
     assert np.isnan(result.TMIN[0, 1, 0])
     assert result.spatial_ref.attrs['semi_major_axis'] == 6367470
+
+
+@pytest.mark.parametrize('remote', [False, True])
+def test_processing_failure_preserves_download_before_grib_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient, *, remote: bool
+):
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy.file_storage import FileStore
+
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+    backing = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    location = backing if remote else tmp_path / 'cache'
+    read = era5.read_grib
+    reads = []
+
+    def fail_read(path, _expected, _required):  # noqa: ANN001
+        reads.append(path)
+        if remote:
+            assert backing.child('era5').exists(path.name)
+        else:
+            assert path.parent == tmp_path / 'cache' / 'era5'
+            assert path.is_file()
+        msg = 'GRIB processing interrupted'
+        raise ValueError(msg)
+
+    monkeypatch.setattr(era5, 'read_grib', fail_read)
+    store = get_store(tmp_path / 'store')
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    with pytest.raises(ValueError, match='GRIB processing interrupted'):
+        era5.download_era5_data(store, location, bbox=bbox)
+    assert len(reads) == 1
+    assert len(cds_client.calls) == 1
+    assert era5.last_date(store, 'daily') is None
+    monkeypatch.setattr(era5, 'read_grib', read)
+    era5.download_era5_data(get_store(tmp_path / 'store'), location, bbox=bbox)
+    assert len(cds_client.calls) == 6
+    assert cds_client.resumed == []
+    assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))

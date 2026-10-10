@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class DownloadCache:
-    """Reuse working paths and publish new files only after processing succeeds."""
+    """Reuse working paths and publish files as soon as downloads complete."""
 
     def __init__(self, root: Path, remote: FileStore | None = None) -> None:
         self.root = root
@@ -42,7 +42,7 @@ class DownloadCache:
         return path
 
     def publish(self, paths: Iterable[Path]) -> None:
-        """Upload new processed files, keeping their local working copies."""
+        """Upload new downloaded files, keeping their local working copies."""
         if self.remote is None:
             return
         for path in paths:

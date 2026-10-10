@@ -150,7 +150,7 @@ def download_era5_data(
             boundary = downloader.retrieve(following, boundary=True)
             _validate_boundary(main, boundary)
             _validate_bbox(main, bbox)
-            write_batches(store, path, _daily_batches(main, boundary, first, bbox, cache))
+            write_batches(store, path, _daily_batches(main, boundary, first, bbox))
             set_group_attrs(store, '', last_month=[first.year, first.month], era5_requests={})
             downloader.requests.clear()
             first = following
@@ -249,22 +249,17 @@ class _Downloader:
                 ', '.join(variables),
             )
             self._request(key, request).download(str(pending))
-            # Cache only readable/complete responses. Failed downloads are retried by
-            # the next external job; credentials and CDS transport remain with cdsapi.
-            ds = read_grib(pending, expected, required)
-            _validate(ds, month, boundary=boundary, required=required)
             pending.replace(path)
-            return read_grib(path, expected, required)
-        LOGGER.info('Reusing ERA5-Land GRIB cache: %s', path.name)
+            self.cache.publish([path])
+        else:
+            LOGGER.info('Reusing ERA5-Land GRIB cache: %s', path.name)
         ds = read_grib(path, expected, required)
         _validate(ds, month, boundary=boundary, required=required)
         return ds
 
 
-def _daily_batches(
-    main: xr.Dataset, boundary: xr.Dataset, month: date, bbox: tuple, cache: DownloadCache
-):
-    """Keep the entire month uncommitted until all days and cache uploads succeed."""
+def _daily_batches(main: xr.Dataset, boundary: xr.Dataset, month: date, bbox: tuple):
+    """Keep the entire month uncommitted until all days are processed."""
     days = calendar.monthrange(month.year, month.month)[1]
     for offset in range(days):
         day = month + offset * const.ONE_DAY
@@ -273,7 +268,6 @@ def _daily_batches(
         ds.attrs['request_bbox'] = list(bbox)
         yield ds
         del ds
-    cache.publish(cache.root.glob('*.grib'))
 
 
 def process_day(main: xr.Dataset, boundary: xr.Dataset, day: date) -> xr.Dataset:

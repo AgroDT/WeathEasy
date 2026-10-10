@@ -163,8 +163,9 @@ for details.
 Optionally you can provide a local path or `s3://<bucket>/<prefix>` to
 `--download-cache` to preserve original downloaded files (GRIB2 for CFSv2,
 GRIB for ERA5-Land, and NetCDF for CMIP6). Local directories are used directly. With S3,
-new files are downloaded and processed locally before uploading; cached files
-are fetched only when needed.
+new files are downloaded locally and uploaded to the cache before processing,
+so a processing failure does not require downloading from the source again.
+Cached files are fetched only when needed.
 
 For ERA5, use `--bbox NORTH WEST SOUTH EAST` in decimal degrees EPSG:4326
 to limit the download region, without antimeridian crossing:
