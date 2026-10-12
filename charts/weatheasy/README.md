@@ -117,8 +117,12 @@ For an S3-compatible service set `s3.endpoint`; for AWS leave it empty. Region a
 other SDK settings can be supplied with `extraEnv` or the existing Secret.
 
 ERA5 additionally needs CDS credentials. Its `sources.era5.update.envFrom` can reference
-a separate Secret supplying `CDSAPI_URL` and `CDSAPI_KEY`; this Secret is passed
-only to ERA5 update containers.
+a separate Secret supplying `CDSAPI_KEY`; this Secret is passed only to ERA5 update
+containers. `sources.era5.update.extraEnv` defaults `CDSAPI_URL` to
+`https://cds.climate.copernicus.eu/api`. To use another endpoint, override that entry
+in `extraEnv`. Helm replaces arrays, so retain the `CDSAPI_URL` entry when adding
+other source-specific environment variables. Explicit `extraEnv` entries take
+precedence over variables supplied by `envFrom`.
 
 For workload identity, configure `serviceAccount.annotations`, or set
 `serviceAccount.create: false` and `serviceAccount.name` to an existing account.
@@ -260,7 +264,7 @@ remain extensible and are validated by Kubernetes.
 | `sources.era5.update.failedJobsHistoryLimit` | integer | `1` | Number of failed Jobs to retain. |
 | `sources.era5.update.resources` | object | `{}` | Download container resource requests and limits. |
 | `sources.era5.update.envFrom` | array | `[]` | Source-specific Secret/ConfigMap references, appended to global entries. |
-| `sources.era5.update.extraEnv` | array | `[]` | Source-specific EnvVar entries, appended to global entries. |
+| `sources.era5.update.extraEnv` | array | `[{"name":"CDSAPI_URL","value":"https://cds.climate.copernicus.eu/api"}]` | Source-specific EnvVar entries, appended to global entries. |
 | `sources.era5.update.bbox` | array | `[]` | Optional ERA5 bounding box [north, west, south, east]. |
 | `sources.era5.update.correction.enabled` | boolean | `false` | Apply correction after successful download. |
 | `sources.era5.update.correction.dem` | string | `""` | Published DEM Zarr URI; required when this update and correction are enabled. |

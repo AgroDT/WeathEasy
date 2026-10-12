@@ -572,7 +572,12 @@
                     "type": "object"
                   },
                   "description": "Source-specific EnvVar entries, appended to global entries.",
-                  "default": []
+                  "default": [
+                    {
+                      "name": "CDSAPI_URL",
+                      "value": "https://cds.climate.copernicus.eu/api"
+                    }
+                  ]
                 },
                 "bbox": {
                   "type": "array",

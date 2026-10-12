@@ -185,7 +185,9 @@ sources:
       # Source-specific Secret/ConfigMap references, appended to global entries.
       envFrom: []
       # Source-specific EnvVar entries, appended to global entries.
-      extraEnv: []
+      extraEnv:
+      - name: CDSAPI_URL
+        value: https://cds.climate.copernicus.eu/api
       # Optional ERA5 bounding box [north, west, south, east].
       bbox: []
       correction:
