@@ -495,6 +495,7 @@ def test_temperature_application_matches_training_features(
 ):
     source, root, station, _ = cell_observations
     corrector = recording_corrector
+    assert corrector.climatology is not None
     rows = training._temp_features(
         training.sample_reanalysis(source, root, station, 'TMP', 1.0), corrector.climatology
     )
@@ -511,6 +512,7 @@ def test_precipitation_application_matches_training_features(
 ):
     source, root, station, _ = cell_observations
     corrector = recording_corrector
+    assert corrector.climatology is not None
     rows = training._precip_features(
         training.sample_reanalysis(source, root, station, 'PRATE', source.precip_to_mm),
         corrector.climatology,

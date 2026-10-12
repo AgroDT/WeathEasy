@@ -205,8 +205,9 @@ def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
         with pytest.raises(RuntimeError, match='interrupted'):
             build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
         group = zarr.open_group(store)
+        tile_status = group.get_array('tile_status')
         np.testing.assert_array_equal(
-            group['tile_status'][:], [[0, 0, 0] if stage == 'tile' else [1, 2, 1]]
+            tile_status[:], [[0, 0, 0] if stage == 'tile' else [1, 2, 1]]
         )
         with pytest.raises(ValueError, match='incomplete'):
             load_dem(store)
@@ -224,7 +225,7 @@ def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
     build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
     assert len(reads) == (3 if stage == 'tile' else 0)
     assert zarr.open_group(store).attrs['build_status'] == 'complete'
-    np.testing.assert_array_equal(group['tile_status'][:], [[1, 2, 1]])
+    np.testing.assert_array_equal(tile_status[:], [[1, 2, 1]])
     np.testing.assert_array_equal(
         load_dem(store)['elevation'], [[10, 20, 0, 0, 50, 50], [30, 40, 0, 0, 50, 50]]
     )
@@ -294,7 +295,7 @@ def test_resume_after_interrupted_store_write(monkeypatch: pytest.MonkeyPatch, s
         with pytest.raises(RuntimeError, match='interrupted'):
             build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
         group = zarr.open_group(store)
-        np.testing.assert_array_equal(group['tile_status'][:], [[0]])
+        np.testing.assert_array_equal(group.get_array('tile_status')[:], [[0]])
         assert group.attrs['build_status'] != 'complete'
     reads.clear()
     build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
@@ -323,8 +324,10 @@ def test_initialization_does_not_write_field_chunks(
     assert any(file.startswith('latitude/c/') for file in files)
     assert any(file.startswith('longitude/c/') for file in files)
     group = zarr.open_group(store)
-    np.testing.assert_array_equal(group['tile_status'][:], np.zeros((2, 2), dtype=np.uint8))
-    assert np.isnan(group['elevation'][:]).all()
+    np.testing.assert_array_equal(
+        group.get_array('tile_status')[:], np.zeros((2, 2), dtype=np.uint8)
+    )
+    assert np.isnan(group.get_array('elevation')[:]).all()
     assert group.attrs['build_status'] == 'building'
     with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
         assert ds.rio.crs.to_epsg() == 4326
@@ -371,7 +374,7 @@ def test_grouped_chunks_are_written_once_and_resumed_as_whole_blocks(
     with pytest.raises(RuntimeError, match='interrupted second chunk'):
         build_copdem.build_copdem((62, 10, 60, 13), 0.5, store)
     group = zarr.open_group(store)
-    np.testing.assert_array_equal(group['tile_status'][:], [[1, 2, 0], [1, 1, 0]])
+    np.testing.assert_array_equal(group.get_array('tile_status')[:], [[1, 2, 0], [1, 1, 0]])
     assert writes == [('/elevation', (4, 4)), ('/tile_status', (2, 2))]
     interrupted = False
     reads.clear()

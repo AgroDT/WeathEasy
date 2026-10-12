@@ -222,7 +222,7 @@ def test_adapter_units_independent_fallback_and_readonly(
 
 
 def test_corrected_precipitation_nan_does_not_fall_back(corrected_weather: zarr.Group):
-    corrected_weather['correction/PRATE_corr'][3] = np.nan
+    corrected_weather.get_array('correction/PRATE_corr')[3] = np.nan
     actual = read_weather(corrected_weather)
     assert np.isnan(actual.pr[3])
     assert read_weather(corrected_weather, use_corrected=False).pr[3] == pytest.approx(2)
@@ -230,8 +230,8 @@ def test_corrected_precipitation_nan_does_not_fall_back(corrected_weather: zarr.
 
 def test_nonpositive_et0_becomes_nan(corrected_weather: zarr.Group):
     # Zero radiation and saturated air give negative net radiation and ET0.
-    corrected_weather['daily/DSWRF'][3] = 0
-    corrected_weather['daily/RH'][3] = 100
+    corrected_weather.get_array('daily/DSWRF')[3] = 0
+    corrected_weather.get_array('daily/RH')[3] = 100
     assert np.isnan(read_weather(corrected_weather).et0[3])
 
 
