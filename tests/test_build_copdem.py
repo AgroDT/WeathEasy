@@ -182,7 +182,6 @@ def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
 
     store = MemoryStore()
     reads = []
-    original_slopes = build_copdem._slopes
 
     def read(url: str, cells: int):
         reads.append(url)
@@ -200,16 +199,17 @@ def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(build_copdem, '_read_tile_block', read)
-    if stage == 'slopes':
-        monkeypatch.setattr(build_copdem, '_slopes', interrupted_slopes)
-    with pytest.raises(RuntimeError, match='interrupted'):
-        build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
-    group = zarr.open_group(store)
-    np.testing.assert_array_equal(
-        group['tile_status'][:], [[0, 0, 0] if stage == 'tile' else [1, 2, 1]]
-    )
-    with pytest.raises(ValueError, match='incomplete'):
-        load_dem(store)
+    with monkeypatch.context() as patch:
+        if stage == 'slopes':
+            patch.setattr(build_copdem, '_slopes', interrupted_slopes)
+        with pytest.raises(RuntimeError, match='interrupted'):
+            build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
+        group = zarr.open_group(store)
+        np.testing.assert_array_equal(
+            group['tile_status'][:], [[0, 0, 0] if stage == 'tile' else [1, 2, 1]]
+        )
+        with pytest.raises(ValueError, match='incomplete'):
+            load_dem(store)
     reads.clear()
 
     def resume_read(url: str, cells: int):
@@ -221,7 +221,6 @@ def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
         return np.full((cells, cells), 50, np.float32)
 
     monkeypatch.setattr(build_copdem, '_read_tile_block', resume_read)
-    monkeypatch.setattr(build_copdem, '_slopes', original_slopes)
     build_copdem.build_copdem((61, 10, 60, 13), 0.5, store)
     assert len(reads) == (3 if stage == 'tile' else 0)
     assert zarr.open_group(store).attrs['build_status'] == 'complete'
@@ -244,6 +243,7 @@ def test_resume_retries_unfinished_chunk_and_skips_completed_chunk(
         ('invalid TIFF', False),
         ('tile404.tif: invalid TIFF', False),
     ],
+    ids=['missing-tile', 'access-denied', 'invalid-tiff', 'filename-with-404'],
 )
 def test_remote_read_only_treats_404_as_missing(
     monkeypatch: pytest.MonkeyPatch, error: str, *, missing: bool
@@ -286,17 +286,16 @@ def test_resume_after_interrupted_store_write(monkeypatch: pytest.MonkeyPatch, s
         return np.full((cells, cells), 25, np.float32)
 
     monkeypatch.setattr(build_copdem, '_read_tile_block', read)
-    if stage == 'initialization':
-        monkeypatch.setattr(build_copdem, '_initialize_zarr', interrupted_initialize)
-    else:
-        monkeypatch.setattr(zarr.Array, '__setitem__', interrupted_setitem)
-    with pytest.raises(RuntimeError, match='interrupted'):
-        build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
-    group = zarr.open_group(store)
-    np.testing.assert_array_equal(group['tile_status'][:], [[0]])
-    assert group.attrs['build_status'] != 'complete'
-    monkeypatch.setattr(build_copdem, '_initialize_zarr', original_initialize)
-    monkeypatch.setattr(zarr.Array, '__setitem__', original_setitem)
+    with monkeypatch.context() as patch:
+        if stage == 'initialization':
+            patch.setattr(build_copdem, '_initialize_zarr', interrupted_initialize)
+        else:
+            patch.setattr(zarr.Array, '__setitem__', interrupted_setitem)
+        with pytest.raises(RuntimeError, match='interrupted'):
+            build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
+        group = zarr.open_group(store)
+        np.testing.assert_array_equal(group['tile_status'][:], [[0]])
+        assert group.attrs['build_status'] != 'complete'
     reads.clear()
     build_copdem.build_copdem((61, 10, 60, 11), 0.5, store)
     assert len(reads) == 1

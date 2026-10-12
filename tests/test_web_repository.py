@@ -15,13 +15,13 @@ if TYPE_CHECKING:
     from weatheasy.web.repository import ReadPlan
 
 
-@pytest.fixture
-def anyio_backend():
+@pytest.fixture(name='anyio_backend')
+def get_anyio_backend():
     return 'asyncio'
 
 
-@pytest.fixture
-def query() -> DataQuery:
+@pytest.fixture(name='query')
+def create_query() -> DataQuery:
     pytest.importorskip('fastapi')
     from weatheasy.query import Coords
     from weatheasy.web.models import DataQuery
@@ -157,7 +157,11 @@ async def test_repository_reads_ready_store_concurrently():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(('read_timeout', 'operation_timeout'), [(2, 0.05), (0.05, 2)])
+@pytest.mark.parametrize(
+    ('read_timeout', 'operation_timeout'),
+    [(2, 0.05), (0.05, 2)],
+    ids=['operation-timeout', 'read-timeout'],
+)
 async def test_hung_storage_operation_times_out_and_releases_read_slot(
     query: DataQuery, read_timeout: float, operation_timeout: float
 ):

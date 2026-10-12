@@ -17,12 +17,27 @@ from weatheasy.raw_cache import download_cache
 from weatheasy.storage import get_store, open_dataset, prepare_dataset, set_group_attrs, write_batch
 
 
-@pytest.fixture(autouse=True)
-def isolated_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.fixture(name='isolated_work_dir', autouse=True)
+def init_isolated_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'state'))
     monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'local-app-data'))
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('USERPROFILE', str(tmp_path / 'home'))
+
+
+@pytest.fixture(name='working_cache_files')
+def create_working_cache_files(tmp_path: Path):
+    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    with download_cache(remote, 'era5', work_dir=tmp_path / 'work') as cache:
+        paths = {name: cache.file(f'{name}.grib') for name in ('needed', 'obsolete', 'recent')}
+        paths['partial'] = cache.root / 'needed.grib.part'
+        paths['metadata'] = cache.root / '.weatheasy-cache.json'
+        for name in ('needed', 'obsolete', 'recent', 'partial'):
+            paths[name].write_bytes(b'data')
+        old = time.time() - 30 * 86400
+        for name in ('needed', 'obsolete', 'metadata'):
+            os.utime(paths[name], (old, old))
+        yield cache, paths
 
 
 class TrackingFileSystem(MemoryFileSystem):
@@ -87,8 +102,8 @@ def test_incomplete_download_does_not_publish(tmp_path: Path):
     assert not remote.exists('bad.nc')
 
 
-@pytest.mark.parametrize('remote', [False, True])
-@pytest.mark.parametrize('full_year', [False, True])
+@pytest.mark.parametrize('remote', [False, True], ids=['local-cache', 'remote-cache'])
+@pytest.mark.parametrize('full_year', [False, True], ids=['partial-year', 'full-year'])
 def test_cmip6_public_download_processes_working_file_and_reuses_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool, full_year: bool
 ):
@@ -221,32 +236,47 @@ def test_upload_failure_leaves_cmip6_preparation_retryable(
     assert last_date(store, 'tas') is None
 
 
-def test_cleanup_keeps_old_needed_files_and_local_cache(tmp_path: Path):
-    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
-    with download_cache(remote, 'era5', work_dir=tmp_path / 'work') as cache:
-        needed = cache.file('needed.grib')
-        stale = cache.file('obsolete.grib')
-        recent = cache.file('recent.grib')
-        partial = cache.root / 'needed.grib.part'
-        for path in (needed, stale, recent, partial):
-            path.write_bytes(b'data')
-        old = time.time() - 30 * 86400
-        for path in (needed, stale):
-            os.utime(path, (old, old))
-        metadata = cache.root / '.weatheasy-cache.json'
-        os.utime(metadata, (old, old))
-        cache.cleanup(lambda name: name == 'needed.grib')
-        assert metadata.is_file()
-        assert needed.read_bytes() == b'data'
-        assert recent.read_bytes() == b'data'
-        assert not stale.exists()
-        assert not partial.exists()
-        cache.release([needed])
-        assert not needed.exists()
+def test_cleanup_preserves_old_needed_file(working_cache_files: tuple):
+    cache, paths = working_cache_files
+    cache.cleanup(lambda name: name == 'needed.grib')
+    assert paths['needed'].read_bytes() == b'data'
 
+
+def test_cleanup_removes_old_unneeded_file(working_cache_files: tuple):
+    cache, paths = working_cache_files
+    cache.cleanup(lambda name: name == 'needed.grib')
+    assert not paths['obsolete'].exists()
+
+
+def test_cleanup_preserves_recent_file(working_cache_files: tuple):
+    cache, paths = working_cache_files
+    cache.cleanup(lambda _name: False)
+    assert paths['recent'].read_bytes() == b'data'
+
+
+def test_cleanup_preserves_cache_metadata(working_cache_files: tuple):
+    cache, paths = working_cache_files
+    cache.cleanup(lambda _name: False)
+    assert paths['metadata'].is_file()
+
+
+def test_cleanup_removes_partial_file(working_cache_files: tuple):
+    cache, paths = working_cache_files
+    cache.cleanup(lambda name: name == 'needed.grib')
+    assert not paths['partial'].exists()
+
+
+def test_release_removes_working_file(working_cache_files: tuple):
+    cache, paths = working_cache_files
+    cache.release([paths['needed']])
+    assert not paths['needed'].exists()
+
+
+def test_cleanup_and_release_preserve_local_cache(tmp_path: Path):
     with download_cache(tmp_path / 'local', 'era5', work_dir=tmp_path / 'unused') as cache:
         path = cache.file('obsolete.grib')
         path.write_bytes(b'original')
+        old = time.time() - 30 * 86400
         os.utime(path, (old, old))
         cache.cleanup(lambda _name: False, max_age_days=0)
         cache.release([path])
@@ -260,7 +290,6 @@ def test_upload_retry_uses_retained_download_without_remote_fetch(
 ):
     fs = TrackingFileSystem(skip_instance_cache=True)
     remote = FileStore(fs, f'{tmp_path.name}/raw')
-    publish = FileStore.write_atomic
 
     @contextmanager
     def fail_upload(_self, _name):  # noqa: ANN001
@@ -268,15 +297,15 @@ def test_upload_retry_uses_retained_download_without_remote_fetch(
         raise OSError(msg)
         yield  # Make failure occur when entering the upload context.
 
-    monkeypatch.setattr(FileStore, 'write_atomic', fail_upload)
-    with download_cache(remote, 'cmip6', work_dir=tmp_path / 'work') as cache:
-        path = cache.file('tas_2000.nc')
-        cache.write(path, b'complete provider response')
-        with pytest.raises(OSError, match='upload interrupted'):
-            cache.publish([path])
-    assert path.read_bytes() == b'complete provider response'
-    assert not remote.child('cmip6').exists('tas_2000.nc')
-    monkeypatch.setattr(FileStore, 'write_atomic', publish)
+    with monkeypatch.context() as patch:
+        patch.setattr(FileStore, 'write_atomic', fail_upload)
+        with download_cache(remote, 'cmip6', work_dir=tmp_path / 'work') as cache:
+            path = cache.file('tas_2000.nc')
+            cache.write(path, b'complete provider response')
+            with pytest.raises(OSError, match='upload interrupted'):
+                cache.publish([path])
+        assert path.read_bytes() == b'complete provider response'
+        assert not remote.child('cmip6').exists('tas_2000.nc')
     with download_cache(remote, 'cmip6', work_dir=tmp_path / 'work') as cache:
         assert cache.file('tas_2000.nc') == path
         cache.publish([path])
@@ -322,12 +351,12 @@ def test_provider_write_failure_never_exposes_partial_as_complete(
 
     with download_cache(remote, 'cmip6', work_dir=tmp_path / 'work') as cache:
         path = cache.file('tas.nc')
-        monkeypatch.setattr(Path, 'write_bytes', interrupt)
-        with pytest.raises(OSError, match='disk write interrupted'):
-            cache.write(path, b'complete response')
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'write_bytes', interrupt)
+            with pytest.raises(OSError, match='disk write interrupted'):
+                cache.write(path, b'complete response')
         assert not cache.exists('tas.nc')
         assert not list(cache.root.glob('*.part'))
-    monkeypatch.setattr(Path, 'write_bytes', original_write)
     with download_cache(remote, 'cmip6', work_dir=tmp_path / 'work') as cache:
         path = cache.file('tas.nc')
         cache.write(path, b'complete response')

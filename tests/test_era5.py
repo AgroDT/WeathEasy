@@ -17,15 +17,58 @@ from weatheasy.storage import StorageError, get_store, open_dataset
 from weatheasy.util import get_storage
 
 
-@pytest.fixture(autouse=True)
-def isolated_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+FIXTURES = Path(__file__).parent / 'fixtures' / 'era5'
+
+
+@pytest.fixture(name='isolated_work_dir', autouse=True)
+def init_isolated_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'state'))
     monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'local-app-data'))
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('USERPROFILE', str(tmp_path / 'home'))
 
 
-FIXTURES = Path(__file__).parent / 'fixtures' / 'era5'
+@pytest.fixture(name='cds_client')
+def create_cds_client(monkeypatch: pytest.MonkeyPatch):
+    def read_response(path, required):  # noqa: ANN001
+        with xr.open_dataset(path, engine='netcdf4', decode_coords='all') as ds:
+            return ds[sorted(required)].load()
+
+    monkeypatch.setattr(era5, 'read_grib', read_response)
+    client = FakeCDSClient()
+    monkeypatch.setitem(
+        sys.modules,
+        'cdsapi',
+        SimpleNamespace(Client=lambda **_kwargs: SimpleNamespace(client=client)),
+    )
+    return client
+
+
+@pytest.fixture(
+    name='hourly_month',
+    params=[date(2000, 2, 1), date(2000, 12, 1)],
+    ids=['leap-february', 'december'],
+)
+def create_hourly_month(request: pytest.FixtureRequest):
+    month = request.param
+    main = source(month)
+    boundary = source(era5.next_month(month), boundary=True)
+    # 23 UTC is deliberately wrong; only the next midnight has the full accumulation.
+    main['tp'][23::24] = 0.001
+    boundary['tp'][:] = 0.012
+    return month, main, boundary
+
+
+@pytest.fixture(name='january_store')
+def create_january_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: 'FakeCDSClient'
+):
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+    root = get_storage(str(tmp_path / 'store'))
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    era5.download_era5_data(root.store, bbox=bbox)
+    return root, bbox, cds_client
 
 
 def source(month: date, *, boundary: bool = False):
@@ -102,30 +145,8 @@ class FakeCDSClient:
         ds.to_netcdf(path, engine='netcdf4')
 
 
-@pytest.fixture
-def cds_client(monkeypatch: pytest.MonkeyPatch):
-    def read_response(path, required):  # noqa: ANN001
-        with xr.open_dataset(path, engine='netcdf4', decode_coords='all') as ds:
-            return ds[sorted(required)].load()
-
-    monkeypatch.setattr(era5, 'read_grib', read_response)
-    client = FakeCDSClient()
-    monkeypatch.setitem(
-        sys.modules,
-        'cdsapi',
-        SimpleNamespace(Client=lambda **_kwargs: SimpleNamespace(client=client)),
-    )
-    return client
-
-
-@pytest.mark.parametrize('month', [date(2000, 2, 1), date(2000, 12, 1)])
-def test_daily_units_midnight_wind_and_coordinates(month: date):
-    main = source(month)
-    boundary = source(era5.next_month(month), boundary=True)
-    # 23 UTC is deliberately wrong; only the NEXT midnight carries full accumulation.
-    main['tp'][23::24] = 0.001
-    boundary['tp'][:] = 0.012
-    main['t2m'][0, 0, 0] = np.nan
+def test_daily_reduction_preserves_month_dates(hourly_month: tuple):
+    month, main, boundary = hourly_month
     result = xr.concat(
         [
             era5.process_day(main, boundary, month + i * const.ONE_DAY)
@@ -133,29 +154,78 @@ def test_daily_units_midnight_wind_and_coordinates(month: date):
         ],
         dim='time',
     )
-    assert result.sizes['time'] == (era5.next_month(month) - month).days
+    expected = np.arange(np.datetime64(month), np.datetime64(era5.next_month(month)))
+    np.testing.assert_array_equal(result.time, expected.astype('datetime64[ns]'))
+
+
+def test_daily_wind_averages_speed_before_components(hourly_month: tuple):
+    month, main, boundary = hourly_month
+    result = era5.process_day(main, boundary, month)
     np.testing.assert_allclose(result.WIND, 5)
     np.testing.assert_allclose(result.UGRD, 0)
     np.testing.assert_allclose(result.VGRD, 0)
-    np.testing.assert_allclose(result.PRATE[:-1] * 86400, 8)
-    np.testing.assert_allclose(result.PRATE[-1] * 86400, 12)
-    for var, expected in {
-        'PRES': 1000,
-        'PEVPR': 4,
-        'LHTFL': 100,
-        'SHTFL': 50,
-        'DSWRF': 100,
-        'DLWRF': 200,
-        'USWRF': 25,
-        'ULWRF': 210,
-        'WEASD': 20,
-    }.items():
-        np.testing.assert_allclose(result[var], expected)
-    np.testing.assert_allclose(result.RH[1:], 100)
+
+
+@pytest.mark.parametrize(
+    ('last_day', 'expected'), [(False, 8), (True, 12)], ids=['first-day', 'last-day']
+)
+def test_daily_precipitation_uses_next_midnight(
+    hourly_month: tuple, *, last_day: bool, expected: float
+):
+    month, main, boundary = hourly_month
+    day = era5.next_month(month) - const.ONE_DAY if last_day else month
+    result = era5.process_day(main, boundary, day)
+    np.testing.assert_allclose(result.PRATE * 86400, expected)
+
+
+@pytest.mark.parametrize(
+    ('variable', 'expected'),
+    [
+        ('PRES', 1000),
+        ('PEVPR', 4),
+        ('LHTFL', 100),
+        ('SHTFL', 50),
+        ('DSWRF', 100),
+        ('DLWRF', 200),
+        ('USWRF', 25),
+        ('ULWRF', 210),
+        ('WEASD', 20),
+        ('RH', 100),
+    ],
+)
+def test_daily_unit_conversion(hourly_month: tuple, variable: str, expected: float):
+    month, main, boundary = hourly_month
+    result = era5.process_day(main, boundary, month)
+    np.testing.assert_allclose(result[variable], expected)
+
+
+def test_daily_temperature_preserves_missing_hour(hourly_month: tuple):
+    month, main, boundary = hourly_month
+    main['t2m'][0, 0, 0] = np.nan
+    result = era5.process_day(main, boundary, month)
     assert np.isnan(result.TMP[0, 1, 0])
+
+
+def test_daily_reduction_uses_product_crs(hourly_month: tuple):
+    month, main, boundary = hourly_month
+    result = era5.process_day(main, boundary, month)
     assert result.spatial_ref.attrs['semi_major_axis'] == 6371229
-    np.testing.assert_allclose(main.skt, 280)  # Reduction must not modify its input arrays.
+
+
+def test_daily_reduction_normalizes_latitude(hourly_month: tuple):
+    month, main, boundary = hourly_month
+    result = era5.process_day(main, boundary, month)
     np.testing.assert_allclose(result.latitude, [55.2, 55.3])
+
+
+@pytest.mark.parametrize('last_day', [False, True], ids=['first-day', 'last-day'])
+def test_daily_reduction_does_not_mutate_inputs(hourly_month: tuple, *, last_day: bool):
+    month, main, boundary = hourly_month
+    original_main, original_boundary = main.copy(deep=True), boundary.copy(deep=True)
+    day = era5.next_month(month) - const.ONE_DAY if last_day else month
+    era5.process_day(main, boundary, day)
+    xr.testing.assert_identical(main, original_main)
+    xr.testing.assert_identical(boundary, original_boundary)
 
 
 # Required ERA5-Land fields, independently of the production variable registry.
@@ -256,25 +326,34 @@ def test_public_monthly_download_resume_getter_and_cli(
     assert output.read_text() == 'DATE,WIND\n2000-01-31,5\n'
 
 
-def test_failed_month_and_append_recover(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient
+def test_failed_month_preserves_committed_period_and_recovers(
+    january_store: tuple, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    root, bbox, cds_client = january_store
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 3, 10, tzinfo=UTC))
-    broken = True
 
-    def corrupt_march(ds: xr.Dataset, request: Mapping, _call: int) -> xr.Dataset:
-        return ds.drop_vars(list(ds.data_vars)) if broken and request['month'] == '03' else ds
+    def corrupt_boundary(ds: xr.Dataset, request: Mapping, _call: int) -> xr.Dataset:
+        return ds.drop_vars(list(ds.data_vars)) if request['month'] == '03' else ds
 
-    cds_client.transform = corrupt_march
-    root = get_storage(str(tmp_path / 'store'))
-    bbox = (55.3, 37.1, 55.2, 37.3)
-    with pytest.raises(KeyError):
-        era5.download_era5_data(root.store, bbox=bbox)
-    assert root[''].attrs['last_month'] == [2000, 1]
-    assert era5.available_period(root.store)[1] == date(2000, 1, 31)
-    assert len(root[''].attrs['era5_requests']) == 6
-    broken = False
+    with monkeypatch.context() as patch:
+        patch.setattr(cds_client, 'transform', corrupt_boundary)
+        with pytest.raises(KeyError):
+            era5.download_era5_data(root.store, bbox=bbox)
+        assert root[''].attrs['last_month'] == [2000, 1]
+        assert era5.available_period(root.store)[1] == date(2000, 1, 31)
+        assert len(root[''].attrs['era5_requests']) == 6
+    era5.download_era5_data(root.store, bbox=bbox)
+    assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
+    assert root['daily'].attrs['committed_length'] == 60
+    assert len(cds_client.calls) == 12
+    assert root[''].attrs['era5_requests'] == {}
+
+
+def test_interrupted_month_append_preserves_commit_and_recovers(
+    january_store: tuple, monkeypatch: pytest.MonkeyPatch
+):
+    root, bbox, cds_client = january_store
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 3, 10, tzinfo=UTC))
     original = xr.Dataset.to_zarr
 
     def fail_write(self, *args, **kwargs):  # noqa: ANN001
@@ -282,15 +361,18 @@ def test_failed_month_and_append_recover(
         msg = 'interrupted after appending arrays'
         raise OSError(msg)
 
-    monkeypatch.setattr(xr.Dataset, 'to_zarr', fail_write)
-    with pytest.raises(OSError, match='interrupted'):
-        era5.download_era5_data(root.store, bbox=bbox)
-    assert root[''].attrs['last_month'] == [2000, 1]
-    monkeypatch.setattr(xr.Dataset, 'to_zarr', original)
+    with monkeypatch.context() as patch:
+        patch.setattr(xr.Dataset, 'to_zarr', fail_write)
+        with pytest.raises(OSError, match='interrupted'):
+            era5.download_era5_data(root.store, bbox=bbox)
+        assert root[''].attrs['last_month'] == [2000, 1]
+        assert root['daily'].attrs['committed_length'] == 31
+        with pytest.raises(StorageError, match='completed'):
+            era5.available_period(root.store)
     era5.download_era5_data(root.store, bbox=bbox)
     assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
     assert root['daily'].attrs['committed_length'] == 60
-    assert len(cds_client.calls) == 12  # Six jobs per month, including retries after crashes.
+    assert len(cds_client.calls) == 12
     assert root[''].attrs['era5_requests'] == {}
 
 
@@ -316,6 +398,16 @@ def test_cache_includes_bbox(tmp_path: Path, cds_client: FakeCDSClient):
         (401, None),
         (503, None),
     ],
+    ids=[
+        'accepted-job-resumed',
+        'running-job-resumed',
+        'completed-job-reused',
+        'failed-job-resubmitted',
+        'missing-job-resubmitted',
+        'expired-job-resubmitted',
+        'unauthorized-error-propagates',
+        'service-error-propagates',
+    ],
 )
 def test_restart_resumes_persisted_job(
     tmp_path: Path,
@@ -328,7 +420,6 @@ def test_restart_resumes_persisted_job(
 
     store_path = tmp_path / 'store'
     bbox = (55.3, 37.1, 55.2, 37.3)
-    download = FakeCDSClient._download
 
     def interrupt(_self, _request, _call, path):  # noqa: ANN001
         # The journal must already be on disk before the SDK waits/downloads.
@@ -338,13 +429,13 @@ def test_restart_resumes_persisted_job(
         msg = 'download interrupted'
         raise OSError(msg)
 
-    monkeypatch.setattr(FakeCDSClient, '_download', interrupt)
-    with pytest.raises(OSError, match='download interrupted'):
-        era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1).retrieve(
-            date(2000, 1, 1), boundary=True
-        )
-    saved = era5.group_attrs(get_store(store_path), '')['era5_requests']
-    monkeypatch.setattr(FakeCDSClient, '_download', download)
+    with monkeypatch.context() as patch:
+        patch.setattr(FakeCDSClient, '_download', interrupt)
+        with pytest.raises(OSError, match='download interrupted'):
+            era5._Downloader(
+                cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1
+            ).retrieve(date(2000, 1, 1), boundary=True)
+        saved = era5.group_attrs(get_store(store_path), '')['era5_requests']
     if isinstance(state, int):
 
         def lookup_error(_self, request_id):  # noqa: ANN001
@@ -383,7 +474,7 @@ def test_grib_single_midnight():
     assert ds.rio.crs.to_dict()['R'] == 6371229
 
 
-@pytest.mark.parametrize('different_coordinates', [False, True])
+@pytest.mark.parametrize('different_coordinates', [False, True], ids=['same-grid', 'shifted-grid'])
 def test_grib_uses_product_crs_and_actual_grid(tmp_path: Path, *, different_coordinates: bool):
     import eccodes
 
@@ -484,7 +575,9 @@ def test_grib_missing_hour_preserves_other_fields(tmp_path: Path, monkeypatch: p
     boundary.close()
 
 
-@pytest.mark.parametrize('whole_hour', [False, True])
+@pytest.mark.parametrize(
+    'whole_hour', [False, True], ids=['missing-field-hour', 'missing-whole-hour']
+)
 def test_monthly_download_keeps_missing_hour_as_nan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -611,22 +704,21 @@ def test_cache_publish_failure_retains_jobs_until_month_commits(
 ):
     monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
-    publish = era5.DownloadCache.publish
 
     def fail_publish(_self, _paths):  # noqa: ANN001
         msg = 'cache upload interrupted'
         raise OSError(msg)
 
-    monkeypatch.setattr(era5.DownloadCache, 'publish', fail_publish)
-    store = get_store(tmp_path / 'store')
-    bbox = (55.3, 37.1, 55.2, 37.3)
-    with pytest.raises(OSError, match='cache upload interrupted'):
-        era5.download_era5_data(store, bbox=bbox)
-    attrs = era5.group_attrs(store, '')
-    assert 'last_month' not in attrs
-    assert set(attrs['era5_requests'].values()) == {'job-1', 'job-2', 'job-3', 'job-4'}
-    assert era5.last_date(store, 'daily') is None
-    monkeypatch.setattr(era5.DownloadCache, 'publish', publish)
+    with monkeypatch.context() as patch:
+        patch.setattr(era5.DownloadCache, 'publish', fail_publish)
+        store = get_store(tmp_path / 'store')
+        bbox = (55.3, 37.1, 55.2, 37.3)
+        with pytest.raises(OSError, match='cache upload interrupted'):
+            era5.download_era5_data(store, bbox=bbox)
+        attrs = era5.group_attrs(store, '')
+        assert 'last_month' not in attrs
+        assert set(attrs['era5_requests'].values()) == {'job-1', 'job-2', 'job-3', 'job-4'}
+        assert era5.last_date(store, 'daily') is None
     # The temporary raw directory disappears: retry recovers the first job.
     era5.download_era5_data(get_store(tmp_path / 'store'), bbox=bbox)
     assert len(cds_client.calls) == 6
@@ -712,7 +804,7 @@ def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(
         assert stored.rio.crs.to_dict()['R'] == 6371229
 
 
-@pytest.mark.parametrize('remote', [False, True])
+@pytest.mark.parametrize('remote', [False, True], ids=['local-cache', 'remote-cache'])
 def test_processing_failure_preserves_download_before_grib_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient, *, remote: bool
 ):
@@ -724,7 +816,6 @@ def test_processing_failure_preserves_download_before_grib_read(
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
     backing = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
     location = backing if remote else tmp_path / 'cache'
-    read = era5.read_grib
     reads = []
     remote_reads = []
     original_open = backing.fs.open
@@ -751,16 +842,16 @@ def test_processing_failure_preserves_download_before_grib_read(
         msg = 'GRIB processing interrupted'
         raise ValueError(msg)
 
-    monkeypatch.setattr(era5, 'read_grib', fail_read)
-    store = get_store(tmp_path / 'store')
-    bbox = (55.3, 37.1, 55.2, 37.3)
-    with pytest.raises(ValueError, match='GRIB processing interrupted'):
-        era5.download_era5_data(store, location, bbox=bbox)
-    assert len(reads) == 1
-    assert reads[0].is_file()
-    assert len(cds_client.calls) == 4
-    assert era5.last_date(store, 'daily') is None
-    monkeypatch.setattr(era5, 'read_grib', read)
+    with monkeypatch.context() as patch:
+        patch.setattr(era5, 'read_grib', fail_read)
+        store = get_store(tmp_path / 'store')
+        bbox = (55.3, 37.1, 55.2, 37.3)
+        with pytest.raises(ValueError, match='GRIB processing interrupted'):
+            era5.download_era5_data(store, location, bbox=bbox)
+        assert len(reads) == 1
+        assert reads[0].is_file()
+        assert len(cds_client.calls) == 4
+        assert era5.last_date(store, 'daily') is None
     era5.download_era5_data(get_store(tmp_path / 'store'), location, bbox=bbox)
     if remote:
         assert remote_reads == []
@@ -771,7 +862,7 @@ def test_processing_failure_preserves_download_before_grib_read(
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
 
 
-@pytest.mark.parametrize('limit', [1, 3])
+@pytest.mark.parametrize('limit', [1, 3], ids=['serial', 'pipelined'])
 def test_submission_window_and_restart_keep_next_month_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient, limit: int
 ):

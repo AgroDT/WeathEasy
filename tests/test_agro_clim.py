@@ -9,6 +9,16 @@ from weatheasy.agro_clim import AgroClimateCalculator
 BEGIN, END = date(2020, 2, 28), date(2020, 3, 2)
 
 
+@pytest.fixture(name='evaporation_calculator')
+def create_evaporation_calculator():
+    return AgroClimateCalculator({'LHTFL': np.array([-100, 0]), 'PEVPR': np.array([0, 2])})
+
+
+@pytest.fixture(name='precipitation_calculator')
+def create_precipitation_calculator():
+    return AgroClimateCalculator({'PRATE': np.array([0, 0, np.nan, 0, 0, 0, 1])})
+
+
 def test_summaries_and_units():
     calculator = AgroClimateCalculator(
         {
@@ -33,33 +43,56 @@ def test_summaries_and_units():
             'P_MAX': 8,
         }
     )
-    # The caller provides the selected interval; date arguments do not silently slice arrays.
+
+
+def test_date_arguments_do_not_slice_selected_precipitation():
+    calculator = AgroClimateCalculator({'PRATE': np.array([0, 0.5, 1, 8])})
     assert calculator.total_precipitation(BEGIN, BEGIN) == 9.5
 
 
-def test_missing_days_and_negative_evaporation():
-    calculator = AgroClimateCalculator(
-        {
-            'LHTFL': np.array([-100, 0]),
-            'PEVPR': np.array([0, 2]),
-            'PRATE': np.array([0, 0, np.nan, 0, 0, 0, 1]),
-        }
-    )
+def test_negative_actual_evaporation(evaporation_calculator: AgroClimateCalculator):
+    calculator = evaporation_calculator
     assert calculator.actual_evapotranspiration_le(BEGIN, END) == pytest.approx(-1.7632653061)
+
+
+def test_water_deficit_includes_negative_evaporation(evaporation_calculator: AgroClimateCalculator):
+    calculator = evaporation_calculator
     assert calculator.soil_water_deficit(BEGIN, END) == pytest.approx(2.7632653061)
-    assert np.isnan(calculator.total_precipitation(BEGIN, END))
-    assert np.isnan(calculator.max_daily_precipitation(BEGIN, END))
+
+
+@pytest.mark.parametrize('method', ['total_precipitation', 'max_daily_precipitation'])
+def test_missing_precipitation_propagates(
+    precipitation_calculator: AgroClimateCalculator, method: str
+):
+    assert np.isnan(getattr(precipitation_calculator, method)(BEGIN, END))
+
+
+def test_missing_day_breaks_dry_period(precipitation_calculator: AgroClimateCalculator):
+    calculator = precipitation_calculator
     assert calculator.max_no_rain_period(BEGIN, END) == 3
+
+
+def test_zero_threshold_excludes_dry_days(precipitation_calculator: AgroClimateCalculator):
+    calculator = precipitation_calculator
     assert calculator.max_no_rain_period(BEGIN, END, threshold=0) == 0
+
+
+def test_missing_latent_heat_propagates_to_evaporation():
     calculator = AgroClimateCalculator({'LHTFL': np.array([100, np.nan])})
     assert np.isnan(calculator.actual_evapotranspiration_le(BEGIN, END))
 
 
-def test_invalid_calculator_inputs():
+def test_temperature_rejects_missing_variable():
     with pytest.raises(ValueError, match='Missing weather variable: TMP'):
         AgroClimateCalculator({}).average_temperature(BEGIN, END)
+
+
+def test_temperature_rejects_empty_series():
     with pytest.raises(ValueError, match='nonempty daily series'):
         AgroClimateCalculator({'TMP': np.array([])}).average_temperature(BEGIN, END)
+
+
+def test_water_deficit_rejects_different_intervals():
     with pytest.raises(ValueError, match='same daily interval'):
         AgroClimateCalculator(
             {'LHTFL': np.array([100, 200]), 'PEVPR': np.array([4])}

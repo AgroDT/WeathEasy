@@ -504,6 +504,17 @@ After cloning this repository, initialize the development environment with:
 uv sync --all-extras --frozen
 ```
 
+Run the complete test suite with all optional dependencies and show reasons for
+any skipped tests:
+
+```sh
+uv run --all-extras --frozen pytest
+```
+
+Helm must be available to run the chart tests. A test run without optional
+dependencies can skip the corresponding integration tests; check the skip
+summary when assessing a full run.
+
 We also recommend to install and use pre-commit:
 
 ```sh

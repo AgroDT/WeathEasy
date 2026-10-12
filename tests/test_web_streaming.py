@@ -22,29 +22,13 @@ if TYPE_CHECKING:
     from weatheasy.web.repository import WeatherRepository
 
 
-class RecordingStore(MemoryStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.read_keys = []
-
-    @override
-    def with_read_only(self, read_only: bool = False) -> RecordingStore:
-        store = copy(self)
-        store._read_only = read_only
-        return store
-
-    async def get(self, key: str, *args, **kwargs):
-        self.read_keys.append(key)
-        return await super().get(key, *args, **kwargs)
-
-
-@pytest.fixture
-def anyio_backend():
+@pytest.fixture(name='anyio_backend')
+def get_anyio_backend():
     return 'asyncio'
 
 
-@pytest.fixture(params=['era5', 'cfs2', 'cmip6'])
-def prepared_stream(request: pytest.FixtureRequest):
+@pytest.fixture(name='prepared_stream', params=['era5', 'cfs2', 'cmip6'])
+def create_prepared_stream(request: pytest.FixtureRequest):
     pytest.importorskip('fastapi')
     from weatheasy.web.models import DataQuery
 
@@ -73,6 +57,22 @@ def prepared_stream(request: pytest.FixtureRequest):
     )
     store.read_keys.clear()
     return source, store, query
+
+
+class RecordingStore(MemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_keys = []
+
+    @override
+    def with_read_only(self, read_only: bool = False) -> RecordingStore:
+        store = copy(self)
+        store._read_only = read_only
+        return store
+
+    async def get(self, key: str, *args, **kwargs):
+        self.read_keys.append(key)
+        return await super().get(key, *args, **kwargs)
 
 
 def repository_for(

@@ -121,3 +121,4 @@ multiline-quotes = "double"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-ra"]

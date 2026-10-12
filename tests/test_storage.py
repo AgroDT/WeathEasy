@@ -32,6 +32,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.fixture(name='regional_field')
+def create_regional_field():
+    return field(longitude=(170, 175, -180, -175))
+
+
 def field(
     *,
     latitude: tuple[float, ...] = (55.125, 55.375),
@@ -172,18 +177,30 @@ def test_global_longitude_seam(longitude: float):
     assert select_point(ds, latitude=55.125, longitude=-1).TMP.item() == 0
 
 
-def test_regional_dateline_and_bounds():
-    ds = field(longitude=(170, 175, -180, -175))
-    np.testing.assert_allclose(ds.longitude, [170, 175, 180, 185])
-    assert select_point(ds, latitude=55.125, longitude=-175).TMP.item() == 3
-    assert select_point(ds, latitude=55.125, longitude=167.5).TMP.item() == 0
-    assert select_point(ds, latitude=55.125, longitude=-172.5).TMP.item() == 3
-    for lon in (160, -170, 0):
-        with pytest.raises(StorageError, match='outside'):
-            select_point(ds, latitude=55.125, longitude=lon)
-    for lat in (54.99, 55.51):
-        with pytest.raises(StorageError, match='outside'):
-            select_point(ds, latitude=lat, longitude=175)
+def test_regional_longitudes_are_normalized(regional_field: xr.Dataset):
+    np.testing.assert_allclose(regional_field.longitude, [170, 175, 180, 185])
+
+
+def test_regional_point_wraps_dateline(regional_field: xr.Dataset):
+    assert select_point(regional_field, latitude=55.125, longitude=-175).TMP.item() == 3
+
+
+@pytest.mark.parametrize(('longitude', 'expected'), [(167.5, 0), (-172.5, 3)])
+def test_regional_outer_half_cells_are_included(
+    regional_field: xr.Dataset, longitude: float, expected: int
+):
+    assert select_point(regional_field, latitude=55.125, longitude=longitude).TMP.item() == expected
+
+
+@pytest.mark.parametrize(
+    ('latitude', 'longitude'),
+    [(55.125, 160), (55.125, -170), (55.125, 0), (54.99, 175), (55.51, 175)],
+)
+def test_regional_point_outside_grid_is_rejected(
+    regional_field: xr.Dataset, latitude: float, longitude: float
+):
+    with pytest.raises(StorageError, match='outside'):
+        select_point(regional_field, latitude=latitude, longitude=longitude)
 
 
 def test_nearest_ties_choose_larger_coordinate():
@@ -229,7 +246,6 @@ def test_append_and_conflict_leave_committed_data_unchanged():
 def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pytest.MonkeyPatch):
     store = MemoryStore()
     write_batch(store, 'grid', field())
-    real_write = xr.Dataset.to_zarr
 
     def fail_after_partial_write(_self, *_args, **_kwargs):  # noqa: ANN001
         target = zarr.open_group(store).get_group('grid')
@@ -239,15 +255,15 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pyt
         msg = 'Simulated interrupted upload'
         raise OSError(msg)
 
-    monkeypatch.setattr(xr.Dataset, 'to_zarr', fail_after_partial_write)
-    with pytest.raises(OSError, match='interrupted'):
-        write_batch(store, 'grid', field(day='2026-01-02'))
-    with pytest.raises(StorageError, match='completed'):
-        open_dataset(store, 'grid')
-    assert zarr.open_group(store).metadata.consolidated_metadata is None
-    assert zarr.open_group(store)['grid'].attrs['write_state'] == 'writing'
-    assert zarr.open_group(store)['grid'].attrs['committed_length'] == 1
-    monkeypatch.setattr(xr.Dataset, 'to_zarr', real_write)
+    with monkeypatch.context() as patch:
+        patch.setattr(xr.Dataset, 'to_zarr', fail_after_partial_write)
+        with pytest.raises(OSError, match='interrupted'):
+            write_batch(store, 'grid', field(day='2026-01-02'))
+        with pytest.raises(StorageError, match='completed'):
+            open_dataset(store, 'grid')
+        assert zarr.open_group(store).metadata.consolidated_metadata is None
+        assert zarr.open_group(store)['grid'].attrs['write_state'] == 'writing'
+        assert zarr.open_group(store)['grid'].attrs['committed_length'] == 1
     write_batch(store, 'grid', field(day='2026-01-02'))
     recovered = open_dataset(store, 'grid')
     np.testing.assert_array_equal(recovered.TMP[0], field().TMP[0])
@@ -395,11 +411,13 @@ def test_get_storage_preserves_shared_s3_filesystem(monkeypatch: pytest.MonkeyPa
     assert result.fs is filesystem
 
 
-def test_store_rejects_missing_s3_bucket_or_filesystem_for_local_path(tmp_path: Path):
+@pytest.mark.parametrize('uri', ['s3://', 's3:///without-bucket'])
+def test_store_rejects_missing_s3_bucket(uri: str):
     with pytest.raises(StorageError, match='bucket'):
-        get_store('s3://')
-    with pytest.raises(StorageError, match='bucket'):
-        get_store('s3:///without-bucket')
+        get_store(uri)
+
+
+def test_local_store_rejects_s3_filesystem(tmp_path: Path):
     s3fs = pytest.importorskip('s3fs')
     with pytest.raises(StorageError, match='only be used'):
         get_store(tmp_path / 'data', filesystem=s3fs.S3FileSystem(asynchronous=True))

@@ -19,8 +19,8 @@ from weatheasy.emdna._base import EMDNABase
 from weatheasy.file_storage import FileStore, get_file_store
 
 
-@pytest.fixture
-def stations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@pytest.fixture(name='stations')
+def create_stations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     def small_grid(self):  # noqa: ANN001
         self.lats = np.array([50.0, 50.1], dtype=np.float32)
         self.lons = np.array([30.0, 30.1], dtype=np.float32)
@@ -58,18 +58,25 @@ def processor(kind: type[EMDNABase], stations: Path, output: Path, **kwargs):
     )
 
 
-def test_distances_and_station_selection(stations: Path, tmp_path: Path):
-    coords = np.array([[60, 2], [61, 0], [60, 0]], dtype=float)
-    np.testing.assert_allclose(EMDNABase._distances(np.array([60, 0]), coords), [111, 111, 0])
-    np.testing.assert_allclose(EMDNABase._distances(np.array([0, 0]), np.array([[0, 2]])), [222])
-    np.testing.assert_allclose(
-        EMDNABase._distances(np.array([60, 179]), np.array([[60, -179]])), [111]
-    )
+@pytest.mark.parametrize(
+    ('target', 'coordinates', 'expected'),
+    [
+        ([60, 0], [[60, 2], [61, 0], [60, 0]], [111, 111, 0]),
+        ([0, 0], [[0, 2]], [222]),
+        ([60, 179], [[60, -179]], [111]),
+    ],
+    ids=['longitude-scale', 'equator', 'dateline'],
+)
+def test_distances(target: list, coordinates: list, expected: list):
+    actual = EMDNABase._distances(np.array(target), np.array(coordinates, dtype=float))
+    np.testing.assert_allclose(actual, expected)
+
+
+def test_station_selection_uses_longitude_scale(stations: Path, tmp_path: Path):
     model = processor(TemperatureProcessor, stations, tmp_path / 'out')
     model.min_stations = 1
     model.max_stations = 1
     model.search_radius_km = 150
-    # Correct longitude scaling makes this station nearer than a 1.5-degree latitude offset.
     assert model._select_stations(np.array([60, 0]), np.array([[60, 2], [61.5, 0]])).tolist() == [
         True,
         False,
@@ -111,7 +118,7 @@ def test_precipitation_member_state(
 @pytest.mark.parametrize(
     ('kind', 'prefix'), [(TemperatureProcessor, 'temp'), (PrecipitationProcessor, 'precip')]
 )
-def test_resume_matches_uninterrupted_and_new_dates(
+def test_resume_matches_uninterrupted(
     stations: Path,
     tmp_path: Path,
     kind: type[EMDNABase],
@@ -135,7 +142,16 @@ def test_resume_matches_uninterrupted_and_new_dates(
         ):
             for key in ('ensemble', 'scrf_state', 'rng_state'):
                 np.testing.assert_array_equal(actual[key], expected[key])
-    # A new CSV date is discovered automatically on the next invocation.
+
+
+@pytest.mark.parametrize(
+    ('kind', 'prefix'), [(TemperatureProcessor, 'temp'), (PrecipitationProcessor, 'precip')]
+)
+def test_completed_processor_discovers_new_dates(
+    stations: Path, tmp_path: Path, kind: type[EMDNABase], prefix: str
+):
+    completed = processor(kind, stations, tmp_path / 'resume')
+    completed.process_period()
     frame = pd.read_parquet(stations)
     extra = frame[frame.day == 3].copy()
     extra['day'] = 4
@@ -155,21 +171,20 @@ def test_partial_write_is_retryable_with_unchanged_state(
     model.process_period(end=date(2026, 1, 1))
     old_fields = copy.deepcopy(model._previous_scrf)
     old_rng = copy.deepcopy(model._rng.bit_generator.state)
-    original = np.savez_compressed
 
     def failed_save(stream: BinaryIO, **_payload):
         stream.write(b'incomplete archive')
         msg = 'simulated storage failure'
         raise OSError(msg)
 
-    monkeypatch.setattr(np, 'savez_compressed', failed_save)
-    result = model.process_period()
-    assert [r['status'] for r in result] == ['error']
-    assert len(list((tmp_path / 'out').glob('*.npz'))) == 1
-    assert model._rng.bit_generator.state == old_rng
-    for member, field in old_fields.items():
-        np.testing.assert_array_equal(model._previous_scrf[member], field)
-    monkeypatch.setattr(np, 'savez_compressed', original)
+    with monkeypatch.context() as patch:
+        patch.setattr(np, 'savez_compressed', failed_save)
+        result = model.process_period()
+        assert [r['status'] for r in result] == ['error']
+        assert len(list((tmp_path / 'out').glob('*.npz'))) == 1
+        assert model._rng.bit_generator.state == old_rng
+        for member, field in old_fields.items():
+            np.testing.assert_array_equal(model._previous_scrf[member], field)
     assert len(model.process_period()) == 2
     restarted = processor(TemperatureProcessor, stations, tmp_path / 'out')
     assert restarted.process_period() == []
@@ -372,17 +387,16 @@ def test_remote_inputs_restart_and_failed_publish(
     assert process_file_period(partial, inputs, end=date(2026, 1, 1))[0]['status'] == 'success'
     resumed = remote_processor()
     # Serialization fails after writing bytes: no incomplete day may become discoverable.
-    original = np.savez_compressed
 
     def failed_save(stream: BinaryIO, **_payload):
         stream.write(b'incomplete archive')
         msg = 'simulated storage failure'
         raise OSError(msg)
 
-    monkeypatch.setattr(np, 'savez_compressed', failed_save)
-    assert process_file_period(resumed, inputs)[0]['status'] == 'error'
-    assert not output.exists(f'emdna_{prefix}_20260102.npz')
-    monkeypatch.setattr(np, 'savez_compressed', original)
+    with monkeypatch.context() as patch:
+        patch.setattr(np, 'savez_compressed', failed_save)
+        assert process_file_period(resumed, inputs)[0]['status'] == 'error'
+        assert not output.exists(f'emdna_{prefix}_20260102.npz')
     downloads.clear()
     assert [r['status'] for r in process_file_period(resumed, inputs)] == ['success'] * 2
     assert downloads == [inputs.child('202601_daily.nc').root]

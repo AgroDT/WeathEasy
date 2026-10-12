@@ -19,6 +19,11 @@ from weatheasy.storage import StorageError, get_store, prepare_dataset, write_ba
 from weatheasy.util import get_storage
 
 
+@pytest.fixture(name='corrected_weather')
+def create_corrected_weather(tmp_path: Path):
+    return weather_store(tmp_path, ('PRATE_corr',))
+
+
 def _et0_fao56_for_uccle(
     *,
     t_min: ArrayLike = 12.3,
@@ -49,36 +54,71 @@ def _et0_fao56_for_uccle(
     )
 
 
-def test_published_fao_examples():
-    # Chapter 3 examples 8 and 11 (rounded published results):
-    # https://www.fao.org/4/x0490e/x0490e07.htm
-    assert extraterrestrial_radiation(-20, 246) == pytest.approx(32.2, abs=0.05)
+@pytest.mark.parametrize(
+    ('latitude', 'day', 'expected', 'tolerance'),
+    [(-20, 246, 32.2, 0.05), (50.8, 187, 41.09, 0.02)],
+)
+def test_extraterrestrial_radiation_fao_examples(
+    latitude: float, day: int, expected: float, tolerance: float
+):
+    # FAO-56 chapter 3, examples 8 and 11: https://www.fao.org/4/x0490e/x0490e07.htm.
+    assert extraterrestrial_radiation(latitude, day) == pytest.approx(expected, abs=tolerance)
+
+
+def test_longwave_radiation_fao_example():
     assert net_longwave_radiation(19.1, 25.1, 2.1, 14.5, 18.8) == pytest.approx(3.5, abs=0.05)
+
+
+def test_et0_fao_uccle_example():
     assert _et0_fao56_for_uccle() == pytest.approx(3.88, abs=0.02)
-    assert extraterrestrial_radiation(50.8, 187) == pytest.approx(41.09, abs=0.02)
 
 
-def test_arrays_mean_wind_height():
-    scalar = _et0_fao56_for_uccle()
-    result = _et0_fao56_for_uccle(t_mean=[16.9, 23, np.nan])
-    assert result.shape == (3,)
-    assert result[0] == scalar
-    assert result[1] != scalar
-    assert np.isnan(result[2])
-    # FAO example 18 explicitly gives 2.078 m/s at 2 m from 2.78 m/s at 10 m.
-    assert _et0_fao56_for_uccle(wind=2.078, wind_height=2) == pytest.approx(scalar, abs=0.002)
+def test_et0_array_matches_scalar():
+    result = _et0_fao56_for_uccle(t_mean=[16.9, 16.9])
+    assert result.shape == (2,)
+    np.testing.assert_allclose(result, _et0_fao56_for_uccle())
 
 
-def test_cloud_factor_and_polar_radiation():
+def test_et0_uses_mean_temperature():
+    result = _et0_fao56_for_uccle(t_mean=[16.9, 23])
+    assert result[1] != result[0]
+
+
+def test_et0_preserves_missing_temperature():
+    result = _et0_fao56_for_uccle(t_mean=[16.9, np.nan])
+    assert np.isfinite(result[0])
+    assert np.isnan(result[1])
+
+
+def test_et0_converts_wind_height():
+    # FAO example 18 gives 2.078 m/s at 2 m from 2.78 m/s at 10 m.
+    assert _et0_fao56_for_uccle(wind=2.078, wind_height=2) == pytest.approx(
+        _et0_fao56_for_uccle(), abs=0.002
+    )
+
+
+def test_overcast_longwave_radiation():
     clear = net_longwave_radiation(19.1, 25.1, 2.1, 18.8, 18.8)
-    overcast = net_longwave_radiation(19.1, 25.1, 2.1, 0, 18.8)
-    assert overcast == pytest.approx(clear * 0.05)
+    assert net_longwave_radiation(19.1, 25.1, 2.1, 0, 18.8) == pytest.approx(clear * 0.05)
+
+
+def test_longwave_radiation_caps_clear_sky_ratio():
+    clear = net_longwave_radiation(19.1, 25.1, 2.1, 18.8, 18.8)
     assert net_longwave_radiation(19.1, 25.1, 2.1, 100, 18.8) == clear
-    np.testing.assert_allclose(extraterrestrial_radiation(90, [1, 355]), 0)
+
+
+@pytest.mark.parametrize(('latitude', 'day'), [(90, [1, 355]), (-90, 172)])
+def test_polar_night_radiation(latitude: float, day: int | list[int]):
+    np.testing.assert_allclose(extraterrestrial_radiation(latitude, day), 0)
+
+
+def test_polar_day_radiation():
     assert extraterrestrial_radiation(90, 172) > 0
-    assert extraterrestrial_radiation(-90, 172) == 0
-    assert np.isfinite(_et0_fao56_for_uccle(rs0=0, rs=0))
-    assert np.isfinite(_et0_fao56_for_uccle(rs0=1e-15))
+
+
+@pytest.mark.parametrize(('rs0', 'rs'), [(0, 0), (1e-15, 22.07)])
+def test_et0_handles_negligible_clear_sky_radiation(rs0: float, rs: float):
+    assert np.isfinite(_et0_fao56_for_uccle(rs0=rs0, rs=rs))
 
 
 def weather_store(tmp_path: Path, correction: tuple[str, ...] = ()):
@@ -148,7 +188,9 @@ def read_weather(root: zarr.Group, **kwargs):
 
 
 @pytest.mark.parametrize(
-    'correction', [(), ('TMP_corr',), ('PRATE_corr',), ('TMP_corr', 'PRATE_corr')]
+    'correction',
+    [(), ('TMP_corr',), ('PRATE_corr',), ('TMP_corr', 'PRATE_corr')],
+    ids=['raw', 'temperature-only', 'precipitation-only', 'both-corrected'],
 )
 def test_adapter_units_independent_fallback_and_readonly(
     tmp_path: Path,
@@ -179,16 +221,18 @@ def test_adapter_units_independent_fallback_and_readonly(
     np.testing.assert_allclose(raw.et0, np.where(expected > 0, expected, np.nan), rtol=1e-6)
 
 
-def test_corrected_precip_missing_day_and_nonpositive_et0(tmp_path: Path):
-    root = weather_store(tmp_path, ('PRATE_corr',))
-    root['correction/PRATE_corr'][3] = np.nan
-    # Zero radiation and saturated air give negative net radiation and ET0.
-    root['daily/DSWRF'][3] = 0
-    root['daily/RH'][3] = 100
-    actual = read_weather(root)
+def test_corrected_precipitation_nan_does_not_fall_back(corrected_weather: zarr.Group):
+    corrected_weather['correction/PRATE_corr'][3] = np.nan
+    actual = read_weather(corrected_weather)
     assert np.isnan(actual.pr[3])
-    assert np.isnan(actual.et0[3])
-    assert read_weather(root, use_corrected=False).pr[3] == pytest.approx(2)
+    assert read_weather(corrected_weather, use_corrected=False).pr[3] == pytest.approx(2)
+
+
+def test_nonpositive_et0_becomes_nan(corrected_weather: zarr.Group):
+    # Zero radiation and saturated air give negative net radiation and ET0.
+    corrected_weather['daily/DSWRF'][3] = 0
+    corrected_weather['daily/RH'][3] = 100
+    assert np.isnan(read_weather(corrected_weather).et0[3])
 
 
 def test_adapter_reads_corrected_fields_from_store_path(tmp_path: Path):

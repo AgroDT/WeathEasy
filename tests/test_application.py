@@ -248,28 +248,28 @@ def check_forecast_replacement(
             raise OSError(msg)
         return original_write(store, group, dataset)
 
-    monkeypatch.setattr(download, 'write_batch', fail_second_grid)
-    with pytest.raises(OSError, match='second-grid'):
-        download.download_cfs2_data(root.store)
-    assert const.CFS2_KEY_UPDATED not in root[''].attrs
-    from weatheasy.error import CFS2Error
+    with monkeypatch.context() as patch:
+        patch.setattr(download, 'write_batch', fail_second_grid)
+        with pytest.raises(OSError, match='second-grid'):
+            download.download_cfs2_data(root.store)
+        assert const.CFS2_KEY_UPDATED not in root[''].attrs
+        from weatheasy.error import CFS2Error
 
-    with pytest.raises(CFS2Error):
-        get_cfs2_data(
-            store=root.store,
-            begin=date(2026, 9, 23),
-            end=date(2026, 9, 23),
-            coords=Coords(55, 0),
-            variables=['TMP'],
-        )
-    # Reanalysis data is appended independently, never deleted with forecast.
-    assert 'reanalysis/flx' in root
-    if not missing_reanalysis:
-        assert (
-            root['reanalysis/flx'].attrs['committed_length']
-            >= previous_reanalysis_attrs['committed_length']  # ty: ignore[unsupported-operator]
-        )
-    monkeypatch.setattr(download, 'write_batch', original_write)
+        with pytest.raises(CFS2Error):
+            get_cfs2_data(
+                store=root.store,
+                begin=date(2026, 9, 23),
+                end=date(2026, 9, 23),
+                coords=Coords(55, 0),
+                variables=['TMP'],
+            )
+        # Reanalysis data is appended independently, never deleted with forecast.
+        assert 'reanalysis/flx' in root
+        if not missing_reanalysis:
+            assert (
+                root['reanalysis/flx'].attrs['committed_length']
+                >= previous_reanalysis_attrs['committed_length']  # ty: ignore[unsupported-operator]
+            )
     download.download_cfs2_data(root.store)
     assert root[''].attrs['updated'] == '2026-09-23'
     assert set(root.get_group('forecast').group_keys()) == {'flx', 'pgb'}
