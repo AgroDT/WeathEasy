@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from fsspec.implementations.memory import MemoryFileSystem
+from httpx2 import Client, MockTransport, Request, Response
 
 from weatheasy import const, download, raw_cache
 from weatheasy.file_storage import FileStore
@@ -45,10 +46,18 @@ class TrackingFileSystem(MemoryFileSystem):
         super().__init__(**kwargs)
         self.reads = []
 
-    def open(self, path: str, mode: str = 'rb', **kwargs):
+    def open(
+        self,
+        path: str,
+        mode: str = 'rb',
+        block_size: int | None = None,
+        cache_options: dict | None = None,
+        compression: str | None = None,
+        **kwargs,
+    ):
         if mode == 'rb':
             self.reads.append(path)
-        return super().open(path, mode, **kwargs)
+        return super().open(path, mode, block_size, cache_options, compression, **kwargs)
 
 
 def test_remote_cache_publishes_download_and_fetches_once(tmp_path: Path):
@@ -172,34 +181,37 @@ def test_cmip6_public_download_processes_working_file_and_reuses_cache(
         assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc']
 
 
-def test_cfs2_downloaders_reuse_remote_files_without_http(tmp_path: Path):
+def test_cfs2_downloaders_reuse_remote_files_without_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     fs = TrackingFileSystem(skip_instance_cache=True)
     remote = FileStore(fs, f'{tmp_path.name}/raw')
     calls = []
 
-    def get(url: str, **_kwargs):
-        calls.append(url)
-        return SimpleNamespace(status_code=200, is_success=True, content=b'GRIB')
+    def get(request: Request) -> Response:
+        calls.append(str(request.url))
+        return Response(200, content=b'GRIB')
 
-    session = SimpleNamespace(get=get)
-    for _attempt in range(2):
-        with download_cache(remote, 'reanalysis') as cache:
-            paths = download._Cfs2ReanalysisDownloader(session, cache)(date(2000, 1, 1))
-            assert len(paths) == 4
-            assert all(path.read_bytes() == b'GRIB' for path in paths)
-            assert len(remote.child('reanalysis').glob('**/*.grib2')) == 4
-        with download_cache(remote, 'forecast') as cache:
-            downloader = download._Cfs2ForecastDownloader(
-                session, cache, date(2000, 1, 1), date(2000, 1, 2)
-            )
-            downloader._min_interval = 0
-            downloader('flx', 'file{}{}', {})
-            paths = list(cache.root.glob('*.grb2'))
-            assert len(paths) == 4
-            assert all(path.read_bytes() == b'GRIB' for path in paths)
-            assert len(remote.child('forecast').glob('*.grb2')) == 4
-        assert len(calls) == 8
-        assert fs.reads == []
+    monkeypatch.setattr(download._Cfs2ForecastDownloader, '_min_interval', 0)
+    with Client(transport=MockTransport(get)) as session:
+        for _attempt in range(2):
+            with download_cache(remote, 'reanalysis') as cache:
+                paths = download._Cfs2ReanalysisDownloader(session, cache)(date(2000, 1, 1))
+                assert paths is not None
+                assert len(paths) == 4
+                assert all(path.read_bytes() == b'GRIB' for path in paths)
+                assert len(remote.child('reanalysis').glob('**/*.grib2')) == 4
+            with download_cache(remote, 'forecast') as cache:
+                downloader = download._Cfs2ForecastDownloader(
+                    session, cache, date(2000, 1, 1), date(2000, 1, 2)
+                )
+                downloader('flx', 'file{}{}', {})
+                paths = list(cache.root.glob('*.grb2'))
+                assert len(paths) == 4
+                assert all(path.read_bytes() == b'GRIB' for path in paths)
+                assert len(remote.child('forecast').glob('*.grb2')) == 4
+            assert len(calls) == 8
+            assert fs.reads == []
 
 
 def test_upload_failure_leaves_cmip6_preparation_retryable(
