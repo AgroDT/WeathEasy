@@ -15,7 +15,7 @@ from fsspec.implementations.local import LocalFileSystem
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from datetime import date
 
     from weatheasy.emdna._base import EMDNABase
@@ -32,7 +32,7 @@ def read_stations(station_file: FileStore, *, columns: list[str] | None = None) 
 
 
 @contextmanager
-def monthly_era5(directory: FileStore | None, month: str) -> Iterator[xr.Dataset | None]:
+def monthly_era5(directory: FileStore | None, month: str) -> Generator[xr.Dataset | None]:
     """Open one monthly input, staging remote NetCDF on the job's local disk."""
     if directory is None:
         yield None

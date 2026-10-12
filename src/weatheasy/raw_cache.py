@@ -19,7 +19,7 @@ from weatheasy.file_storage import FileStore, get_file_store
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Generator, Iterable
 
 
 def default_work_dir() -> Path:
@@ -136,7 +136,7 @@ def download_cache(
     *parts: str,
     work_dir: str | Path | None = None,
     target: str = '',
-) -> Iterator[DownloadCache]:
+) -> Generator[DownloadCache]:
     """Use local caches directly and retain remote working copies across retries."""
     store = (
         (location if isinstance(location, FileStore) else get_file_store(location))

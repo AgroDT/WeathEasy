@@ -15,7 +15,7 @@ from weatheasy.error import S3ImportError
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from os import PathLike
     from typing import BinaryIO
 
@@ -44,7 +44,7 @@ class FileStore:
         return self.fs.glob(posixpath.join(self.root, pattern))
 
     @contextmanager
-    def write_atomic(self, name: str) -> Iterator[BinaryIO]:
+    def write_atomic(self, name: str) -> Generator[BinaryIO]:
         """Expose one complete file after writing succeeds; callers serialize writers."""
         if isinstance(self.fs, LocalFileSystem):
             destination = Path(self.root) / name

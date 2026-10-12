@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from anyio import CapacityLimiter, to_thread
@@ -28,7 +28,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sources = settings.sources
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[AppState]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
         # All sources share a budget separate from response streaming.
         limiter = CapacityLimiter(40)
         yield await to_thread.run_sync(create_state, settings, limiter, limiter=limiter)
