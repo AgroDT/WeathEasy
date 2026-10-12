@@ -196,8 +196,9 @@ conversion. The loader opens fields lazily through xarray/cfgrib and decodes
 one hourly spatial field at a time, reducing inputs into one day of output. A day spans multiple
 Zarr chunks, up to `(1, 128, 128)` each; GRIB fields are not repeatedly decoded
 for individual spatial tiles. Memory depends on the requested grid, not the
-number of days in a month. Source CRS, NaNs and next-midnight accumulations are
-preserved. The month is published only after every daily write and raw-cache
+number of days in a month. NaNs and next-midnight accumulations are preserved.
+Fields may have different time coverage; missing hours remain NaN, making affected
+daily statistics incomplete. The month is published only after every daily write and raw-cache
 upload succeeds; interrupted months are retried without duplicating dates.
 Existing NetCDF cache entries are retained but are not reused by the GRIB loader.
 
@@ -323,11 +324,19 @@ store root. Existing combined stores need their source groups moved into
 separate store roots; there is no automatic migration or legacy-layout fallback.
 
 Prepared data uses Zarr v3. Before writing, rioxarray adds CF CRS and coordinate
-metadata, including the source sphere/ellipsoid parameters and WKT in
+metadata, including the product's sphere/ellipsoid parameters and WKT in
 `spatial_ref`. GRIB decoding remains with cfgrib/ecCodes: Gaussian latitude
 coordinates are preserved without resampling or an invented affine GeoTransform.
 Open with `decode_coords="all"` to restore the grid mapping and use `.rio.crs`
 after importing rioxarray.
+
+Loaders take CRS, units and variable semantics from each product's specification,
+without rejecting files for different descriptive metadata. CFS2 and ERA5-Land use
+the model sphere with radius 6,371,229 m; CMIP6 and CopDEM use EPSG:4326. Actual
+coordinates, timestamps and missing values come from the files. GRIB source metadata
+is retained in `source_grib`, and CMIP6's original unit labels in `source_units`, for
+diagnostics. Spatial grids must still match when combining fields, and prepared
+stores retain schema and append-compatibility checks.
 
 Weather arrays use NaN for both the Zarr fill value and CF `_FillValue`.
 Empty chunks are not written during either creation or append; missing chunks

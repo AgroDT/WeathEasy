@@ -6,10 +6,12 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 import numpy as np
+import rioxarray  # noqa: F401 - register the xarray rio accessor
 import xarray as xr
-from rasterio import CRS
+from xarray.backends import BackendArray
+from xarray.core import indexing
 
-from weatheasy.storage import StorageError
+from weatheasy import const
 
 
 if TYPE_CHECKING:
@@ -48,25 +50,64 @@ def read_grib(path: Path, required: set[str]) -> xr.Dataset:
                     ],
                     drop=True,
                 )
-                if fields and (
-                    _field_crs(field) != _field_crs(fields[0])
-                    or any(
-                        not np.array_equal(field[axis].to_numpy(), fields[0][axis].to_numpy())
-                        for axis in ('latitude', 'longitude')
-                    )
-                ):
-                    msg = 'ERA5 GRIB requires one regular latitude/longitude grid and CRS'
-                    raise StorageError(msg)
                 fields.append(field.reset_coords(drop=True).rename(valid_time='time'))
-    return xr.merge(fields, join='exact', compat='identical').rio.write_crs(_field_crs(fields[0]))
+    return merge_grib_fields(*fields).rio.write_crs(const.ERA5_CRS)
 
 
-def _field_crs(field: xr.DataArray) -> CRS:
-    # ECMWF uses R=6371229 in the model/GRIB2, but GRIB1 encodes R=6367470.
-    # These describe the same ERA5-Land nodes; normalize metadata, not values.
-    # https://confluence.ecmwf.int/spaces/CKB/pages/76414402/ERA5+data+documentation
-    radius = field.attrs.get('GRIB_radius')
-    if field.attrs.get('GRIB_gridType') != 'regular_ll' or radius not in (6367470, 6371229):
-        msg = f'Unsupported ERA5 GRIB grid and CRS: {field.attrs.get("GRIB_gridType")}, R={radius}'
-        raise StorageError(msg)
-    return CRS.from_string('+proj=longlat +R=6371229 +no_defs')
+def merge_grib_fields(*fields: xr.DataArray | xr.Dataset) -> xr.Dataset:
+    """Keep spatial axes exact while representing absent timestamps as NaN."""
+    times = np.unique(np.concatenate([field.time.to_numpy() for field in fields]))
+    aligned = [
+        _align_time(field, times)
+        if isinstance(field, xr.DataArray)
+        else xr.Dataset(
+            {
+                name: _align_time(variable, times) if 'time' in variable.dims else variable
+                for name, variable in field.data_vars.items()
+            },
+            attrs=field.attrs,
+        )
+        for field in fields
+    ]
+    return xr.merge(aligned, join='exact', compat='equals')
+
+
+def _align_time(field: xr.DataArray, times: np.ndarray) -> xr.DataArray:
+    if np.array_equal(field.time, times):
+        return field
+    # xarray.reindex eagerly masks non-Dask backend arrays. Delay filling gaps
+    # until selection so a missing hour never materializes a whole monthly field.
+    data = indexing.LazilyIndexedArray(_TimeAlignedArray(field, times))
+    coords = {name: coord for name, coord in field.coords.items() if 'time' not in coord.dims}
+    coords['time'] = times
+    return xr.DataArray(
+        xr.Variable(field.dims, data, attrs=field.attrs), coords=coords, name=field.name
+    )
+
+
+class _TimeAlignedArray(BackendArray):
+    def __init__(self, field: xr.DataArray, times: np.ndarray) -> None:
+        self.field = field
+        self.shape = (len(times), *field.shape[1:])
+        self.dtype = field.dtype
+        self.positions = np.full(len(times), -1, dtype=np.intp)
+        self.positions[np.searchsorted(times, field.time.to_numpy())] = np.arange(
+            field.sizes['time']
+        )
+
+    def __getitem__(self, key: indexing.ExplicitIndexer) -> np.ndarray:
+        return indexing.explicit_indexing_adapter(
+            key, self.shape, indexing.IndexingSupport.OUTER, self._getitem
+        )
+
+    def _getitem(self, key: tuple) -> np.ndarray:
+        positions = np.atleast_1d(self.positions[key[0]])
+        present = positions >= 0
+        selection = self.field.isel(time=positions[present], latitude=key[1], longitude=key[2])
+        if present.all():
+            values = selection.to_numpy()
+        else:
+            values = np.full((len(positions), *selection.shape[1:]), np.nan, dtype=self.dtype)
+            if present.any():
+                values[present] = selection.to_numpy()
+        return values[0] if np.isscalar(key[0]) else values

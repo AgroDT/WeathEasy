@@ -31,6 +31,7 @@ ONE_DAY = timedelta(days=1)
 
 CFS2_KEY_UPDATED = 'updated'
 CFS2_HHS = '00', '06', '12', '18'
+CFS2_CRS = '+proj=longlat +R=6371229 +no_defs'
 
 CFS2_REANALYSIS_DIR = 'reanalysis'
 CFS2_REANALYSIS_FIRST_DATE = date(2011, 4, 1)
@@ -208,11 +209,39 @@ CFS2_PGB_BANDS = {
 # fmt: on
 
 CFS2_BANDS = {**CFS2_FLX_BANDS, **CFS2_PGB_BANDS}
+CFS2_SOURCE_UNITS = {
+    **dict.fromkeys(
+        ('PEVPR', 'DLWRF', 'DSWRF', 'GFLUX', 'LHTFL', 'SHTFL', 'ULWRF', 'USWRF'), 'W m-2'
+    ),
+    **dict.fromkeys(('QMAX', 'QMIN', 'SPFH'), 'kg/kg'),
+    **dict.fromkeys(('UGRD', 'VGRD'), 'm/s'),
+    **dict.fromkeys((name for name in CFS2_BANDS if name.startswith('TMP')), 'K'),
+    **dict.fromkeys((name for name in CFS2_BANDS if name.startswith('SOILW')), 'm3 m-3'),
+    'TMIN': 'K',
+    'TMAX': 'K',
+    'PRATE': 'kg m-2 s-1',
+    'PRES': 'Pa',
+    'SNOD': 'm',
+    'WEASD': 'kg m-2',
+    'RH': '%',
+}
 
 CMIP6_DIR = 'cmip6'
 CMIP6_FIRST_YEAR = 1950
 CMIP6_LAST_YEAR = 2100
 CMIP6_LAST_HISTORICAL_YEAR = 2014
+CMIP6_CRS = 'EPSG:4326'
+CMIP6_UNITS = {
+    'hurs': '%',
+    'huss': 'kg/kg',
+    'pr': 'kg m-2 s-1',
+    'rlds': 'W m-2',
+    'rsds': 'W m-2',
+    'sfcWind': 'm/s',
+    'tas': 'K',
+    'tasmin': 'K',
+    'tasmax': 'K',
+}
 
 CMIP6_VARS = {
     'hurs': VarInfo(
@@ -255,6 +284,7 @@ CMIP6_VARS = {
 
 
 ERA5_RESOLUTION = 0.1
+ERA5_CRS = '+proj=longlat +R=6371229 +no_defs'
 ERA5_FIRST_YEAR = 1950
 # Edge-based BoundingBox: centers run from (-180, -90) to (179.9, 90) in steps of 0.1°
 

@@ -21,7 +21,7 @@ import numpy as np
 import xarray as xr
 
 from weatheasy import const
-from weatheasy.era5_grib import read_grib
+from weatheasy.era5_grib import merge_grib_fields, read_grib
 from weatheasy.raw_cache import DownloadCache, download_cache
 from weatheasy.storage import (
     StorageError,
@@ -272,14 +272,12 @@ class _Downloader:
         boundary = self._parts(next_month(month), boundary=True)
         pieces = self._retrieve(main + boundary)
         return (
-            xr.merge(pieces[: len(main)], join='exact', compat='identical'),
-            xr.merge(pieces[len(main) :], join='exact', compat='identical'),
+            merge_grib_fields(*pieces[: len(main)]),
+            merge_grib_fields(*pieces[len(main) :]),
         )
 
     def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
-        return xr.merge(
-            self._retrieve(self._parts(month, boundary=boundary)), join='exact', compat='identical'
-        )
+        return merge_grib_fields(*self._retrieve(self._parts(month, boundary=boundary)))
 
     def _retrieve(self, parts: list[_Part]) -> list[xr.Dataset]:
         self.parts.update((part.key, part) for part in parts)
@@ -381,6 +379,8 @@ def process_day(main: xr.Dataset, boundary: xr.Dataset, day: date) -> xr.Dataset
 
     def read(name: str, stamp: np.datetime64):
         source = main if stamp <= last else boundary
+        if stamp not in source.time:
+            return np.full((source.sizes['latitude'], source.sizes['longitude']), np.nan)
         return source[name].sel(time=stamp).to_numpy().astype(np.float64, copy=False)
 
     def midnight(name: str):
@@ -401,11 +401,14 @@ def process_day(main: xr.Dataset, boundary: xr.Dataset, day: date) -> xr.Dataset
     values['USWRF'] = ((midnight('ssrd') - midnight('ssr')) / 86400).astype(np.float32)
     values['ULWRF'] = ((midnight('strd') - midnight('str')) / 86400).astype(np.float32)
     result = _prepare_daily_values(
-        values, np.array([np.datetime64(day)]), main.latitude, main.longitude, main.rio.crs
+        values, np.array([np.datetime64(day)]), main.latitude, main.longitude
     )
     source_grib = {
         label: {
-            name: {'edition': field.attrs['GRIB_edition'], 'radius': field.attrs['GRIB_radius']}
+            name: {
+                'edition': field.attrs.get('GRIB_edition'),
+                'radius': field.attrs.get('GRIB_radius'),
+            }
             for name, field in source.data_vars.items()
             if 'GRIB_radius' in field.attrs
         }
@@ -475,14 +478,12 @@ def _shared_daily_values(read, start: np.datetime64) -> dict:  # noqa: ANN001
 
 
 def _validate_boundary(main: xr.Dataset, boundary: xr.Dataset) -> None:
-    if main.rio.crs != boundary.rio.crs or any(
-        not np.array_equal(main[axis], boundary[axis]) for axis in ('latitude', 'longitude')
-    ):
-        msg = 'ERA5 month and following midnight have different coordinates or CRS'
+    if any(not np.array_equal(main[axis], boundary[axis]) for axis in ('latitude', 'longitude')):
+        msg = 'ERA5 month and following midnight have different coordinates'
         raise StorageError(msg)
 
 
-def _prepare_daily_values(values: dict, times: np.ndarray, latitudes, longitudes, crs):  # noqa: ANN001
+def _prepare_daily_values(values: dict, times: np.ndarray, latitudes, longitudes):  # noqa: ANN001
     fields = {}
     for name, value in values.items():
         info = (
@@ -511,4 +512,4 @@ def _prepare_daily_values(values: dict, times: np.ndarray, latitudes, longitudes
             'longitude': longitudes,
         },
     )
-    return prepare_dataset(ds, crs=crs)
+    return prepare_dataset(ds, crs=const.ERA5_CRS)

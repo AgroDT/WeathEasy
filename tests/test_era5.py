@@ -153,7 +153,7 @@ def test_daily_units_midnight_wind_and_coordinates(month: date):
         np.testing.assert_allclose(result[var], expected)
     np.testing.assert_allclose(result.RH[1:], 100)
     assert np.isnan(result.TMP[0, 1, 0])
-    assert result.spatial_ref.attrs['semi_major_axis'] == 6367470
+    assert result.spatial_ref.attrs['semi_major_axis'] == 6371229
     np.testing.assert_allclose(main.skt, 280)  # Reduction must not modify its input arrays.
     np.testing.assert_allclose(result.latitude, [55.2, 55.3])
 
@@ -229,7 +229,7 @@ def test_public_monthly_download_resume_getter_and_cli(
     assert dict(root[''].attrs) == before
     with open_dataset(root.store, 'daily') as ds:
         assert ds.attrs['request_bbox'] == list(bbox)
-        assert ds.spatial_ref.attrs['semi_major_axis'] == 6367470
+        assert ds.spatial_ref.attrs['semi_major_axis'] == 6371229
         assert ds.WIND.attrs['units'] == 'm/s'
     from weatheasy.__main__ import main
 
@@ -383,37 +383,29 @@ def test_grib_single_midnight():
     assert ds.rio.crs.to_dict()['R'] == 6371229
 
 
-@pytest.mark.parametrize(
-    'invalid', [None, 'known_radius', 'coordinates', 'crs', 'same_edition_grid']
-)
-def test_grib_mixed_editions_validate_actual_grid(tmp_path: Path, invalid: str | None):
+@pytest.mark.parametrize('different_coordinates', [False, True])
+def test_grib_uses_product_crs_and_actual_grid(tmp_path: Path, *, different_coordinates: bool):
     import eccodes
 
     path = tmp_path / 'mixed.grib'
     editions = set()
-    grids = set()
     with (FIXTURES / 'midnight.grib').open('rb') as source, path.open('wb') as target:
         while (message := eccodes.codes_grib_new_from_file(source)) is not None:
             try:
                 if eccodes.codes_get(message, 'cfVarName') == 't2m':
-                    if invalid not in ('same_edition_grid', 'crs'):
-                        eccodes.codes_set(message, 'edition', 1)
-                    if invalid in ('coordinates', 'same_edition_grid'):
+                    eccodes.codes_set(message, 'edition', 1)
+                    if different_coordinates:
                         eccodes.codes_set(message, 'longitudeOfFirstGridPointInDegrees', 38.1)
                         eccodes.codes_set(message, 'longitudeOfLastGridPointInDegrees', 38.3)
-                    elif invalid == 'crs':
-                        eccodes.codes_set(message, 'shapeOfTheEarth', 8)
-                if invalid == 'known_radius' and eccodes.codes_get(message, 'cfVarName') == 'sde':
-                    eccodes.codes_set(message, 'shapeOfTheEarth', 6)
+                if eccodes.codes_get(message, 'cfVarName') == 'sde':
+                    eccodes.codes_set(message, 'shapeOfTheEarth', 8)
                 editions.add(eccodes.codes_get(message, 'edition'))
-                grids.add(eccodes.codes_get(message, 'md5GridSection'))
                 eccodes.codes_write(message, target)
             finally:
                 eccodes.codes_release(message)
-    assert editions == ({2} if invalid in ('same_edition_grid', 'crs') else {1, 2})
-    assert len(grids) == (3 if invalid == 'known_radius' else 2)
-    if invalid not in (None, 'known_radius'):
-        with pytest.raises(StorageError, match='grid and CRS'):
+    assert editions == {1, 2}
+    if different_coordinates:
+        with pytest.raises(ValueError, match='longitude'):
             read_grib(path, set(REQUIRED_INPUTS))
     else:
         ds = read_grib(path, set(REQUIRED_INPUTS))
@@ -426,7 +418,7 @@ def test_grib_mixed_editions_validate_actual_grid(tmp_path: Path, invalid: str |
         assert ds.t2m.attrs['GRIB_radius'] == 6367470
         assert ds.tp.attrs['GRIB_radius'] == 6367470
         assert ds.sde.attrs['GRIB_edition'] == 2
-        assert ds.sde.attrs['GRIB_radius'] == (6371229 if invalid == 'known_radius' else 6367470)
+        assert ds.sde.attrs['GRIB_radius'] == 6371200
         np.testing.assert_allclose(ds.sde, 0.1, atol=1e-7)
 
 
@@ -442,6 +434,84 @@ def test_grib_uses_source_timestamps():
         ds.time,
         np.arange('2000-01-01T00', '2000-01-02T01', dtype='datetime64[h]'),
     )
+
+
+def test_grib_missing_hour_preserves_other_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import eccodes
+    from cfgrib import dataset as grib_dataset
+
+    decoded = []
+    decode = grib_dataset.get_values_in_order
+
+    def decode_field(message, shape):  # noqa: ANN001
+        decoded.append(message['cfVarName'])
+        return decode(message, shape)
+
+    monkeypatch.setattr(grib_dataset, 'get_values_in_order', decode_field)
+
+    path = tmp_path / 'missing-hour.grib'
+    with (FIXTURES / 'day.grib').open('rb') as source, path.open('wb') as target:
+        while (message := eccodes.codes_grib_new_from_file(source)) is not None:
+            try:
+                if (
+                    eccodes.codes_get(message, 'cfVarName') == 't2m'
+                    and eccodes.codes_get(message, 'validityTime') == 0
+                    and eccodes.codes_get(message, 'validityDate') == 20000101
+                ):
+                    continue
+                eccodes.codes_write(message, target)
+            finally:
+                eccodes.codes_release(message)
+    main = read_grib(path, set(REQUIRED_INPUTS))
+    boundary = read_grib(FIXTURES / 'midnight.grib', set(REQUIRED_INPUTS))
+    assert not decoded
+    assert main.sizes['time'] == 25
+    assert np.isnan(main.t2m.isel(time=0)).all()
+    assert not decoded
+    np.testing.assert_allclose(main.t2m.isel(time=1), 293.15, atol=1e-4)
+    assert decoded == ['t2m']
+    selected = main.t2m.isel(time=[0, 2], latitude=0, longitude=[2, 0]).to_numpy()
+    assert np.isnan(selected[0]).all()
+    np.testing.assert_allclose(selected[1], 293.15, atol=1e-4)
+    np.testing.assert_allclose(main.skt.isel(time=0), 280)
+    daily = era5.process_day(main, boundary, date(2000, 1, 1))
+    for name in ('TMP', 'TMIN', 'TMAX', 'RH'):
+        assert np.isnan(daily[name]).all()
+    np.testing.assert_allclose(daily.SPFH, 0.01467417, atol=1e-8)
+    np.testing.assert_allclose(daily.WIND, 5)
+    np.testing.assert_allclose(daily.PRATE * 86400, 12)
+    main.close()
+    boundary.close()
+
+
+@pytest.mark.parametrize('whole_hour', [False, True])
+def test_monthly_download_keeps_missing_hour_as_nan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cds_client: FakeCDSClient,
+    *,
+    whole_hour: bool,
+):
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+
+    def missing_hour(ds: xr.Dataset, request: Mapping, call: int) -> xr.Dataset:
+        if request['month'] == '01' and (whole_hour or call == 1):
+            return ds.isel(time=slice(1, None))
+        return ds
+
+    cds_client.transform = missing_hour
+    store = get_store(tmp_path / 'store')
+    era5.download_era5_data(store, tmp_path / 'cache', bbox=(55.3, 37.1, 55.2, 37.3))
+    with open_dataset(store, 'daily') as daily:
+        assert daily.sizes['time'] == 31
+        assert np.isnan(daily.TMP.isel(time=0)).all()
+        np.testing.assert_allclose(daily.TMP.isel(time=slice(1, None)), 20)
+        np.testing.assert_allclose(daily.PEVPR, 4)
+        if whole_hour:
+            assert np.isnan(daily.PRES.isel(time=0)).all()
+        else:
+            np.testing.assert_allclose(daily.PRES, 1000)
 
 
 def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -714,7 +784,9 @@ def test_submission_window_and_restart_keep_next_month_jobs(
         cds_client.jobs['job-1'].results_ready = True
 
     monkeypatch.setattr(FakeCDSClient, '_download', download)
-    monkeypatch.setattr(era5._Downloader, '_read', lambda _self, _part: xr.Dataset())
+    monkeypatch.setattr(
+        era5._Downloader, '_read', lambda _self, part: requested_source(part.month, part.request)
+    )
     store = get_store(tmp_path / 'store')
     cache = tmp_path / 'cache'
     bbox = (55.3, 37.1, 55.2, 37.3)

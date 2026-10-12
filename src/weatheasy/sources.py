@@ -1,8 +1,8 @@
 """Source-file readers for preparation jobs, separate from prepared-Zarr access.
 
-GRIB retains ecCodes units (e.g. K and Pa), unlike GDAL's optional metric unit
-normalization. Renaming a field never converts it. Source-specific preparation
-must perform and label required conversions explicitly before publication.
+CRS and units come from the source product's contract. File metadata is retained
+for diagnostics; coordinates, timestamps and decoded values come from the file.
+Renaming a field never converts it. Preparation performs conversions explicitly.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import xarray as xr
-from rasterio import CRS
 
 from weatheasy import const
 from weatheasy.storage import StorageError, merge_fields, prepare_dataset
@@ -19,10 +18,14 @@ from weatheasy.storage import StorageError, merge_fields, prepare_dataset
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from rasterio import CRS
+
 
 def read_grib(
     path: str | Path,
     *,
+    crs: str | CRS,
+    units: str,
     variable: str | None = None,
     name: str | None = None,
     filter_by_keys: dict | None = None,
@@ -45,7 +48,7 @@ def read_grib(
         'indexpath': '',
         'errors': 'raise',
         'filter_by_keys': filter_by_keys or {},
-        'read_keys': ['shapeOfTheEarth', 'radius', 'earthMajorAxis', 'earthMinorAxis'],
+        'read_keys': ['edition', 'radius'],
     }
     with xr.open_dataset(path, engine=CfGribBackend, backend_kwargs=backend) as raw:
         if variable is None:
@@ -54,32 +57,35 @@ def read_grib(
                 raise StorageError(msg)
             variable = str(next(iter(raw.data_vars)))
         field = raw[variable]
-        radius = field.attrs.get('GRIB_radius')
-        major = field.attrs.get('GRIB_earthMajorAxis')
-        minor = field.attrs.get('GRIB_earthMinorAxis')
-        if radius:
-            crs = CRS.from_string(f'+proj=longlat +R={radius} +no_defs')
-        elif major and minor:
-            crs = CRS.from_string(f'+proj=longlat +a={major} +b={minor} +no_defs')
-        else:
-            msg = 'GRIB does not expose its Earth radius or ellipsoid'
-            raise StorageError(msg)
+        source_grib = {
+            'edition': field.attrs.get('GRIB_edition'),
+            'radius': field.attrs.get('GRIB_radius'),
+            'units': field.attrs.get('units'),
+        }
         field = field.reset_coords(drop=True).expand_dims(time=[raw.valid_time.to_numpy()]).load()
-        return prepare_dataset(field.to_dataset(name=name or variable), crs=crs)
+        field.attrs = {'units': units}
+        result = prepare_dataset(field.to_dataset(name=name or variable), crs=crs)
+        result.attrs['source_grib'] = {name or variable: source_grib}
+        return result
 
 
 def read_netcdf(
     path: str | Path,
     *,
-    variables: list[str],
+    units: dict[str, str],
     crs: str | CRS,
     latitude: str = 'lat',
     longitude: str = 'lon',
 ) -> xr.Dataset:
-    """Read actual NetCDF coordinate axes and decoded values/units, without flipping rows."""
+    """Read actual axes/values and label them using the source product's contract."""
     with xr.open_dataset(path, engine='netcdf4') as raw:
-        ds = raw[variables].rename({latitude: 'latitude', longitude: 'longitude'}).load()
-        return prepare_dataset(ds, crs=crs)
+        ds = raw[list(units)].rename({latitude: 'latitude', longitude: 'longitude'}).load()
+        source_units = {name: ds[name].attrs.get('units') for name in units}
+        for name, unit in units.items():
+            ds[name].attrs = {'units': unit}
+        result = prepare_dataset(ds, crs=crs)
+        result.attrs['source_units'] = source_units
+        return result
 
 
 # NCEP GRIB2 discipline/category/number and fixed surfaces, independently of
@@ -130,6 +136,7 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
     """
     bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
     fields = []
+    source_grib = {}
     for name in bands:
         if name in _SOIL_LAYERS:
             discipline, category, parameter, top, bottom = _SOIL_LAYERS[name]
@@ -154,7 +161,14 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
             }
             if step:
                 filters['stepType'] = step
-        field = read_grib(path, name=name, filter_by_keys=filters)
+        field = read_grib(
+            path,
+            name=name,
+            filter_by_keys=filters,
+            crs=const.CFS2_CRS,
+            units=const.CFS2_SOURCE_UNITS[name],
+        )
+        source_grib.update(field.attrs.pop('source_grib'))
         units = field[name].attrs['units']
         values = field[name].astype('float32')
         if name.startswith('TMP') or name in ('TMIN', 'TMAX'):
@@ -175,4 +189,6 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
             )
         field[name] = values
         fields.append(field)
-    return merge_fields(*fields)
+    result = merge_fields(*fields)
+    result.attrs['source_grib'] = source_grib
+    return result

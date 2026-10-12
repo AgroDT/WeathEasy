@@ -5,6 +5,7 @@ import pytest
 import xarray as xr
 from zarr.storage import MemoryStore
 
+from weatheasy import const
 from weatheasy.sources import read_grib, read_netcdf
 from weatheasy.storage import open_dataset, select_point, write_batch
 
@@ -46,7 +47,7 @@ def grib_fixture(path: Path, *, gaussian: bool = False, spacing: int = 1):
         }
     try:
         for key, value in dict(
-            updates, dataDate=20260922, dataTime=0, shapeOfTheEarth=6, shortName='2t'
+            updates, dataDate=20260922, dataTime=0, shapeOfTheEarth=8, shortName='2t'
         ).items():
             ec.codes_set(handle, key, value)
         values = np.arange(width * height, dtype=np.float64).reshape(height, width) / 100 + 273.15
@@ -67,7 +68,7 @@ def grib_fixture(path: Path, *, gaussian: bool = False, spacing: int = 1):
         ('reanalysis/pgb', False, 0.5),
     ],
 )
-def test_grib_source_to_zarr_preserves_grid_and_units(
+def test_grib_source_to_zarr_uses_product_metadata_and_actual_grid(
     tmp_path: Path,
     *,
     group: str,
@@ -76,12 +77,15 @@ def test_grib_source_to_zarr_preserves_grid_and_units(
 ):
     path = tmp_path / 'source.grb2'
     latitudes, values = grib_fixture(path, gaussian=gaussian, spacing=spacing)
-    ds = read_grib(path, name='TMP', filter_by_keys={'shortName': '2t'})
+    ds = read_grib(
+        path, name='TMP', filter_by_keys={'shortName': '2t'}, crs=const.CFS2_CRS, units='K'
+    )
     np.testing.assert_allclose(ds.latitude, latitudes[::-1], atol=1e-8)
     np.testing.assert_allclose(ds.TMP[0], values[::-1], atol=1e-4)
     assert ds.TMP.attrs['units'] == 'K'  # No implicit GDAL Celsius conversion.
     assert ds.time.item() == np.datetime64('2026-09-22', 'ns').item()
     assert not list(tmp_path.glob('*.idx'))
+    assert ds.attrs['source_grib']['TMP']['radius'] == 6371200
     store = MemoryStore()
     write_batch(store, group, ds)
     with open_dataset(store, group) as result:
@@ -89,13 +93,8 @@ def test_grib_source_to_zarr_preserves_grid_and_units(
         point = select_point(result, latitude=-30.4 if gaussian else 55, longitude=0)
         row = int(np.argmin(abs(latitudes - (-30.4 if gaussian else 55))))
         np.testing.assert_allclose(point.TMP.item(), values[row, 0], atol=1e-4)
-        assert result.spatial_ref.attrs == ds.spatial_ref.attrs
-        assert result.rio.crs == ds.rio.crs
-        assert result.spatial_ref.attrs['grid_mapping_name'] == 'latitude_longitude'
-        assert result.spatial_ref.attrs['semi_major_axis'] == 6371229
-        assert result.spatial_ref.attrs['semi_minor_axis'] == 6371229
-        assert result.latitude.attrs['units'] == 'degrees_north'
-        assert result.longitude.attrs['axis'] == 'X'
+        assert result.rio.crs.to_dict()['R'] == 6371229
+        assert result.attrs['source_grib'] == ds.attrs['source_grib']
         np.testing.assert_array_equal(result.latitude, ds.latitude)
         np.testing.assert_array_equal(result.longitude, ds.longitude)
         np.testing.assert_array_equal(result.TMP, ds.TMP)
@@ -105,14 +104,15 @@ def test_grib_source_to_zarr_preserves_grid_and_units(
         assert np.ptp(np.diff(ds.latitude.to_numpy())) > 0.001
 
 
-def test_netcdf_cmip6_actual_ascending_latitude(tmp_path: Path):
+@pytest.mark.parametrize('source_attrs', [{}, {'units': 'incorrect'}])
+def test_netcdf_cmip6_actual_ascending_latitude(tmp_path: Path, source_attrs: dict):
     path = tmp_path / 'cmip6.nc'
     original = xr.Dataset(
         {
             'tas': (
                 ('time', 'lat', 'lon'),
                 np.arange(12, dtype='float32').reshape(1, 4, 3),
-                {'units': 'K'},
+                source_attrs,
             )
         },
         coords={
@@ -122,11 +122,14 @@ def test_netcdf_cmip6_actual_ascending_latitude(tmp_path: Path):
         },
     )
     original.to_netcdf(path, engine='netcdf4')
-    ds = read_netcdf(path, variables=['tas'], crs='EPSG:4326')
+    ds = read_netcdf(path, units={'tas': 'K'}, crs=const.CMIP6_CRS)
     store = MemoryStore()
     write_batch(store, 'ACCESS-CM2/historical/r1i1p1f1', ds)
     result = open_dataset(store, 'ACCESS-CM2/historical/r1i1p1f1')
     assert select_point(result, latitude=55.125, longitude=0.375).tas.item() == 7
+    assert result.tas.attrs['units'] == 'K'
+    assert result.rio.crs.to_epsg() == 4326
+    assert result.attrs['source_units'] == {'tas': source_attrs.get('units')}
     np.testing.assert_array_equal(result.tas, original.tas)
 
 

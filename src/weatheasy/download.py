@@ -126,7 +126,9 @@ def download_cmip6_data(
             for var, first in first_years.items():
                 for year in range(first, const.CMIP6_LAST_YEAR + 1):
                     source = _load_cmip6_dataset(cache, var, year, session)
-                    dataset = read_netcdf(source, variables=[var], crs='EPSG:4326')
+                    dataset = read_netcdf(
+                        source, units={var: const.CMIP6_UNITS[var]}, crs=const.CMIP6_CRS
+                    )
                     # Normalize provider noon labels to calendar days.
                     dataset = dataset.assign_coords(
                         time=xr.DataArray(
@@ -186,16 +188,9 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
             msg = 'Cannot determine the grid without any source files'
             raise ValueError(msg)
         daily = xr.full_like(template, np.nan)
-        crs = template.spatial_ref.attrs['crs_wkt']
     else:
         sample = fields[0]
-        crs = sample.spatial_ref.attrs['crs_wkt']
         # Exact spatial alignment; only the sample time axis may differ.
-        for other in fields[1:]:
-            for axis in ('latitude', 'longitude'):
-                if not np.array_equal(sample[axis], other[axis]):
-                    msg = 'CFS2 source grids differ within a day'
-                    raise ValueError(msg)
         combined = xr.concat(fields, dim='time', join='exact')
         bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
         data = {}
@@ -222,7 +217,15 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
     if 'time' in daily.dims:
         daily = daily.isel(time=0, drop=True)
     daily = daily.expand_dims(time=[np.datetime64(date_)])
-    return prepare_dataset(daily, crs=crs)
+    result = prepare_dataset(daily, crs=const.CFS2_CRS)
+    source_grib = {
+        str(field.time.to_numpy()[0]): field.attrs['source_grib']
+        for field in fields
+        if 'source_grib' in field.attrs
+    }
+    if source_grib:
+        result.attrs['source_grib'] = source_grib
+    return result
 
 
 def _download_cfs2_forecast(
