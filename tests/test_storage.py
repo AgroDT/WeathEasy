@@ -87,7 +87,7 @@ def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):
     arr = root.get_array('ACCESS-CM2/historical/r1i1p1f1/TMP')
     assert arr.metadata.zarr_format == 3
     assert arr.metadata.dimension_names == ('time', 'latitude', 'longitude')
-    assert arr.chunks == (1, 2, 2)
+    assert arr.chunks == (128, 2, 2)
     # A new process importing only xarray can read the artifact.
     script = """import xarray as xr, sys
 x=xr.open_zarr(sys.argv[1],group='ACCESS-CM2/historical/r1i1p1f1',chunks=None,consolidated=True,decode_coords='all')
@@ -251,12 +251,13 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pyt
         target = zarr.open_group(store).get_group('grid')
         array = target.get_array('TMP')
         array.resize((2, 2, 2))
-        array[1] = 999
+        array[:] = 999
+        # Simulate corruption of the shared chunk, including committed cells.
         msg = 'Simulated interrupted upload'
         raise OSError(msg)
 
     with monkeypatch.context() as patch:
-        patch.setattr(xr.Dataset, 'to_zarr', fail_after_partial_write)
+        patch.setattr('weatheasy.storage._copy_staged', fail_after_partial_write)
         with pytest.raises(OSError, match='interrupted'):
             write_batch(store, 'grid', field(day='2026-01-02'))
         with pytest.raises(StorageError, match='completed'):
@@ -421,3 +422,135 @@ def test_local_store_rejects_s3_filesystem(tmp_path: Path):
     s3fs = pytest.importorskip('s3fs')
     with pytest.raises(StorageError, match='only be used'):
         get_store(tmp_path / 'data', filesystem=s3fs.S3FileSystem(asynchronous=True))
+
+
+@pytest.mark.parametrize(
+    ('group', 'expected'),
+    [
+        ('daily', 128),
+        ('reanalysis/flx', 128),
+        ('reanalysis/pgb', 128),
+        ('forecast/flx', 64),
+        ('forecast/pgb', 64),
+        ('correction', 128),
+        ('tas', 128),
+    ],
+)
+def test_source_chunk_policy(group: str, expected: int):
+    store = MemoryStore()
+    dataset = prepare_dataset(
+        xr.Dataset(
+            {
+                'TMP': (
+                    ('time', 'latitude', 'longitude'),
+                    np.ones((1, 33, 34), np.float32),
+                    {'units': 'K'},
+                ),
+            },
+            coords={
+                'time': [np.datetime64('2026-01-01')],
+                'latitude': np.arange(33),
+                'longitude': np.arange(34),
+            },
+        ),
+        crs='EPSG:4326',
+    )
+    write_batch(store, group, dataset)
+    assert zarr.open_group(store)[group]['TMP'].chunks == (expected, 32, 32)
+
+
+def test_failed_append_restores_absent_committed_chunk(monkeypatch: pytest.MonkeyPatch):
+    store = MemoryStore()
+    empty = field()
+    empty.TMP.data[:] = np.nan
+    write_batch(store, 'grid', empty)
+
+    def corrupt(_self, *_args, **_kwargs):  # noqa: ANN001
+        array = zarr.open_group(store)['grid']['TMP']
+        array.resize((2, 2, 2))
+        array[:] = 123
+        msg = 'interrupted'
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr('weatheasy.storage._copy_staged', corrupt)
+        with pytest.raises(OSError, match='interrupted'):
+            write_batch(store, 'grid', field(day='2026-01-02'))
+    write_batch(store, 'grid', field(day='2026-01-02'))
+    with open_dataset(store, 'grid') as result:
+        assert np.isnan(result.TMP[0]).all()
+        np.testing.assert_array_equal(result.TMP[1], field().TMP[0])
+
+
+def test_restore_is_retryable(monkeypatch: pytest.MonkeyPatch):
+    store = MemoryStore()
+    write_batch(store, 'grid', field())
+
+    def corrupt(_self, *_args, **_kwargs):  # noqa: ANN001
+        array = zarr.open_group(store)['grid']['TMP']
+        array.resize((2, 2, 2))
+        array[:] = 123
+        msg = 'interrupted append'
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr('weatheasy.storage._copy_staged', corrupt)
+        with pytest.raises(OSError, match='interrupted append'):
+            write_batch(store, 'grid', field(day='2026-01-02'))
+    original_set = store.set
+
+    async def fail_restore(key, value):  # noqa: ANN001
+        if key.startswith('grid/TMP/c/'):
+            msg = 'interrupted restore'
+            raise OSError(msg)
+        await original_set(key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, 'set', fail_restore)
+        with pytest.raises(OSError, match='interrupted restore'):
+            write_batch(store, 'grid', field(day='2026-01-02'))
+    write_batch(store, 'grid', field(day='2026-01-02'))
+    with open_dataset(store, 'grid') as result:
+        np.testing.assert_array_equal(result.TMP[0], field().TMP[0])
+        np.testing.assert_array_equal(result.TMP[1], field().TMP[0])
+        np.testing.assert_array_equal(
+            result.time, np.array(['2026-01-01', '2026-01-02'], dtype='datetime64[ns]')
+        )
+
+
+def test_failed_backup_cleanup_does_not_roll_back_committed_append(monkeypatch: pytest.MonkeyPatch):
+    store = MemoryStore()
+    write_batch(store, 'grid', field())
+    original_delete = store.delete_dir
+
+    async def fail_cleanup(prefix):  # noqa: ANN001
+        if '.append-backup' in prefix:
+            msg = 'interrupted cleanup'
+            raise OSError(msg)
+        await original_delete(prefix)
+
+    second = field(day='2026-01-02')
+    second.TMP.data[:] = 123
+    with monkeypatch.context() as patch:
+        patch.setattr(store, 'delete_dir', fail_cleanup)
+        with pytest.raises(OSError, match='interrupted cleanup'):
+            write_batch(store, 'grid', second)
+    write_batch(store, 'grid', field(day='2026-01-03'))
+    with open_dataset(store, 'grid') as result:
+        np.testing.assert_array_equal(result.TMP[0], field().TMP[0])
+        np.testing.assert_array_equal(result.TMP[1], 123)
+        np.testing.assert_array_equal(result.TMP[2], field().TMP[0])
+
+
+def test_append_writes_all_days_across_partial_time_chunk_boundary():
+    store = MemoryStore()
+    write_batch(store, 'daily', field())
+    dates = np.arange(np.datetime64('2026-01-02'), np.datetime64('2026-05-12'))
+    values = np.arange(1, len(dates) + 1, dtype=np.float32)
+    batch = xr.concat([field(day=str(day)) for day in dates], dim='time', join='exact')
+    batch.TMP.data[:] = values[:, None, None]
+    write_batch(store, 'daily', batch)
+    with open_dataset(store, 'daily') as result:
+        np.testing.assert_array_equal(result.TMP[0], field().TMP[0])
+        np.testing.assert_array_equal(result.TMP[:, 0, 0], np.r_[field().TMP[0, 0, 0], values])
+        np.testing.assert_array_equal(result.time[1:], dates.astype('datetime64[ns]'))

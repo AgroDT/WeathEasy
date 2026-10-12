@@ -22,7 +22,7 @@ from weatheasy.storage import (
     prepare_dataset,
     remove_group_attr,
     set_group_attrs,
-    write_batch,
+    write_batches,
 )
 from weatheasy.util import utc_now
 
@@ -140,7 +140,14 @@ def download_cmip6_data(
                         )
                     )
                     _LOG.info('Saving %s/%s', var, year)
-                    write_batch(store, var, dataset)
+                    write_batches(
+                        store,
+                        var,
+                        (
+                            dataset.isel(time=slice(offset, offset + 128))
+                            for offset in range(0, dataset.sizes['time'], 128)
+                        ),
+                    )
                     cache.release([source])
 
 
@@ -163,22 +170,33 @@ def _download_cfs2_reanalysis(
         set_group_attrs(store, f'{const.CFS2_REANALYSIS_DIR}/{kind}')
     previous = {kind: last_date(store, path) for kind, path in groups.items()}
     date_ = min(
-        (value + const.ONE_DAY if value else const.CFS2_REANALYSIS_FIRST_DATE)
-        for value in previous.values()
+        last + const.ONE_DAY if last else const.CFS2_REANALYSIS_FIRST_DATE
+        for last in previous.values()
     )
     while date_ < end:
-        paths = download(date_)
-        if paths:
-            for kind, path in groups.items():
-                last = previous[kind]
-                if last is not None and date_ <= last:
-                    continue
-                daily = _daily_cfs2(paths, kind, date_)
-                write_batch(store, path, daily)
-        else:
-            _LOG.warning('%s was not found on the server', date_)
-        download_dir.release(paths or [])
-        date_ += const.ONE_DAY
+        block_end = min(date_ + 128 * const.ONE_DAY, end)
+        paths_by_day = []
+        while date_ < block_end:
+            paths = download(date_)
+            if paths:
+                paths_by_day.append((date_, paths))
+            else:
+                _LOG.warning('%s was not found on the server', date_)
+            date_ += const.ONE_DAY
+        for kind, path in groups.items():
+            last = previous[kind]
+            write_batches(
+                store,
+                path,
+                (
+                    _daily_cfs2(paths, kind, day)
+                    for day, paths in paths_by_day
+                    if last is None or day > last
+                ),
+            )
+            previous[kind] = last_date(store, path)
+        for _, paths in paths_by_day:
+            download_dir.release(paths)
 
 
 def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset | None = None):
@@ -264,8 +282,12 @@ def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Pat
         if template is None:
             msg = f'No forecast files for {kind}; forecast remains unavailable'
             raise ValueError(msg)
-        for date_, paths in paths_by_day:
-            write_batch(store, group, _daily_cfs2(paths, kind, date_, template))
+        write_batches(
+            store,
+            group,
+            (_daily_cfs2(paths, kind, date_, template) for date_, paths in paths_by_day),
+            time_chunk=64,
+        )
 
 
 class _Cfs2ReanalysisDownloader:

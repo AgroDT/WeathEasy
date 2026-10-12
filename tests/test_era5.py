@@ -354,15 +354,17 @@ def test_interrupted_month_append_preserves_commit_and_recovers(
 ):
     root, bbox, cds_client = january_store
     monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 3, 10, tzinfo=UTC))
-    original = xr.Dataset.to_zarr
+    from weatheasy import storage
 
-    def fail_write(self, *args, **kwargs):  # noqa: ANN001
-        original(self, *args, **kwargs)
+    original = storage._copy_staged
+
+    def fail_write(*args, **kwargs):
+        original(*args, **kwargs)
         msg = 'interrupted after appending arrays'
         raise OSError(msg)
 
     with monkeypatch.context() as patch:
-        patch.setattr(xr.Dataset, 'to_zarr', fail_write)
+        patch.setattr(storage, '_copy_staged', fail_write)
         with pytest.raises(OSError, match='interrupted'):
             era5.download_era5_data(root.store, bbox=bbox)
         assert root[''].attrs['last_month'] == [2000, 1]

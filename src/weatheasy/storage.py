@@ -10,9 +10,9 @@ Time is the UTC valid timestamp, without timezone, encoded as Gregorian seconds.
 Units and temporal cell_methods belong to each field, supplied by its producer.
 
 Only write_state='complete' is publishable, including for direct xarray users.
-One external writer owns a group. Appends use time chunks of one so a failed
-append cannot damage a chunk of previously committed data. A retry truncates
-only the uncommitted tail of this schema before writing again. Concurrent
+One external writer owns a group. Before appending into a partially filled time
+chunk, its committed objects are saved durably. Retry restores these objects
+before truncating the uncommitted tail and writing again. Concurrent
 writers, overwriting committed dates and old Zarr layouts are not supported.
 """
 
@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -28,6 +30,8 @@ import rioxarray
 import xarray as xr
 import zarr
 from xarray.coding.times import decode_cf_datetime
+from zarr.core.buffer import default_buffer_prototype
+from zarr.core.sync import sync
 from zarr.storage import FsspecStore, LocalStore
 
 from weatheasy.error import S3ImportError
@@ -143,7 +147,9 @@ def _normalize_spatial_axes(ds: xr.Dataset) -> xr.Dataset:
         elif np.any(abs(values) > 90):
             msg = 'Latitude centres must be within [-90, 90]'
             raise StorageError(msg)
-        ds = ds.assign_coords({axis: values}).sortby(axis)
+        ds = ds.assign_coords({axis: values})
+        if np.any(np.diff(values) < 0):
+            ds = ds.sortby(axis)
         if np.any(np.diff(ds[axis].to_numpy()) <= 0):
             msg = f'Duplicate {axis} centres'
             raise StorageError(msg)
@@ -274,45 +280,91 @@ def _truncate_uncommitted(target: zarr.Group, count: int) -> None:
                 array.resize(tuple(shape))
 
 
+async def _keys(store: Store, prefix: str) -> list[str]:
+    return [key async for key in store.list_prefix(prefix)]
+
+
+def _restore_append_backup(store: Store, target: zarr.Group) -> None:
+    # The marker is retained until commit, so restoration itself is retryable.
+    if 'append_backup' not in target.attrs:
+        return
+    count = cast('int', target.attrs['committed_length'])
+    for _, array in target.arrays():
+        dimensions = cast('ArrayV3Metadata', array.metadata).dimension_names
+        if dimensions and 'time' in dimensions:
+            chunk = array.chunks[dimensions.index('time')]
+            if count % chunk:
+                sync(store.delete_dir(f'{array.path}/c/{count // chunk}/'))
+    for key in cast('list[str]', target.attrs['append_backup']):
+        saved = sync(store.get(f'{target.path}/.append-backup/{key}', default_buffer_prototype()))
+        if saved is None:
+            msg = f'Missing committed chunk backup: {key}'
+            raise StorageError(msg)
+        sync(store.set(key, saved))
+
+
+def _save_append_backup(store: Store, target: zarr.Group, count: int) -> None:
+    keys = []
+    for _, array in target.arrays():
+        dimensions = cast('ArrayV3Metadata', array.metadata).dimension_names
+        if not dimensions or 'time' not in dimensions:
+            continue
+        axis = dimensions.index('time')
+        chunk = array.chunks[axis]
+        if count % chunk == 0:
+            continue
+        # Weather time is the leading dimension. Coordinates use time chunks
+        # of one, so their committed objects are never touched by append.
+        prefix = f'{array.path}/c/{count // chunk}/'
+        for key in sync(_keys(store, prefix)):
+            value = sync(store.get(key, default_buffer_prototype()))
+            if value is not None:
+                sync(store.set(f'{target.path}/.append-backup/{key}', value))
+                keys.append(key)
+    # Publish the manifest only after every backup is durable, before mutation.
+    target.attrs['append_backup'] = keys
+
+
 def write_batch(
     store: Store,
     group: str,
     dataset: xr.Dataset,
     *,
-    tile_size: int = 128,
+    tile_size: int = 32,
+    time_chunk: int | None = None,
 ) -> None:
     """Create or append prepared data, publishing only after all arrays are written.
 
     The caller serializes writers. A failed write is retried with the same grid
     and field metadata; previously committed dates must not be supplied again.
-    The caller supplies a ready local or S3 store. Writes use xarray; direct Zarr
-    writes update the commit marker and recover interrupted in-place appends.
+    The caller supplies a ready local or S3 store. Local memory-mapped staging
+    feeds chunk-aligned Zarr writes; recovery restores the committed boundary.
     """
-    write_batches(store, group, [dataset], tile_size=tile_size)
+    write_batches(store, group, [dataset], tile_size=tile_size, time_chunk=time_chunk)
 
 
-def write_batches(  # noqa: C901
+def write_batches(  # noqa: C901, PLR0912, PLR0915
     store: Store,
     group: str,
     datasets: Iterable[xr.Dataset],
     *,
-    tile_size: int = 128,
+    tile_size: int = 32,
+    time_chunk: int | None = None,
 ) -> None:
-    """Write bounded time batches as one transaction, retaining only the current batch.
+    """Stage bounded reductions on local disk, then write aligned weather chunks.
 
-    The iterator must finish successfully before any new dates are published.
-    On failure the original committed length is retained; retry removes the
-    entire uncommitted tail. Each batch must have the same spatial schema.
+    Staging avoids keeping an entire weather month in RAM and prevents repeated
+    remote read/modify/write for each day within a long time chunk.
     """
+    time_chunk = (64 if 'forecast/' in group else 128) if time_chunk is None else time_chunk
     batches = iter(datasets)
     dataset = next(batches, None)
     if dataset is None:
         return
-    if tile_size < 1 or dataset.attrs.get('storage_schema') != SCHEMA:
-        msg = 'A prepared dataset and positive tile_size are required'
+    if tile_size < 1 or time_chunk < 1 or dataset.attrs.get('storage_schema') != SCHEMA:
+        msg = 'A prepared dataset and positive chunk sizes are required'
         raise StorageError(msg)
-    ds = dataset.copy()
-    signature = _signature(ds)
+    signature = _signature(dataset)
     root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
     target = root.require_group(group)
     count = int(cast('int', target.attrs.get('committed_length', 0)))
@@ -324,94 +376,141 @@ def write_batches(  # noqa: C901
             msg = 'Existing group has a conflicting grid, CRS, variables or units'
             raise StorageError(msg)
         if count:
-            # Validate incoming dates before any recovery/mutation.
             time_array = target.get_array('time')
             last = decode_cf_datetime(
                 time_array[count - 1 : count],
                 cast('str', time_array.attrs['units']),
                 cast('str', time_array.attrs['calendar']),
             )[0]
-            if ds.time.to_numpy()[0] <= last:
+            if dataset.time.to_numpy()[0] <= last:
                 msg = 'New timestamps must follow all committed timestamps'
                 raise StorageError(msg)
     elif list(target.keys()) or target.attrs:
         msg = 'Existing group is not a coordinate-aware weatheasy store'
         raise StorageError(msg)
-    # Saving metadata opened without consolidation removes the old snapshot
-    # before any array is resized. Readers must see live metadata during writes.
     root.update_attributes(dict(root.attrs))
-    if count:
-        _truncate_uncommitted(target, count)
-    attrs = dict(ds.attrs, grid_signature=signature, committed_length=count, write_state='writing')
+    attrs = dict(
+        dataset.attrs, grid_signature=signature, committed_length=count, write_state='writing'
+    )
+    # Preserve an interrupted append's manifest until restoration is complete.
     target.attrs.update(attrs)
-    ds.attrs = attrs
-    _write_time_batch(store, group, ds, count=count, tile_size=tile_size)
-    written = ds.sizes['time']
-    previous = ds.time.to_numpy()[-1]
-    del ds, dataset
-    for dataset in batches:
-        if dataset.attrs.get('storage_schema') != SCHEMA or _signature(dataset) != signature:
-            msg = 'A batch has a conflicting grid, CRS, variables or units'
-            raise StorageError(msg)
-        if dataset.time.to_numpy()[0] <= previous:
-            msg = 'New timestamps must follow all previous batches'
-            raise StorageError(msg)
-        ds = dataset.copy()
-        ds.attrs = attrs
-        _write_time_batch(store, group, ds, count=count + written, tile_size=tile_size)
-        written += ds.sizes['time']
-        previous = ds.time.to_numpy()[-1]
-        del ds, dataset
-    target = root.get_group(group)
-    target.attrs.update(committed_length=count + written, write_state='complete')
+    with TemporaryDirectory(prefix='weatheasy-weather-') as directory:
+        first_dataset = dataset.isel(time=slice(0, 1)).copy(deep=True)
+        field_names = ['time', *(str(name) for name in dataset.data_vars)]
+        filenames = {
+            name: Path(directory) / f'{index}.raw' for index, name in enumerate(field_names)
+        }
+        written = 0
+        previous = None
+        while dataset is not None:
+            if dataset.attrs.get('storage_schema') != SCHEMA or _signature(dataset) != signature:
+                msg = 'A batch has a conflicting grid, CRS, variables or units'
+                raise StorageError(msg)
+            if previous is not None and dataset.time.to_numpy()[0] <= previous:
+                msg = 'New timestamps must follow all previous batches'
+                raise StorageError(msg)
+            for name, filename in filenames.items():
+                values = (
+                    dataset.time.to_numpy().astype('datetime64[s]').astype(np.int64)
+                    if name == 'time'
+                    else dataset[name].to_numpy()
+                )
+                with filename.open('ab') as stream:
+                    values.tofile(stream)
+            written += dataset.sizes['time']
+            previous = dataset.time.to_numpy()[-1]
+            dataset = next(batches, None)
+        if count:
+            _restore_append_backup(store, target)
+            _truncate_uncommitted(target, count)
+            _save_append_backup(store, target, count)
+        else:
+            first_dataset.attrs = attrs
+            _write_time_batch(
+                store, group, first_dataset, tile_size=tile_size, time_chunk=time_chunk
+            )
+            target = root.get_group(group)
+        staged = {
+            name: np.memmap(
+                filename,
+                mode='r',
+                dtype=np.int64 if name == 'time' else first_dataset[name].dtype,
+                shape=(written,)
+                if name == 'time'
+                else (written, first_dataset.sizes['latitude'], first_dataset.sizes['longitude']),
+            )
+            for name, filename in filenames.items()
+        }
+        _copy_staged(target, staged, count, written)
+        del staged
+    final_attrs = dict(target.attrs)
+    final_attrs.pop('append_backup', None)
+    final_attrs.update(committed_length=count + written, write_state='complete')
+    target.attrs.put(final_attrs)
     zarr.consolidate_metadata(store)
+    sync(store.delete_dir(f'{group}/.append-backup/'))
+
+
+def _copy_staged(
+    target: zarr.Group, staged: dict[str, np.memmap], count: int, written: int
+) -> None:
+    for name, source_array in staged.items():
+        output = target.get_array(name)
+        output.resize((count + written, *output.shape[1:]))
+        step = output.chunks[0]
+        for chunk_index in range(count // step, (count + written - 1) // step + 1):
+            first = max(count, chunk_index * step)
+            stop = min((chunk_index + 1) * step, count + written)
+            # Align each destination chunk, including a partial committed chunk.
+            if first < stop:
+                source_time = slice(first - count, stop - count)
+                if output.ndim == 1:
+                    output[first:stop] = source_array[source_time]
+                else:
+                    for lat in range(0, output.shape[1], output.chunks[1]):
+                        for lon in range(0, output.shape[2], output.chunks[2]):
+                            spatial = (
+                                slice(lat, lat + output.chunks[1]),
+                                slice(lon, lon + output.chunks[2]),
+                            )
+                            output[(slice(first, stop), *spatial)] = source_array[
+                                (source_time, *spatial)
+                            ]
 
 
 def _write_time_batch(
-    store: Store, group: str, ds: xr.Dataset, *, count: int, tile_size: int
+    store: Store, group: str, ds: xr.Dataset, *, tile_size: int, time_chunk: int
 ) -> None:
-    if count:
-        # a- leaves fixed spatial coordinates untouched.
-        ds.to_zarr(
-            store,
-            group=group,
-            mode='a-',
-            append_dim='time',
-            zarr_format=3,
-            consolidated=False,
-            write_empty_chunks=False,
-        )
-    else:
-        encoding: dict[Hashable, dict[str, Any]] = {
-            name: {
-                'chunks': (
-                    1,
-                    min(tile_size, ds.sizes['latitude']),
-                    min(tile_size, ds.sizes['longitude']),
-                ),
-                '_FillValue': np.nan,
-                'fill_value': np.nan,
-                'grid_mapping': 'spatial_ref',
-            }
-            for name in ds.data_vars
+    encoding: dict[Hashable, dict[str, Any]] = {
+        name: {
+            'chunks': (
+                time_chunk,
+                min(tile_size, ds.sizes['latitude']),
+                min(tile_size, ds.sizes['longitude']),
+            ),
+            '_FillValue': np.nan,
+            'fill_value': np.nan,
+            'grid_mapping': 'spatial_ref',
         }
-        encoding['time'] = {
-            'chunks': (1,),
-            'dtype': 'int64',
-            'units': 'seconds since 1970-01-01',
-            'calendar': 'proleptic_gregorian',
-        }
-        for axis in ('latitude', 'longitude'):
-            encoding[axis] = {'chunks': (ds.sizes[axis],), '_FillValue': None}
-        ds.to_zarr(
-            store,
-            group=group,
-            mode='w',
-            encoding=encoding,
-            zarr_format=3,
-            consolidated=False,
-            write_empty_chunks=False,
-        )
+        for name in ds.data_vars
+    }
+    encoding['time'] = {
+        'chunks': (1,),
+        'dtype': 'int64',
+        'units': 'seconds since 1970-01-01',
+        'calendar': 'proleptic_gregorian',
+    }
+    for axis in ('latitude', 'longitude'):
+        encoding[axis] = {'chunks': (ds.sizes[axis],), '_FillValue': None}
+    ds.to_zarr(
+        store,
+        group=group,
+        mode='w',
+        encoding=encoding,
+        zarr_format=3,
+        consolidated=False,
+        write_empty_chunks=False,
+    )
 
 
 def open_dataset(store: Store, group: str) -> xr.Dataset:

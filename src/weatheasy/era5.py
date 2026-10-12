@@ -369,8 +369,9 @@ def process_day(main: xr.Dataset, boundary: xr.Dataset, day: date) -> xr.Dataset
     """Reduce one spatial field at a time; memory is independent of month length.
 
     A full field is a natural GRIB decoding block, spanning multiple Zarr chunks
-    (with partial chunks only at grid edges). The daily output writes each time
-    chunk once. Shared hourly inputs are decoded once for all derived variables.
+    (with partial chunks only at grid edges). Daily reductions are collected
+    into bounded time blocks before writing. Shared hourly inputs are decoded
+    once for all derived variables.
     """
     start = np.datetime64(day, 'h')
     following = start + np.timedelta64(24, 'h')

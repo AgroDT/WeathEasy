@@ -114,6 +114,16 @@ class PrecipCorrector:
         return str(self.climatology.metadata['training_id'])
 
     def correct(self, root: zarr.Group, day: date) -> dict[str, NDArray[np.float32]]:
+        data = self.source.read_day(root, self.source.precip_var, day)
+        return self.correct_grid(day, *data)
+
+    def correct_grid(
+        self,
+        day: date,
+        raw: NDArray[np.float32],
+        lats: NDArray[np.float32],
+        lons: NDArray[np.float32],
+    ) -> dict[str, NDArray[np.float32]]:
         if (
             self.clf is None
             or self.climatology is None
@@ -125,7 +135,6 @@ class PrecipCorrector:
             msg = 'Artifacts not loaded; call load_artifacts() first'
             raise RuntimeError(msg)
 
-        raw, lats, lons = self.source.read_day(root, self.source.precip_var, day)
         self.climatology.require_grid(lats, lons)
         era5_day = np.maximum(raw * self.source.precip_to_mm, 0.0).astype(np.float32)
         valid = np.isfinite(era5_day)

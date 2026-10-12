@@ -232,13 +232,14 @@ def check_forecast_replacement(
     # A sentinel verifies deletion of the previous forecast before any new write.
     root['forecast'].attrs['old_forecast'] = True
     previous_reanalysis_attrs = dict(root['reanalysis/flx'].attrs)
-    original_write = download.write_batch
+    original_write = download.write_batches
     monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 9, 23, tzinfo=UTC))
 
     def fail_second_grid(
         store: Store,
         group: str,
-        dataset: xr.Dataset,
+        datasets,  # noqa: ANN001
+        **kwargs,
     ):
         if group.startswith('forecast/'):
             assert const.CFS2_KEY_UPDATED not in root[''].attrs
@@ -246,10 +247,10 @@ def check_forecast_replacement(
         if group == 'forecast/pgb':
             msg = 'simulated interrupted second-grid write'
             raise OSError(msg)
-        return original_write(store, group, dataset)
+        return original_write(store, group, datasets, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(download, 'write_batch', fail_second_grid)
+        patch.setattr(download, 'write_batches', fail_second_grid)
         with pytest.raises(OSError, match='second-grid'):
             download.download_cfs2_data(root.store)
         assert const.CFS2_KEY_UPDATED not in root[''].attrs

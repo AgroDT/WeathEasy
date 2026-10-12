@@ -87,6 +87,16 @@ class TemperatureCorrector:
         return str(self.climatology.metadata['training_id'])
 
     def correct(self, root: zarr.Group, day: date) -> dict[str, NDArray[np.float32]]:
+        data = self.source.read_day(root, self.source.temp_var, day)
+        return self.correct_grid(day, *data)
+
+    def correct_grid(
+        self,
+        day: date,
+        grid: NDArray[np.float32],
+        lats: NDArray[np.float32],
+        lons: NDArray[np.float32],
+    ) -> dict[str, NDArray[np.float32]]:
         if (
             self.model is None
             or self.climatology is None
@@ -97,7 +107,6 @@ class TemperatureCorrector:
             msg = 'Artifacts not loaded; call load_artifacts() first'
             raise RuntimeError(msg)
 
-        grid, lats, lons = self.source.read_day(root, self.source.temp_var, day)
         self.climatology.require_grid(lats, lons)
         monthly_mean = self.climatology.mean[day.month - 1]
         anomaly = (grid - monthly_mean).astype(np.float32)

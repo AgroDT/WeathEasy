@@ -194,9 +194,9 @@ weatheasy download era5 --store ./era5.zarr --bbox 56 37 55 38
 ERA5-Land requests use the native GRIB format, avoiding server-side NetCDF
 conversion. The loader opens fields lazily through xarray/cfgrib and decodes
 one hourly spatial field at a time, reducing inputs into one day of output. A day spans multiple
-Zarr chunks, up to `(1, 128, 128)` each; GRIB fields are not repeatedly decoded
-for individual spatial tiles. Memory depends on the requested grid, not the
-number of days in a month. NaNs and next-midnight accumulations are preserved.
+Zarr chunks, `(128, 32, 32)` each; GRIB fields are not repeatedly decoded
+for individual spatial tiles. Daily reductions are staged on local disk and written as aligned time blocks.
+Memory depends on the requested grid rather than the number of days in a month. NaNs and next-midnight accumulations are preserved.
 Fields may have different time coverage; missing hours remain NaN, making affected
 daily statistics incomplete. The month is published only after every daily write and raw-cache
 upload succeeds; interrupted months are retried without duplicating dates.
@@ -344,7 +344,21 @@ therefore remain NaN when read. Metadata is consolidated after successful writes
 and refreshed after group or attribute changes. During a write, the previous
 consolidated snapshot is removed; only groups with `write_state="complete"`
 are ready for consumption. CMIP6 NetCDF preparation is still eager;
-ERA5-Land GRIB preparation uses bounded daily batches. Dask is not required.
+ERA5-Land and CFS2 GRIB preparation write bounded time blocks. Dask is not required.
+Weather chunks use `(time, latitude, longitude)`: `(128, 32, 32)` for ERA5,
+CFS2 reanalysis and corrections, and CMIP6; CFS2 forecasts use `(64, 32, 32)`.
+Spatial chunks are capped by the grid dimensions. Original source grids are retained.
+Before appending into a partly filled time chunk, existing chunk objects are
+backed up inside the group. Retry restores their committed contents (including
+absent all-NaN chunks) before discarding the uncommitted tail. Backups are retired
+only after publishing the completed append. Existing stores keep their chunk
+layout; this change does not repack stored data.
+Writes stage the transaction in temporary local binary files and copy one
+aligned destination chunk at a time. This requires temporary disk space for the
+transaction's uncompressed fields; it avoids holding the entire block in RAM.
+Correction reads source time chunks in spatial tiles into temporary memory-mapped
+files, runs the existing daily models, and writes the resulting time block.
+Temporary disk holds both raw and corrected fields for the current source block.
 
 CFS2 forecast grids have permanent group paths
 `forecast/flx` and `forecast/pgb`, including when the root store is an

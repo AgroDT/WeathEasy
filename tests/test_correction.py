@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import xarray as xr
 import zarr
 from fsspec.implementations.memory import MemoryFileSystem
 from zarr.abc.store import Store
+from zarr.storage import MemoryStore
 
 from weatheasy.build_copdem import _slopes
 from weatheasy.correction import Source, apply, features, training
@@ -39,13 +41,11 @@ def init_stubbed_models(monkeypatch: pytest.MonkeyPatch):
         def load_artifacts(self):
             return self
 
-        def correct(self, root: zarr.Group, day: date):
-            values, _, _ = self.source.read_day(root, 'TMP', day)
+        def correct_grid(self, _day, values, _lats, _lons):  # noqa: ANN001
             return {'corrected': values - 2}
 
     class FakePrecipitation(FakeTemperature):
-        def correct(self, root: zarr.Group, day: date):
-            values, _, _ = self.source.read_day(root, 'PRATE', day)
+        def correct_grid(self, _day, values, _lats, _lons):  # noqa: ANN001
             return {'corrected': values * self.source.precip_to_mm / 2}
 
     monkeypatch.setattr(apply, 'TemperatureCorrector', FakeTemperature)
@@ -825,3 +825,70 @@ def test_failed_manifest_publication_keeps_previous_manifest(
         assert stream.read() == previous
     with pytest.raises(ValueError, match='incomplete or modified correction artifacts'):
         climatology.verify_manifest(directory, ('model.joblib',))
+
+
+@pytest.mark.usefixtures('stubbed_models')
+def test_correction_reads_each_source_chunk_once_across_cropped_time_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = MemoryStore()
+    latitudes, longitudes = np.arange(40, 84), np.arange(18, 88)
+    dates = np.arange(np.datetime64('2020-01-01'), np.datetime64('2020-05-10'))
+    values = (
+        np.arange(130)[:, None, None] * 1000
+        + np.arange(44)[None, :, None] * 10
+        + np.arange(70)[None, None, :]
+    ).astype(np.float32)
+    values[4, 10, 10] = np.nan
+    raw = xr.Dataset(
+        {
+            'TMP': (('time', 'latitude', 'longitude'), values, {'units': 'degC'}),
+            'PRATE': (
+                ('time', 'latitude', 'longitude'),
+                values / 21600,
+                {'units': 'kg m-2 s-1'},
+            ),
+        },
+        coords={'time': dates, 'latitude': latitudes, 'longitude': longitudes},
+    )
+    write_batch(store, 'reanalysis/flx', prepare_dataset(raw, crs='EPSG:4326'))
+    root = zarr.open_group(store, use_consolidated=False)
+    counts: Counter[str] = Counter()
+    original_get = MemoryStore.get
+    original_get_sync = MemoryStore.get_sync
+
+    def record(key: str) -> None:
+        if key.startswith(('reanalysis/flx/TMP/c/', 'reanalysis/flx/PRATE/c/')):
+            counts[key] += 1
+
+    async def counted_get(self: MemoryStore, key: str, *args, **kwargs):
+        record(key)
+        return await original_get(self, key, *args, **kwargs)
+
+    def counted_get_sync(self: MemoryStore, key: str, *args, **kwargs):
+        record(key)
+        return original_get_sync(self, key, *args, **kwargs)
+
+    # Instrument the class so stores cloned by xarray retain the read counters.
+    monkeypatch.setattr(MemoryStore, 'get', counted_get)
+    monkeypatch.setattr(MemoryStore, 'get_sync', counted_get_sync)
+    assert (
+        apply.correct_store(
+            CFS2, root, get_file_store(tmp_path / 'artifacts'), get_store(tmp_path / 'dem.zarr')
+        )
+        == 130
+    )
+    expected_reads = {
+        f'reanalysis/flx/{var}/c/{time}/{lat}/{lon}': 1
+        for var in ('TMP', 'PRATE')
+        for time in (0, 1)
+        for lat in (0, 1)
+        for lon in (0, 1, 2)
+    }
+    assert counts == expected_reads
+    with open_dataset(store, 'reanalysis/correction') as result:
+        np.testing.assert_array_equal(result.time, dates.astype('datetime64[ns]'))
+        np.testing.assert_array_equal(result.latitude, latitudes[1:43])
+        np.testing.assert_array_equal(result.longitude, longitudes[1:])
+        np.testing.assert_array_equal(result.TMP_corr, values[:, 1:43, 1:] - 2)
+        np.testing.assert_allclose(result.PRATE_corr, values[:, 1:43, 1:] / 2, rtol=1e-6)

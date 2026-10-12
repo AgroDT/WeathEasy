@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import date
+from itertools import pairwise
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -104,31 +107,79 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
     if crs is None:
         msg = f'{source.name} prepared data have no CRS'
         raise ValueError(msg)
-    for day in pending:
-        temperature = temp.correct(root, day)['corrected']
-        precipitation = precip.correct(root, day)['corrected']
-        if temperature.shape != (len(lats), len(lons)) or precipitation.shape != temperature.shape:
-            msg = f'{source.name}: corrected grid shape differs from source on {day}'
-            raise ValueError(msg)
-        ds = xr.Dataset(
-            {
-                'TMP_corr': (
-                    ('time', 'latitude', 'longitude'),
-                    temperature[None].astype(np.float32),
-                    {'units': 'degC', 'long_name': 'Bias-corrected daily temperature'},
-                ),
-                'PRATE_corr': (
-                    ('time', 'latitude', 'longitude'),
-                    precipitation[None].astype(np.float32),
-                    {'units': 'mm/day', 'long_name': 'Bias-corrected daily precipitation'},
-                ),
-            },
-            coords={'time': [np.datetime64(day)], 'latitude': lats, 'longitude': lons},
-            attrs={'correction_artifact_id': artifact_id},
+    with open_dataset(root.store, source.path(root)) as raw:
+        view = source._crop(raw)  # noqa: SLF001
+        source_group = root.get_group(source.group_path)
+        chunk_size = source_group.get_array(source.temp_var).chunks[0]
+        lat_offset = int(np.searchsorted(raw.latitude.to_numpy(), view.latitude.to_numpy()[0]))
+        lon_offset = int(np.searchsorted(raw.longitude.to_numpy(), view.longitude.to_numpy()[0]))
+        indices = np.flatnonzero(
+            np.isin(
+                view.time.to_numpy().astype('datetime64[D]'),
+                np.array(pending, dtype='datetime64[D]'),
+            )
         )
-        prepared = prepare_dataset(ds, crs=crs)
-        prepared.attrs['correction_artifact_id'] = artifact_id
-        write_batch(root.store, path, prepared)
+        for chunk_index in np.unique(indices // chunk_size):
+            selected = indices[indices // chunk_size == chunk_index]
+            with TemporaryDirectory(prefix='weatheasy-correction-') as directory:
+                block = view[[source.temp_var, source.precip_var]].isel(time=selected)
+                shape = (len(selected), len(lats), len(lons))
+                inputs = {}
+                outputs = {}
+                for var in (source.temp_var, source.precip_var):
+                    inputs[var] = np.memmap(
+                        Path(directory) / f'{var}.raw', mode='w+', dtype=np.float32, shape=shape
+                    )
+                    _, lat_step, lon_step = source_group.get_array(var).chunks
+                    lat_edges = [
+                        0,
+                        *range(lat_step - lat_offset % lat_step, len(lats), lat_step),
+                        len(lats),
+                    ]
+                    lon_edges = [
+                        0,
+                        *range(lon_step - lon_offset % lon_step, len(lons), lon_step),
+                        len(lons),
+                    ]
+                    for lat_start, lat_stop in pairwise(lat_edges):
+                        for lon_start, lon_stop in pairwise(lon_edges):
+                            spatial = (slice(lat_start, lat_stop), slice(lon_start, lon_stop))
+                            inputs[var][(slice(None), *spatial)] = (
+                                block[var]
+                                .isel(latitude=spatial[0], longitude=spatial[1])
+                                .to_numpy()
+                            )
+                for var in ('TMP_corr', 'PRATE_corr'):
+                    outputs[var] = np.memmap(
+                        Path(directory) / f'{var}.raw', mode='w+', dtype=np.float32, shape=shape
+                    )
+                for index, value in enumerate(block.time.to_numpy().astype('datetime64[D]')):
+                    day = date.fromisoformat(str(value))
+                    outputs['TMP_corr'][index] = temp.correct_grid(
+                        day, inputs[source.temp_var][index], lats, lons
+                    )['corrected']
+                    outputs['PRATE_corr'][index] = precip.correct_grid(
+                        day, inputs[source.precip_var][index], lats, lons
+                    )['corrected']
+                ds = xr.Dataset(
+                    {
+                        'TMP_corr': (
+                            ('time', 'latitude', 'longitude'),
+                            outputs['TMP_corr'],
+                            {'units': 'degC', 'long_name': 'Bias-corrected daily temperature'},
+                        ),
+                        'PRATE_corr': (
+                            ('time', 'latitude', 'longitude'),
+                            outputs['PRATE_corr'],
+                            {'units': 'mm/day', 'long_name': 'Bias-corrected daily precipitation'},
+                        ),
+                    },
+                    coords={'time': block.time, 'latitude': lats, 'longitude': lons},
+                )
+                prepared = prepare_dataset(ds, crs=crs)
+                prepared.attrs['correction_artifact_id'] = artifact_id
+                write_batch(root.store, path, prepared)
+                del inputs, outputs, ds, prepared
     return len(pending)
 
 
