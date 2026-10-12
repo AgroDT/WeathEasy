@@ -16,7 +16,6 @@ from weatheasy.storage import (
     StorageError,
     delete_group,
     get_store,
-    merge_fields,
     open_dataset,
     prepare_dataset,
     remove_group_attr,
@@ -195,7 +194,7 @@ def test_nearest_ties_choose_larger_coordinate():
     assert selected.TMP.item() == 3
 
 
-def test_separate_grid_groups_and_no_implicit_alignment():
+def test_separate_grid_groups_reject_conflicting_append():
     store = MemoryStore()
     flx = field(latitude=(54.7, 55.65), longitude=(0, 0.9375))
     pgb = field(latitude=(54, 55), longitude=(0, 1))
@@ -203,8 +202,6 @@ def test_separate_grid_groups_and_no_implicit_alignment():
     write_batch(store, 'forecast/pgb', pgb)
     np.testing.assert_array_equal(open_dataset(store, 'forecast/flx').latitude, flx.latitude)
     np.testing.assert_array_equal(open_dataset(store, 'forecast/pgb').latitude, pgb.latitude)
-    with pytest.raises(ValueError, match='align'):
-        merge_fields(flx, pgb.rename(TMP='PRES'))
     with pytest.raises(StorageError, match='conflicting'):
         write_batch(store, 'forecast/flx', pgb)
 

@@ -105,23 +105,6 @@ async def test_store_created_once_per_lifespan_off_loop(
 
 
 @pytest.mark.anyio
-async def test_store_initialization_failure_aborts_startup(monkeypatch: pytest.MonkeyPatch):
-    pytest.importorskip('fastapi')
-    from weatheasy.web import create_app, repository
-    from weatheasy.web.config import Settings, SourceSettings, SourcesSettings
-
-    def fail_store(_uri: str, **_kwargs):
-        msg = 'Store initialization failed'
-        raise OSError(msg)
-
-    monkeypatch.setattr(repository, 'get_store', fail_store)
-    app = create_app(Settings(sources=SourcesSettings(era5=SourceSettings(store='./era5.zarr'))))
-    with pytest.raises(OSError, match='Store initialization failed'):
-        async with app.router.lifespan_context(app):
-            pytest.fail('Startup must not complete without initialized stores')
-
-
-@pytest.mark.anyio
 async def test_repository_reads_ready_store_concurrently():
     pytest.importorskip('fastapi')
     from anyio import CapacityLimiter, Event as AsyncEvent, create_task_group

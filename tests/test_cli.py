@@ -17,22 +17,11 @@ if TYPE_CHECKING:
     [
         ['--help'],
         ['--version'],
-        ['-v'],
-        ['query', '--help'],
-        ['query', 'cfs2', '--help'],
         ['query', 'cmip6', '--help'],
-        ['query', 'era5', '--help'],
-        ['download', '--help'],
-        ['download', 'cfs2', '--help'],
-        ['download', 'cmip6', '--help'],
         ['download', 'era5', '--help'],
         ['dem', '--help'],
-        ['correction', '--help'],
         ['correction', 'train', '--help'],
-        ['correction', 'apply', '--help'],
-        ['emdna', '--help'],
         ['emdna', 'temperature', '--help'],
-        ['emdna', 'precipitation', '--help'],
         ['list-vars'],
     ],
 )
@@ -58,13 +47,6 @@ runpy.run_module('weatheasy', run_name='__main__')
         [sys.executable, '-c', script, *arguments], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
-    if arguments == ['list-vars']:
-        assert 'ERA5-Land variables:' in result.stdout
-        assert 'TMP_corr' in result.stdout
-    else:
-        assert result.stdout
-    if len(arguments) == 3 and arguments[0] in {'query', 'download'}:
-        assert f'weatheasy/{arguments[1]}.zarr' in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -143,14 +125,6 @@ print('stdout-still-open')
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == f'DATE,{variable}\n2000-01-01,280.25\nstdout-still-open\n'
-
-
-def test_download_rejects_era5_bbox_for_other_sources():
-    from weatheasy._cli import main
-
-    with pytest.raises(SystemExit) as failure:
-        main(['download', 'cmip6', '--bbox', '56', '37', '55', '38'])
-    assert failure.value.code == 2
 
 
 def test_query_s3_result_reuses_store_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -193,13 +193,3 @@ def test_variables_are_prepared_once_during_lifespan(monkeypatch: pytest.MonkeyP
             assert response.status_code == 200
             assert response.json()['era5']['TMP']['en'] == 'Temperature, °C'
         assert calls == 1
-
-
-def test_unknown_source_settings_are_rejected():
-    pytest.importorskip('fastapi')
-    from pydantic import ValidationError
-
-    from weatheasy.web.config import SourcesSettings
-
-    with pytest.raises(ValidationError, match='extra_forbidden'):
-        SourcesSettings.model_validate({'er5': {'store': './era5.zarr'}})

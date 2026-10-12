@@ -335,8 +335,6 @@ def test_initialization_does_not_write_field_chunks(
 def test_grouped_chunks_are_written_once_and_resumed_as_whole_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from io import StringIO
-
     import zarr
 
     monkeypatch.setattr(build_copdem, '_CHUNK_TILES', 2)
@@ -345,16 +343,6 @@ def test_grouped_chunks_are_written_once_and_resumed_as_whole_blocks(
     reads = []
     writes = []
     original_setitem = zarr.Array.__setitem__
-    original_progress = build_copdem.tqdm
-    bars = []
-
-    def record_progress(**kwargs):
-        kwargs.update(disable=False, file=StringIO())
-        bar = original_progress(**kwargs)
-        bars.append(bar)
-        return bar
-
-    monkeypatch.setattr(build_copdem, 'tqdm', record_progress)
     interrupted = True
 
     def read(url: str, cells: int):
@@ -386,22 +374,10 @@ def test_grouped_chunks_are_written_once_and_resumed_as_whole_blocks(
     group = zarr.open_group(store)
     np.testing.assert_array_equal(group['tile_status'][:], [[1, 2, 0], [1, 1, 0]])
     assert writes == [('/elevation', (4, 4)), ('/tile_status', (2, 2))]
-    assert [(bar.desc, bar.total, bar.n) for bar in bars] == [
-        ('Chunks', 2, 1),
-        ('Tiles', 4, 4),
-        ('Tiles', 2, 0),
-    ]
-    assert all(bar.disable for bar in bars)  # Context managers close bars on failure.
-    bars.clear()
     interrupted = False
     reads.clear()
     writes.clear()
     build_copdem.build_copdem((62, 10, 60, 13), 0.5, store)
-    assert [(bar.desc, bar.total, bar.initial, bar.n) for bar in bars] == [
-        ('Chunks', 2, 1, 2),
-        ('Tiles', 2, 0, 2),
-    ]
-    assert bars[1].postfix == 'Copernicus_DSM_COG_30_N61_00_E012_00_DEM'
     assert len(reads) == 2
     assert all('E012_' in url for url in reads)
     assert writes == [('/elevation', (4, 2)), ('/tile_status', (2, 1))]

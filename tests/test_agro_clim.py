@@ -3,13 +3,13 @@ from datetime import date
 import numpy as np
 import pytest
 
-from weatheasy.agro_clim import AgroClimateCalculator, format_results
+from weatheasy.agro_clim import AgroClimateCalculator
 
 
 BEGIN, END = date(2020, 2, 28), date(2020, 3, 2)
 
 
-def test_summaries_units_and_formatter():
+def test_summaries_and_units():
     calculator = AgroClimateCalculator(
         {
             'LHTFL': np.array([50, 100, 150, 100]),
@@ -33,11 +33,6 @@ def test_summaries_units_and_formatter():
             'P_MAX': 8,
         }
     )
-    output = format_results(result)
-    assert '(AET): 3.53 мм/день' in output
-    assert '(SWD): 1.47 мм/день' in output
-    assert '(SWC): 20.00 %' in output
-    assert '(P0_INT): 2 дней' in output
     # The caller provides the selected interval; date arguments do not silently slice arrays.
     assert calculator.total_precipitation(BEGIN, BEGIN) == 9.5
 

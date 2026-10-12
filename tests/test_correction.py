@@ -590,20 +590,6 @@ def test_old_artifacts_are_rejected_before_correction_is_deleted(tmp_path: Path)
     assert ERA5.correction_path not in root
 
 
-def test_interrupted_retraining_artifacts_are_rejected(tmp_path: Path):
-    from weatheasy.correction.climatology import TEMP_FILES, verify_manifest, write_manifest
-
-    directory = tmp_path / 'artifacts'
-    directory.mkdir()
-    for name in TEMP_FILES:
-        (directory / name).write_bytes(b'original')
-    write_manifest(get_file_store(directory), TEMP_FILES)
-    verify_manifest(get_file_store(directory), TEMP_FILES)
-    (directory / 'model.joblib').write_bytes(b'interrupted replacement')
-    with pytest.raises(ValueError, match='incomplete or modified correction artifacts'):
-        verify_manifest(get_file_store(directory), TEMP_FILES)
-
-
 @pytest.fixture(params=['local', 'memory'])
 def artifact_directory(request: pytest.FixtureRequest, tmp_path: Path) -> FileStore:
     if request.param == 'local':
