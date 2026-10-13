@@ -299,7 +299,7 @@ class _Cfs2ReanalysisDownloader:
         ymd = date_.strftime('%Y%m%d')
         ym = ymd[:-2]
         url_template = (
-            'https://www.ncei.noaa.gov/data/climate-forecast-system/access/operational-analysis/6-hourly-by-pressure/'
+            'https://www.ncei.noaa.gov/oa/prod-cfs-operational-analysis/6-hourly-by-pressure/'
             f'{date_.year}/{ym}/{ymd}/cdas1.t{{}}z.pgrbh00.grib2'
         )
         paths = []
