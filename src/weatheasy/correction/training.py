@@ -18,8 +18,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import xgboost as xgb
+from sklearn.model_selection import GroupKFold
 
-from . import features
+from . import features, quality
 from .climatology import (
     PRECIP_FILES,
     TEMP_FILES,
@@ -27,16 +28,25 @@ from .climatology import (
     build_climatology,
     write_manifest,
 )
-from .precip import WET_FEAT, WET_THRESHOLD
-from .temperature import FEATURE_COLS
+from .precip import (
+    _SEASONAL_FEAT,
+    HYBRID_RADIUS_KM,
+    WET_BIAS_THRESHOLD,
+    WET_FEAT,
+    WET_THRESHOLD,
+    _predict,
+)
+from .sources import FORECASTS
+from .temperature import CORRECTION_THRESHOLD, FEATURE_COLS
 from weatheasy.storage import StorageError, select_point
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     import zarr
     from numpy.typing import NDArray
+    from zarr.abc.store import Store
 
     from .sources import Source
     from weatheasy.file_storage import FileStore
@@ -47,6 +57,7 @@ _LOG = logging.getLogger(__name__)
 _TERRAIN_COLS = ('elevation', 'slope_we', 'slope_sn')
 _IDW_BATCH = 100_000
 _IDW_MIN_STATIONS = 3
+CV_FOLDS = 5
 _XGB_PARAMS = {
     'n_estimators': 400,
     'max_depth': 6,
@@ -187,6 +198,9 @@ def build_temp_artifacts(
     root: zarr.Group,
     observations: pd.DataFrame,
     artifacts: FileStore,
+    *,
+    cv_folds: int = CV_FOLDS,
+    dem_store: Store | None = None,
 ) -> None:
     """Train the temperature corrector for ``source`` and write its artifacts."""
     stations = prepare_stations(observations, ['temperature'])
@@ -213,6 +227,15 @@ def build_temp_artifacts(
         np.save(stream, lons)
     write_manifest(out, TEMP_FILES)
     _LOG.info('Wrote temperature artifacts for %s to %s', source.name, out.root)
+    _report(
+        source,
+        root,
+        artifacts,
+        dem_store,
+        'temp',
+        cross_validate_temp(dataset, cv_folds),
+        observed='temperature',
+    )
 
 
 def _temp_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
@@ -250,11 +273,7 @@ def idw_seasonal(
     lons: NDArray,
 ) -> dict[int, NDArray[np.float32]]:
     """Inverse-distance interpolate a per-station-month value onto the source grid."""
-    station_month = (
-        dataset.groupby(['station_id', 'month'])
-        .agg(lat=('lat', 'first'), lon=('lon', 'first'), value=(column, 'mean'))
-        .reset_index()
-    )
+    station_month = _station_month(dataset, column)
     lat_grid, lon_grid = np.meshgrid(lats, lons, indexing='ij')
     target = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
     result: dict[int, NDArray[np.float32]] = {}
@@ -263,17 +282,50 @@ def idw_seasonal(
         if len(month_data) < _IDW_MIN_STATIONS:
             result[month] = np.zeros((len(lats), len(lons)), np.float32)
             continue
-        src = month_data[['lat', 'lon']].to_numpy()
-        vals = month_data['value'].to_numpy().astype(np.float32)
-        interp = np.empty(len(target), np.float32)
-        for s in range(0, len(target), _IDW_BATCH):
-            e = min(s + _IDW_BATCH, len(target))
-            dist = np.maximum(features.point_distances_km(target[s:e], src), 0.1)
-            weight = 1.0 / dist**2
-            weight /= weight.sum(axis=1, keepdims=True)
-            interp[s:e] = (weight * vals[None, :]).sum(axis=1)
-        result[month] = interp.reshape(len(lats), len(lons)).astype(np.float32)
+        result[month] = _idw(month_data, target).reshape(len(lats), len(lons))
     return result
+
+
+def idw_points(dataset: pd.DataFrame, column: str, points: pd.DataFrame) -> NDArray[np.float32]:
+    """Interpolate a per-station-month value of ``dataset`` to each row of ``points``.
+
+    Matches :func:`idw_seasonal` sampled at the points, so held-out stations get
+    the seasonal features inference would give them, not their own means.
+    """
+    station_month = _station_month(dataset, column)
+    keys = points[['lat', 'lon', 'month']].drop_duplicates()
+    values = np.zeros(len(keys), np.float32)
+    months = keys['month'].to_numpy()
+    for month in np.unique(months):
+        month_data = station_month[station_month['month'] == month]
+        if len(month_data) < _IDW_MIN_STATIONS:
+            continue
+        rows = months == month
+        values[rows] = _idw(month_data, keys.loc[rows, ['lat', 'lon']].to_numpy(np.float64))
+    keyed = keys.assign(_value=values)
+    merged = points[['lat', 'lon', 'month']].merge(keyed, on=['lat', 'lon', 'month'], how='left')
+    return merged['_value'].to_numpy(np.float32)
+
+
+def _station_month(dataset: pd.DataFrame, column: str) -> pd.DataFrame:
+    return (
+        dataset.groupby(['station_id', 'month'])
+        .agg(lat=('lat', 'first'), lon=('lon', 'first'), value=(column, 'mean'))
+        .reset_index()
+    )
+
+
+def _idw(month_data: pd.DataFrame, target: NDArray) -> NDArray[np.float32]:
+    src = month_data[['lat', 'lon']].to_numpy()
+    vals = month_data['value'].to_numpy().astype(np.float32)
+    interp = np.empty(len(target), np.float32)
+    for s in range(0, len(target), _IDW_BATCH):
+        e = min(s + _IDW_BATCH, len(target))
+        dist = np.maximum(features.point_distances_km(target[s:e], src), 0.1)
+        weight = 1.0 / dist**2
+        weight /= weight.sum(axis=1, keepdims=True)
+        interp[s:e] = (weight * vals[None, :]).sum(axis=1)
+    return interp
 
 
 # ── Precipitation training ──────────────────────────────────────────────────
@@ -286,6 +338,9 @@ def build_precip_artifacts(
     root: zarr.Group,
     observations: pd.DataFrame,
     artifacts: FileStore,
+    *,
+    cv_folds: int = CV_FOLDS,
+    dem_store: Store | None = None,
 ) -> None:
     """Train the two-stage precipitation corrector for ``source`` and write its artifacts."""
     stations = prepare_stations(observations, ['precipitation'])
@@ -333,6 +388,15 @@ def build_precip_artifacts(
         np.savez_compressed(stream, **seasonal)
     write_manifest(out, PRECIP_FILES)
     _LOG.info('Wrote precip artifacts for %s to %s', source.name, out.root)
+    _report(
+        source,
+        root,
+        artifacts,
+        dem_store,
+        'precip',
+        cross_validate_precip(dataset, cv_folds),
+        observed='obs_precip',
+    )
 
 
 def _precip_features(sampled: pd.DataFrame, climate: Climatology) -> pd.DataFrame:
@@ -410,9 +474,138 @@ def build_artifacts(
     artifacts: FileStore,
     *,
     only: str | None = None,
+    cv_folds: int = CV_FOLDS,
+    dem_store: Store | None = None,
 ) -> None:
-    """Train and write both correctors' artifacts for ``source`` (or just one)."""
+    """Train and write both correctors' artifacts for ``source`` (or just one).
+
+    Each trained corrector also updates ``<source>/quality_report.json`` and the
+    combined ``quality_report.md`` at the artifact root. ``cv_folds=0`` skips the
+    cross-validated scores, which retrain the models once per fold.
+    """
     if only in (None, 'temp'):
-        build_temp_artifacts(source, root, observations, artifacts)
+        build_temp_artifacts(
+            source, root, observations, artifacts, cv_folds=cv_folds, dem_store=dem_store
+        )
     if only in (None, 'precip'):
-        build_precip_artifacts(source, root, observations, artifacts)
+        build_precip_artifacts(
+            source, root, observations, artifacts, cv_folds=cv_folds, dem_store=dem_store
+        )
+
+
+# ── Quality report ──────────────────────────────────────────────────────────
+
+
+def _cv_splits(dataset: pd.DataFrame, folds: int) -> Iterator[tuple[NDArray, NDArray]] | None:
+    """Station-grouped folds: a station is never in its own training data."""
+    folds = min(folds, int(dataset['station_id'].nunique()))
+    if folds < 2:
+        return None
+    return GroupKFold(n_splits=folds).split(dataset, groups=dataset['station_id'])
+
+
+def cross_validate_temp(dataset: pd.DataFrame, folds: int) -> tuple[pd.DataFrame, int] | None:
+    """Corrected temperature of each held-out station, as inference would produce it."""
+    splits = _cv_splits(dataset, folds)
+    if splits is None:
+        return None
+    corrected = np.full(len(dataset), np.nan, np.float32)
+    count = 0
+    for train_idx, test_idx in splits:
+        count += 1
+        train = dataset.iloc[train_idx]
+        test = dataset.iloc[test_idx].copy()
+        test['era5_seasonal_bias'] = idw_points(train, 'era5_seasonal_bias', test)
+        model = _train_bias_regressor(train)
+        bias = model.predict(test[FEATURE_COLS].astype(np.float32).to_numpy()).astype(np.float32)
+        bias[np.abs(test['era5_seasonal_bias'].to_numpy()) < CORRECTION_THRESHOLD] = 0.0
+        corrected[test_idx] = test['reanalysis'].to_numpy() - bias
+    frame = dataset[['station_id', 'date', 'temperature']].assign(
+        raw=dataset['reanalysis'].to_numpy(), corrected=corrected
+    )
+    return frame, count
+
+
+def cross_validate_precip(dataset: pd.DataFrame, folds: int) -> tuple[pd.DataFrame, int] | None:
+    """Corrected precipitation of each held-out station, as inference would produce it.
+
+    Inference recalibrates the wet threshold per day from the whole grid; held-out
+    stations use the thresholds tuned on the fold's training stations instead.
+    """
+    splits = _cv_splits(dataset, folds)
+    if splits is None:
+        return None
+    corrected = np.full(len(dataset), np.nan, np.float32)
+    count = 0
+    for train_idx, test_idx in splits:
+        count += 1
+        train = dataset.iloc[train_idx]
+        test = dataset.iloc[test_idx].copy()
+        for column in _PRECIP_SEASONAL:
+            test[column] = idw_points(train, column, test)
+        clf, reg = _train_two_stage(train)
+        fallback = train.copy()
+        fallback[_PRECIP_SEASONAL] = np.float32(0.0)
+        fallback_clf, fallback_reg = _train_two_stage(fallback)
+        threshold = _tune_threshold(clf, train)
+        fallback_threshold = _tune_threshold(fallback_clf, fallback)
+        train_coords = train[['lat', 'lon']].drop_duplicates().to_numpy(np.float64)
+        stations, inverse = np.unique(
+            test[['lat', 'lon']].to_numpy(np.float64), axis=0, return_inverse=True
+        )
+        near_station = features.point_distances_km(stations, train_coords).min(axis=1)
+        near = (near_station < HYBRID_RADIUS_KM)[inverse.ravel()]
+        result = np.zeros(len(test), np.float32)
+        if near.any():
+            result[near] = _predict(test[near], clf, reg, threshold)
+        if (~near).any():
+            far = test[~near].copy()
+            far[_SEASONAL_FEAT] = np.float32(0.0)
+            result[~near] = _predict(far, fallback_clf, fallback_reg, fallback_threshold)
+        suppress = np.abs(test['precip_wet_bias'].to_numpy()) < WET_BIAS_THRESHOLD
+        result[suppress] = test['era5_precip'].to_numpy()[suppress]
+        corrected[test_idx] = np.maximum(result, 0.0)
+    frame = dataset[['station_id', 'date', 'obs_precip']].assign(
+        raw=dataset['era5_precip'].to_numpy(), corrected=corrected
+    )
+    return frame, count
+
+
+def _report(  # noqa: PLR0917
+    source: Source,
+    root: zarr.Group,
+    artifacts: FileStore,
+    dem_store: Store | None,
+    variable: str,
+    validated: tuple[pd.DataFrame, int] | None,
+    *,
+    observed: str,
+) -> None:
+    """Write the reanalysis scores and, for a source with a forecast, its shift check."""
+    if validated is None:
+        section: dict[str, Any] = {
+            'skipped': 'cross-validation disabled or fewer than two stations',
+        }
+    else:
+        frame, folds = validated
+        section = quality.skill(frame, observed=observed, precipitation=variable == 'precip')
+        section['folds'] = folds
+        _LOG.info(
+            '%s %s held-out RMSE: %.3f raw -> %.3f corrected',
+            source.name,
+            variable,
+            section['raw']['rmse'],
+            section['corrected']['rmse'],
+        )
+    quality.update_report(artifacts, source.name, variable, section)
+    forecast = FORECASTS.get(source.name)
+    if forecast is None or dem_store is None:
+        return
+    try:
+        consistency = quality.forecast_consistency(forecast, root, artifacts, dem_store, variable)
+    except (KeyError, OSError, ValueError, StorageError):
+        # The models are already published; a broken forecast must not fail training.
+        _LOG.exception('%s: forecast consistency check failed', forecast.name)
+        return
+    if consistency is not None:
+        quality.update_report(artifacts, source.name, f'forecast_{variable}', consistency)

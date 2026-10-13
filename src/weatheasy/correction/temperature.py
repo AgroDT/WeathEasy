@@ -52,7 +52,7 @@ class TemperatureCorrector:
 
     def __init__(self, source: Source, artifacts: FileStore, terrain: features.Dem | None) -> None:
         self.source = source
-        self.dir = artifacts.child(source.name, 'temp')
+        self.dir = artifacts.child(source.model.name, 'temp')
         self.terrain = terrain
         self.model: Any = None
         self.climatology: Climatology | None = None
@@ -62,7 +62,7 @@ class TemperatureCorrector:
 
     def load_artifacts(self) -> TemperatureCorrector:
         verify_manifest(self.dir, TEMP_FILES)
-        self.climatology = Climatology.load(self.dir, self.source, self.source.temp_var)
+        self.climatology = Climatology.load(self.dir, self.source.model, self.source.temp_var)
         with self.dir.open('model.joblib') as stream:
             self.model = joblib.load(stream)
         with (

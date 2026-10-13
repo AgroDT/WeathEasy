@@ -44,7 +44,11 @@ def test_training_reads_required_fields(
         _artifacts: object,
         *,
         only: str | None,
+        cv_folds: int,
+        dem_store: object,
     ):
+        assert cv_folds == 5
+        assert dem_store is None
         captured.append((stations, only))
 
     monkeypatch.setattr(correction_train.training, 'build_artifacts', build_artifacts)
@@ -55,6 +59,8 @@ def test_training_reads_required_fields(
             stations=str(path),
             source='era5',
             only=only,
+            cv_folds=5,
+            dem=None,
         )
     )
     assert len(captured) == 1

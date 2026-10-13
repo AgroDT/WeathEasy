@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from contextlib import contextmanager
 from datetime import date
 from itertools import pairwise
 from pathlib import Path
@@ -15,12 +16,27 @@ import xarray as xr
 
 from . import features
 from .precip import PrecipCorrector
+from .sources import CFS2_FORECAST
 from .temperature import TemperatureCorrector
-from weatheasy.storage import delete_group, last_date, open_dataset, prepare_dataset, write_batch
+from weatheasy import const
+from weatheasy.storage import (
+    delete_group,
+    group_attrs,
+    group_exists,
+    last_date,
+    open_dataset,
+    prepare_dataset,
+    set_group_attrs,
+    write_batch,
+    write_batches,
+)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Iterator, Sequence
+
     import zarr
+    from numpy.typing import NDArray
     from zarr.abc.store import Store
 
     from .sources import Source
@@ -29,6 +45,8 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 _FIELDS = {'TMP_corr', 'PRATE_corr'}
+_FORECAST_BLOCK = 32  # days per forecast write; half of the forecast time chunk
+_REGRID_MARGIN = 2.0  # degrees around the crop, wider than one T126 cell
 
 
 def correct_store(  # noqa: C901, PLR0912, PLR0915
@@ -62,22 +80,7 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
         raise ValueError(msg)
 
     lats, lons = source.grid(root)
-    temp = TemperatureCorrector(source, artifacts, None).load_artifacts()
-    precip = PrecipCorrector(source, artifacts, None).load_artifacts()
-    temp_climate = temp.climatology
-    precip_climate = precip.climatology
-    if temp_climate is not None and precip_climate is not None:
-        temp_climate.require_grid(lats, lons)
-        precip_climate.require_grid(lats, lons)
-        for key in ('first_day', 'last_day', 'day_count', 'days_sha256'):
-            if temp_climate.metadata[key] != precip_climate.metadata[key]:
-                msg = (
-                    f'{source.name}: temperature and precipitation artifacts use '
-                    'different raw snapshots; retrain both'
-                )
-                raise ValueError(msg)
-    ids = f'{temp.artifact_id}:{precip.artifact_id}'
-    artifact_id = hashlib.sha256(ids.encode()).hexdigest()
+    temp, precip, artifact_id = load_correctors(source, artifacts, lats, lons)
     path = source.corrected_path(root)
     if _requires_rebuild(root, source.correction_path, lats, lons, artifact_id):
         _LOG.warning(
@@ -166,26 +169,184 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
                     outputs['PRATE_corr'][index] = precip.correct_grid(
                         day, inputs[source.precip_var][index], lats, lons
                     )['corrected']
-                ds = xr.Dataset(
-                    {
-                        'TMP_corr': (
-                            ('time', 'latitude', 'longitude'),
-                            outputs['TMP_corr'],
-                            {'units': 'degC', 'long_name': 'Bias-corrected daily temperature'},
-                        ),
-                        'PRATE_corr': (
-                            ('time', 'latitude', 'longitude'),
-                            outputs['PRATE_corr'],
-                            {'units': 'mm/day', 'long_name': 'Bias-corrected daily precipitation'},
-                        ),
-                    },
-                    coords={'time': block.time, 'latitude': lats, 'longitude': lons},
+                ds = _corrected_dataset(
+                    block.time, lats, lons, outputs['TMP_corr'], outputs['PRATE_corr']
                 )
                 prepared = prepare_dataset(ds, crs=crs)
                 prepared.attrs['correction_artifact_id'] = artifact_id
                 write_batch(root.store, path, prepared)
                 del inputs, outputs, ds, prepared
     return len(pending)
+
+
+def load_correctors(
+    source: Source,
+    artifacts: FileStore,
+    lats: NDArray[np.float32] | None = None,
+    lons: NDArray[np.float32] | None = None,
+) -> tuple[TemperatureCorrector, PrecipCorrector, str]:
+    """Load a consistent temperature/precipitation model pair and its combined id.
+
+    Without ``lats``/``lons`` the pair must share a grid, as for the forecast,
+    which is interpolated onto the models' own grid.
+    """
+    temp = TemperatureCorrector(source, artifacts, None).load_artifacts()
+    precip = PrecipCorrector(source, artifacts, None).load_artifacts()
+    temp_climate = temp.climatology
+    precip_climate = precip.climatology
+    if temp_climate is not None and precip_climate is not None:
+        if lats is None or lons is None:
+            lats, lons = temp_climate.lats, temp_climate.lons
+        temp_climate.require_grid(lats, lons)
+        precip_climate.require_grid(lats, lons)
+        for key in ('first_day', 'last_day', 'day_count', 'days_sha256'):
+            if temp_climate.metadata[key] != precip_climate.metadata[key]:
+                msg = (
+                    f'{source.model.name}: temperature and precipitation artifacts use '
+                    'different raw snapshots; retrain both'
+                )
+                raise ValueError(msg)
+    ids = f'{temp.artifact_id}:{precip.artifact_id}'
+    return temp, precip, hashlib.sha256(ids.encode()).hexdigest()
+
+
+def model_grid(
+    source: Source,
+    root: zarr.Group,
+    corrector: TemperatureCorrector | PrecipCorrector,
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Grid the models were trained on: the climatology grid, else the model source grid."""
+    climate = corrector.climatology
+    if climate is not None:
+        return climate.lats, climate.lons
+    return source.model.grid(root)
+
+
+type BlockReader = Callable[[Sequence[str], NDArray[np.intp]], xr.Dataset]
+
+
+@contextmanager
+def open_regridded(
+    source: Source,
+    root: zarr.Group,
+    lats: NDArray[np.float32],
+    lons: NDArray[np.float32],
+) -> Generator[BlockReader]:
+    """Read time blocks of ``source`` on the model grid.
+
+    CFS2 forecasts use the T126 Gaussian grid while the reanalysis models use the
+    regular 0.5 degree grid, so differing grids are linearly interpolated. A margin
+    around the crop keeps edge cells of the model grid inside the source grid.
+    """
+    with open_dataset(root.store, source.path(root)) as raw:
+        view = source._crop(raw, margin=_REGRID_MARGIN)  # noqa: SLF001
+        same_grid = np.array_equal(view.latitude, lats) and np.array_equal(view.longitude, lons)
+        if not same_grid:
+            _LOG.info(
+                '%s: interpolating %dx%d source grid onto %dx%d model grid',
+                source.name,
+                view.sizes['latitude'],
+                view.sizes['longitude'],
+                len(lats),
+                len(lons),
+            )
+
+        def read(variables: Sequence[str], indices: NDArray[np.intp]) -> xr.Dataset:
+            block = view[list(variables)].isel(time=indices).load()
+            if not same_grid:
+                block = block.interp(latitude=lats, longitude=lons, method='linear')
+            return block.astype(np.float32)
+
+        yield read
+
+
+def correct_forecast(
+    root: zarr.Group,
+    artifacts: FileStore,
+    dem_store: Store,
+    *,
+    source: Source = CFS2_FORECAST,
+) -> int:
+    """Rebuild the corrected forecast with the reanalysis models; return corrected days.
+
+    The forecast is replaced on every download, so its correction is rebuilt as a
+    whole. Readers use it only when its ``forecast_updated`` matches the root
+    ``updated`` marker, which is published after all days are written.
+    """
+    updated = root.attrs.get(const.CFS2_KEY_UPDATED)
+    path = source.corrected_path(root)
+    if updated is None or source.group_path not in root:
+        _LOG.info('%s: no published forecast to correct', source.name)
+        return 0
+    temp, precip, artifact_id = load_correctors(source, artifacts)
+    lats, lons = model_grid(source, root, temp)
+    if group_exists(root.store, path):
+        attrs = group_attrs(root.store, path)
+        if (
+            attrs.get(const.CFS2_KEY_FORECAST_UPDATED) == updated
+            and attrs.get('correction_artifact_id') == artifact_id
+        ):
+            _LOG.info('%s: correction of the %s forecast is current', source.name, updated)
+            return 0
+    with open_dataset(root.store, source.path(root)) as raw:
+        crs = raw.rio.crs
+        days = raw.sizes['time']
+    if crs is None:
+        msg = f'{source.name} prepared data have no CRS'
+        raise ValueError(msg)
+    terrain = features.load_dem(dem_store)
+    temp.terrain = terrain
+    precip.terrain = terrain
+    delete_group(root.store, path)
+
+    def blocks(read: BlockReader) -> Iterator[xr.Dataset]:
+        for start in range(0, days, _FORECAST_BLOCK):
+            block = read(
+                (source.temp_var, source.precip_var),
+                np.arange(start, min(start + _FORECAST_BLOCK, days)),
+            )
+            tmp = block[source.temp_var].to_numpy()
+            prate = block[source.precip_var].to_numpy()
+            tmp_corr = np.empty_like(tmp)
+            prate_corr = np.empty_like(prate)
+            for index, value in enumerate(block.time.to_numpy().astype('datetime64[D]')):
+                day = date.fromisoformat(str(value))
+                tmp_corr[index] = temp.correct_grid(day, tmp[index], lats, lons)['corrected']
+                prate_corr[index] = precip.correct_grid(day, prate[index], lats, lons)['corrected']
+            ds = _corrected_dataset(block.time, lats, lons, tmp_corr, prate_corr)
+            prepared = prepare_dataset(ds, crs=crs)
+            prepared.attrs['correction_artifact_id'] = artifact_id
+            yield prepared
+
+    with open_regridded(source, root, lats, lons) as read:
+        write_batches(root.store, path, blocks(read))
+    set_group_attrs(root.store, path, **{const.CFS2_KEY_FORECAST_UPDATED: str(updated)})
+    _LOG.info('%s: corrected %d forecast days issued %s', source.name, days, updated)
+    return days
+
+
+def _corrected_dataset(
+    time: xr.DataArray,
+    lats: NDArray[np.float32],
+    lons: NDArray[np.float32],
+    tmp: NDArray[np.float32],
+    prate: NDArray[np.float32],
+) -> xr.Dataset:
+    return xr.Dataset(
+        {
+            'TMP_corr': (
+                ('time', 'latitude', 'longitude'),
+                tmp,
+                {'units': 'degC', 'long_name': 'Bias-corrected daily temperature'},
+            ),
+            'PRATE_corr': (
+                ('time', 'latitude', 'longitude'),
+                prate,
+                {'units': 'mm/day', 'long_name': 'Bias-corrected daily precipitation'},
+            ),
+        },
+        coords={'time': time, 'latitude': lats, 'longitude': lons},
+    )
 
 
 def _requires_rebuild(

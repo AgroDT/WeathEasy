@@ -139,6 +139,7 @@ servers, and (possibly) star positions.
 | `query`, `list-vars`, `download cmip6` | Base package |
 | `download cfs2`, `download era5` | `prepare` |
 | `correction train`, `correction apply`, `correction prepare-dem`, `correction prepare-stations` | `correction` |
+| `download cfs2 --artifacts ... --dem ...` | `prepare` and `correction` |
 | `emdna temperature`, `emdna precipitation` | `emdna` |
 
 All CLI commands can be invoked as `weatheasy ...` or `python -m weatheasy ...`.
@@ -324,7 +325,8 @@ and scheduled updates with durable data in S3.
 ## Forecast storage and updates
 
 Each source uses its own Zarr v3 store. Within it, CFS2 has
-`reanalysis/{flx,pgb}`, `forecast/{flx,pgb}` and `reanalysis/correction`;
+`reanalysis/{flx,pgb}`, `forecast/{flx,pgb}`, `reanalysis/correction` and
+`forecast/correction`;
 ERA5 has `daily` and `correction`; CMIP6 has one group per variable.
 Source metadata such as CFS2’s `updated` and ERA5’s `request_bbox` live at the
 store root. Existing combined stores need their source groups moved into
@@ -505,6 +507,51 @@ is unnecessary. Manifests are published after all files and validate their hashe
 before correction starts. Coordinate retraining and application to avoid reading
 a model while its files are being replaced. Station Parquet files accept local
 paths or S3 URIs.
+
+### CFS2 forecast correction
+
+The CFS2 forecast has no station-matched history, so it is corrected with the
+CFS2 reanalysis models, which remove the systematic reanalysis-versus-station
+error. Forecast fields use the T126 Gaussian grid, while the reanalysis models use
+the regular 0.5° grid. The forecast is therefore linearly interpolated onto the
+reanalysis grid, and `forecast/correction` has the same grid as
+`reanalysis/correction`. Forecast-specific drift with lead time is not modelled.
+
+The forecast is replaced on every download, so its correction is rebuilt as a
+whole. Pass the model directory and DEM to the download to correct each new
+forecast right after it is published:
+
+```sh
+weatheasy download cfs2 --store s3://weatheasy/cfs2.zarr \
+    --artifacts s3://weatheasy/models --dem s3://weatheasy/cfs2-terrain.zarr
+```
+
+`weatheasy correction apply cfs2` also rebuilds the forecast correction when it is
+missing, belongs to an earlier forecast issue or to other models. This covers the
+Helm update job, which runs `correction apply` after the download. The group's
+`forecast_updated` attribute names the forecast issue. Readers return
+`TMP_corr`/`PRATE_corr` for forecast days only when it equals the root `updated`
+marker; until the correction is rebuilt, forecast days have NaN corrected values.
+
+### Correction quality report
+
+Training also writes a quality report: `<source>/quality_report.json` for each
+source and one readable `quality_report.md` at the model directory root, which
+combines every trained source. Retraining one corrector with `--only` replaces only
+its section.
+
+- **Reanalysis (ERA5-Land and CFSv2):** station-grouped cross-validation
+  (`--cv-folds`, default 5). Each station is scored by models trained without it.
+  Its seasonal features are interpolated from the other stations, as at inference.
+  The report shows raw and corrected bias, MAE, RMSE and correlation, overall and
+  by month. For precipitation it adds wet-day fraction, POD, FAR, CSI, HSS (1 mm
+  threshold) and the ratio of totals. Cross-validation retrains the models once
+  per fold; `--cv-folds 0` skips it.
+- **CFSv2 forecast:** pass `--dem` with the CFS2 terrain from `correction prepare-dem`
+  to training to include this section. Forecast errors are not evaluated, because past forecasts are
+  not kept. For each forecast month, the report compares the mean change the
+  models make to the current forecast (every seventh day) with the change they
+  make to the reanalysis in the same calendar month of the latest year.
 
 Library training receives enriched station observations as a `pandas.DataFrame`;
 reading the Parquet file belongs to the CLI. Training CLI inputs require

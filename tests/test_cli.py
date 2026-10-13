@@ -467,7 +467,9 @@ def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(  # noqa: PLR0915
 
     monkeypatch.setattr(FileStore, 'open', open_station_file)
 
-    def build_artifacts(source, root, stations, artifacts, *, only):  # noqa: ANN001, ARG001
+    def build_artifacts(source, root, stations, artifacts, *, only, cv_folds, dem_store):  # noqa: ANN001, ARG001
+        assert cv_folds == 5
+        assert dem_store is None
         assert stations.to_dict('records') == [
             {
                 'station_id': 1,
