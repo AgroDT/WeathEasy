@@ -243,11 +243,13 @@ Where:
   - `STORE` is the same as for downloading
   - `PATH` is a path to write results to (by default, results are output to
     console)
-  - `begin`, `end` are the date range boundaries in ISO format (yyyy-mm-dd)
+  - `begin`, `end` are inclusive date range boundaries in ISO format (yyyy-mm-dd)
   - `latitude`, `longitude` are target coordinates in EPSG:4326 coordinate
     reference system (decimal degrees WGS84)
 
-The command line must ends with a space separated list of target variables to
+Use `--precision` to choose the number of decimal places in CSV values.
+
+The command line must end with a space separated list of target variables to
 query. To print a full list of available variables run:
 
 ```sh
@@ -481,6 +483,12 @@ supply the correct dataset yourself. Training has no `--dem` argument: its
 station Parquet must already contain `elevation`, `slope_we` and `slope_sn`.
 Existing users must prepare source-specific terrain, enrich their stations and
 retrain models because the terrain features have changed.
+
+Use `weatheasy correction --help` to list preparation, training, and application
+commands. Each subcommand has its own help, for example
+`weatheasy correction prepare-dem --help`. Argument defaults are included in
+command help automatically. Application date bounds (`--begin` and `--end`)
+are inclusive; omitting them processes all pending committed weather days.
 
 The model directory accepts a local path or S3 URI. It contains separate joblib,
 NumPy and manifest files under `<source>/temp` and `<source>/precip`. Application
