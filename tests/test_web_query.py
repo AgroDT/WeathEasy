@@ -29,8 +29,10 @@ def get_anyio_backend():
 
 @pytest.fixture(name='prepared_source', params=['era5', 'cfs2', 'cmip6'])
 def create_prepared_source(request: pytest.FixtureRequest):
-    source = request.param
+    return prepared_store(request.param)
 
+
+def prepared_store(source: str) -> tuple[str, RecordingStore, list[str]]:
     store = RecordingStore()
     # Missing Feb 29; distinguish each time, latitude and longitude.
     values = (
@@ -275,3 +277,26 @@ async def test_async_sources_preserve_invalid_date_errors(
         error = ERA5DateRangeError if source == 'era5' else CMIP6DateRangeError
         with pytest.raises(error):
             await repository.read(query)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('issue', ['current', 'stale', 'missing'])
+async def test_cfs2_forecast_correction_is_served_only_for_current_issue(issue: str):
+    pytest.importorskip('fastapi')
+    from anyio import to_thread
+
+    source, store, _ = prepared_store('cfs2')
+    if issue != 'missing':
+        with synchronous.open_dataset(store, 'forecast/flx') as forecast:
+            corrected = forecast[['PRATE']].rename({'PRATE': 'PRATE_corr'}).load()
+        corrected['PRATE_corr'] = corrected['PRATE_corr'] * 0 + 900
+        corrected.PRATE_corr.attrs['units'] = 'mm/day'
+        write_batch(store, 'forecast/correction', prepare_dataset(corrected, crs='EPSG:4326'))
+        issued = '2020-03-04' if issue == 'current' else '2020-03-03'
+        set_group_attrs(store, 'forecast/correction', forecast_updated=issued)
+    query = make_query(['PRATE_corr'])
+    actual = await make_repository(source, store).read(query)
+    forecast = [900, 900] if issue == 'current' else [np.nan, np.nan]
+    np.testing.assert_allclose(actual, [[513, np.nan, *forecast]], rtol=1e-6)
+    reference = await to_thread.run_sync(lambda: synchronous.get_cfs2_data(store=store, **query))
+    np.testing.assert_allclose(actual, reference, rtol=1e-6)

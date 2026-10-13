@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from weatheasy import const
 from weatheasy.storage import open_dataset
 
 
@@ -32,6 +33,12 @@ class Source:
     precip_var: str = 'PRATE'
     precip_to_mm: float = 86400.0
     crop_bbox: tuple[int, int, int, int] | None = None
+    model_source: Source | None = None
+
+    @property
+    def model(self) -> Source:
+        """Source whose trained artifacts correct this one (itself unless borrowed)."""
+        return self.model_source or self
 
     def path(self, root: zarr.Group) -> str:
         return '/'.join(filter(None, (root.path, self.group_path)))
@@ -67,11 +74,14 @@ class Source:
                 view.longitude.to_numpy().astype(np.float32),
             )
 
-    def _crop(self, dataset: xr.Dataset) -> xr.Dataset:
+    def _crop(self, dataset: xr.Dataset, margin: float = 0.0) -> xr.Dataset:
         if self.crop_bbox is None:
             return dataset
         north, west, south, east = self.crop_bbox
-        return dataset.sel(latitude=slice(south, north), longitude=slice(west, east))
+        return dataset.sel(
+            latitude=slice(south - margin, north + margin),
+            longitude=slice(west - margin, east + margin),
+        )
 
 
 ERA5 = Source('era5', 'daily', 'correction')
@@ -82,4 +92,15 @@ CFS2 = Source(
     precip_to_mm=21600.0,
     crop_bbox=RUSSIA_BBOX,
 )
+# The forecast has no station-matched history of its own: it is corrected with the
+# CFS2 reanalysis models, after interpolation onto the reanalysis grid.
+CFS2_FORECAST = Source(
+    'cfs2_forecast',
+    'forecast/flx',
+    const.CFS2_FORECAST_CORRECTION,
+    precip_to_mm=21600.0,
+    crop_bbox=RUSSIA_BBOX,
+    model_source=CFS2,
+)
 SOURCES: dict[str, Source] = {ERA5.name: ERA5, CFS2.name: CFS2}
+FORECASTS: dict[str, Source] = {CFS2.name: CFS2_FORECAST}  # keyed by model source
