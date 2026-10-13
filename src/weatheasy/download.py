@@ -53,12 +53,16 @@ def download_cfs2_data(
     with ExitStack() as stack:
         reanalysis = stack.enter_context(
             download_cache(
-                download_dir, const.CFS2_REANALYSIS_DIR, work_dir=work_dir, target=str(store)
+                download_dir,
+                'cfs2',
+                const.CFS2_REANALYSIS_DIR,
+                work_dir=work_dir,
+                target=str(store),
             )
         )
         forecast_cache = stack.enter_context(
             download_cache(
-                download_dir, const.CFS2_FORECAST_DIR, work_dir=work_dir, target=str(store)
+                download_dir, 'cfs2', const.CFS2_FORECAST_DIR, work_dir=work_dir, target=str(store)
             )
         )
         previous = [last_date(store, f'reanalysis/{kind}') for kind in ('flx', 'pgb')]

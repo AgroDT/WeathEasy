@@ -405,11 +405,13 @@ def test_cfs2_cleanup_respects_both_grids_and_current_forecast(
     remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
     old = time.time() - 30 * 86400
     with download_cache(
-        remote, 'reanalysis', work_dir=tmp_path / 'work', target=str(store)
+        remote, 'cfs2', 'reanalysis', work_dir=tmp_path / 'work', target=str(store)
     ) as cache:
         done = cache.file('200001/20000101.cdas1.t00z.pgrbh00.grib2')
         needed = cache.file('200001/20000102.cdas1.t00z.pgrbh00.grib2')
-    with download_cache(remote, 'forecast', work_dir=tmp_path / 'work', target=str(store)) as cache:
+    with download_cache(
+        remote, 'cfs2', 'forecast', work_dir=tmp_path / 'work', target=str(store)
+    ) as cache:
         forecast = cache.file('2000-01-10/flx2000010700.grb2')
         obsolete = cache.file('2000-01-09/flx2000010700.grb2')
     for path in (done, needed, forecast, obsolete):
