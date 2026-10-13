@@ -90,17 +90,18 @@ def read_netcdf(
 
 # NCEP GRIB2 discipline/category/number and fixed surfaces, independently of
 # message ordering. Verified against CDAS pgrbh00 and CFS FLX/PGB inventories.
+# Fluxes/rates use interval averages; CDAS may also contain instantaneous copies.
 _CFS_FIELDS = {
     'PEVPR': (0, 1, 200, 'surface', 0, 'instant'),
-    'DLWRF': (0, 5, 192, 'surface', 0, None),
-    'DSWRF': (0, 4, 192, 'surface', 0, None),
+    'DLWRF': (0, 5, 192, 'surface', 0, 'avg'),
+    'DSWRF': (0, 4, 192, 'surface', 0, 'avg'),
     'GFLUX': (2, 0, 193, 'surface', 0, 'instant'),
-    'LHTFL': (0, 0, 10, 'surface', 0, None),
-    'PRATE': (0, 1, 7, 'surface', 0, None),
+    'LHTFL': (0, 0, 10, 'surface', 0, 'avg'),
+    'PRATE': (0, 1, 7, 'surface', 0, 'avg'),
     'PRES': (0, 3, 0, 'surface', 0, 'instant'),
     'QMAX': (0, 1, 219, 'heightAboveGround', 2, None),
     'QMIN': (0, 1, 220, 'heightAboveGround', 2, None),
-    'SHTFL': (0, 0, 11, 'surface', 0, None),
+    'SHTFL': (0, 0, 11, 'surface', 0, 'avg'),
     'SNOD': (0, 1, 11, 'surface', 0, 'instant'),
     'SPFH': (0, 1, 0, 'heightAboveGround', 2, 'instant'),
     'TMAX': (0, 0, 4, 'heightAboveGround', 2, None),
@@ -109,8 +110,8 @@ _CFS_FIELDS = {
     'TMP_0m': (0, 0, 0, 'surface', 0, 'instant'),
     'UGRD': (0, 2, 2, 'heightAboveGround', 10, 'instant'),
     'VGRD': (0, 2, 3, 'heightAboveGround', 10, 'instant'),
-    'ULWRF': (0, 5, 193, 'surface', 0, None),
-    'USWRF': (0, 4, 193, 'surface', 0, None),
+    'ULWRF': (0, 5, 193, 'surface', 0, 'avg'),
+    'USWRF': (0, 4, 193, 'surface', 0, 'avg'),
     'WEASD': (0, 1, 13, 'surface', 0, 'instant'),
     'RH': (0, 1, 1, 'heightAboveGround', 2, 'instant'),
 }
