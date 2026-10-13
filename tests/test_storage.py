@@ -263,8 +263,8 @@ def test_failed_append_is_not_published_and_retry_recovers_tail(monkeypatch: pyt
         with pytest.raises(StorageError, match='completed'):
             open_dataset(store, 'grid')
         assert zarr.open_group(store).metadata.consolidated_metadata is None
-        assert zarr.open_group(store)['grid'].attrs['write_state'] == 'writing'
-        assert zarr.open_group(store)['grid'].attrs['committed_length'] == 1
+        assert zarr.open_group(store).get_group('grid').attrs['write_state'] == 'writing'
+        assert zarr.open_group(store).get_group('grid').attrs['committed_length'] == 1
     write_batch(store, 'grid', field(day='2026-01-02'))
     recovered = open_dataset(store, 'grid')
     np.testing.assert_array_equal(recovered.TMP[0], field().TMP[0])
@@ -283,7 +283,7 @@ def test_streamed_month_is_published_only_after_iterator_finishes_and_retry_reco
 
     def broken_batches():
         yield field(day='2026-01-02')
-        assert zarr.open_group(store)['grid'].attrs['committed_length'] == 1
+        assert zarr.open_group(store).get_group('grid').attrs['committed_length'] == 1
         with pytest.raises(StorageError, match='completed'):
             open_dataset(store, 'grid')
         # Represents failure while decoding the next day or publishing its cache.
@@ -456,7 +456,7 @@ def test_source_chunk_policy(group: str, expected: int):
         crs='EPSG:4326',
     )
     write_batch(store, group, dataset)
-    assert zarr.open_group(store)[group]['TMP'].chunks == (expected, 32, 32)
+    assert zarr.open_group(store).get_group(group).get_array('TMP').chunks == (expected, 32, 32)
 
 
 def test_failed_append_restores_absent_committed_chunk(monkeypatch: pytest.MonkeyPatch):
@@ -466,7 +466,7 @@ def test_failed_append_restores_absent_committed_chunk(monkeypatch: pytest.Monke
     write_batch(store, 'grid', empty)
 
     def corrupt(_self, *_args, **_kwargs):  # noqa: ANN001
-        array = zarr.open_group(store)['grid']['TMP']
+        array = zarr.open_group(store).get_group('grid').get_array('TMP')
         array.resize((2, 2, 2))
         array[:] = 123
         msg = 'interrupted'
@@ -487,7 +487,7 @@ def test_restore_is_retryable(monkeypatch: pytest.MonkeyPatch):
     write_batch(store, 'grid', field())
 
     def corrupt(_self, *_args, **_kwargs):  # noqa: ANN001
-        array = zarr.open_group(store)['grid']['TMP']
+        array = zarr.open_group(store).get_group('grid').get_array('TMP')
         array.resize((2, 2, 2))
         array[:] = 123
         msg = 'interrupted append'

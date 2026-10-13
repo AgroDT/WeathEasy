@@ -1,8 +1,8 @@
 """Offline training of the bias-correction artifacts (``build_artifacts``).
 
-Reads station observations + historical reanalysis from the Zarr store + the
-Copernicus DEM, and writes per-source model artifacts consumed by the inference
-correctors. This is the heavy offline step (PR 3), not part of the realtime path.
+Reads terrain-enriched station observations and historical reanalysis from Zarr,
+and writes per-source model artifacts consumed by the inference correctors.
+This is the heavy offline step, not part of the realtime path.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
     import zarr
     from numpy.typing import NDArray
-    from zarr.abc.store import Store
 
     from .sources import Source
     from weatheasy.file_storage import FileStore
@@ -71,7 +70,7 @@ def prepare_stations(observations: pd.DataFrame, value_cols: Sequence[str]) -> p
         stations['date'] = pd.to_datetime(stations['date'])
     else:
         stations['date'] = pd.to_datetime(stations[['year', 'month', 'day']])
-    keep = ['station_id', 'lat', 'lon', 'date', *value_cols]
+    keep = ['station_id', 'lat', 'lon', 'date', *value_cols, *_TERRAIN_COLS]
     missing = set(keep) - set(stations.columns)
     if missing:
         msg = f'Station observations are missing required columns: {sorted(missing)}'
@@ -87,20 +86,6 @@ def prepare_stations(observations: pd.DataFrame, value_cols: Sequence[str]) -> p
         stations['station_id'].nunique(),
     )
     return stations
-
-
-def enrich_stations(stations: pd.DataFrame, dem: features.Dem) -> pd.DataFrame:
-    """Attach elevation / slope_we / slope_sn from the DEM at each station location."""
-    lats = dem['lats']
-    lons = dem['lons']
-    stations = stations.drop(columns=[c for c in _TERRAIN_COLS if c in stations.columns])
-    pos = stations[['lat', 'lon']].drop_duplicates().copy()
-    for col in _TERRAIN_COLS:
-        data = dem[col]
-        li = np.argmin(np.abs(lats[:, None] - pos['lat'].to_numpy()[None, :]), axis=0)
-        lo = np.argmin(np.abs(lons[:, None] - pos['lon'].to_numpy()[None, :]), axis=0)
-        pos[col] = data[li, lo].astype(np.float32)
-    return stations.merge(pos, on=['lat', 'lon'], how='left')
 
 
 def sample_reanalysis(
@@ -201,12 +186,10 @@ def build_temp_artifacts(
     source: Source,
     root: zarr.Group,
     observations: pd.DataFrame,
-    dem_store: Store,
     artifacts: FileStore,
 ) -> None:
     """Train the temperature corrector for ``source`` and write its artifacts."""
-    dem = features.load_dem(dem_store)
-    stations = enrich_stations(prepare_stations(observations, ['temperature']), dem)
+    stations = prepare_stations(observations, ['temperature'])
     sampled = sample_reanalysis(source, root, stations, source.temp_var, 1.0)
     climate = build_climatology(source, root, source.temp_var, 1.0)
     dataset = _temp_features(sampled, climate)
@@ -302,12 +285,10 @@ def build_precip_artifacts(
     source: Source,
     root: zarr.Group,
     observations: pd.DataFrame,
-    dem_store: Store,
     artifacts: FileStore,
 ) -> None:
     """Train the two-stage precipitation corrector for ``source`` and write its artifacts."""
-    dem = features.load_dem(dem_store)
-    stations = enrich_stations(prepare_stations(observations, ['precipitation']), dem)
+    stations = prepare_stations(observations, ['precipitation'])
     sampled = sample_reanalysis(source, root, stations, source.precip_var, source.precip_to_mm)
     climate = build_climatology(
         source, root, source.precip_var, source.precip_to_mm, wet_threshold=WET_THRESHOLD
@@ -426,13 +407,12 @@ def build_artifacts(
     source: Source,
     root: zarr.Group,
     observations: pd.DataFrame,
-    dem_store: Store,
     artifacts: FileStore,
     *,
     only: str | None = None,
 ) -> None:
     """Train and write both correctors' artifacts for ``source`` (or just one)."""
     if only in (None, 'temp'):
-        build_temp_artifacts(source, root, observations, dem_store, artifacts)
+        build_temp_artifacts(source, root, observations, artifacts)
     if only in (None, 'precip'):
-        build_precip_artifacts(source, root, observations, dem_store, artifacts)
+        build_precip_artifacts(source, root, observations, artifacts)

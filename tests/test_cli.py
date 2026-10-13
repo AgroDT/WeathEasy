@@ -17,11 +17,7 @@ if TYPE_CHECKING:
     [
         ['--help'],
         ['--version'],
-        ['query', 'cmip6', '--help'],
-        ['download', 'era5', '--help'],
-        ['dem', '--help'],
-        ['correction', 'train', '--help'],
-        ['emdna', 'temperature', '--help'],
+        ['correction', 'prepare-dem', '--help'],
         ['list-vars'],
     ],
 )
@@ -36,7 +32,7 @@ class Guard(importlib.abc.MetaPathFinder):
                     'scipy', 'fsspec', 's3fs', 'cdsapi', 'cfgrib', 'eccodes',
                     'xgboost', 'sklearn', 'joblib', 'fastapi', 'uvicorn'}
         modules = ('weatheasy.correction', 'weatheasy.emdna', 'weatheasy.download',
-                   'weatheasy.era5', 'weatheasy.build_copdem', 'weatheasy.query')
+                   'weatheasy.era5', 'weatheasy.query')
         if fullname.split('.')[0] in packages or fullname.startswith(modules):
             raise AssertionError('Unexpected command dependency: ' + fullname)
 sys.meta_path.insert(0, Guard())
@@ -235,37 +231,6 @@ def test_download_dispatches_prepared_store_and_local_workdir(
     assert calls == [(tmp_path / 'weather', str(tmp_path / 'downloads'))]
 
 
-def test_dem_dispatches_spatial_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from zarr.storage import LocalStore
-
-    from weatheasy import build_copdem
-    from weatheasy._cli import main
-
-    calls = []
-
-    def record(bbox, resolution, store):  # noqa: ANN001
-        assert isinstance(store, LocalStore)
-        calls.append((bbox, resolution, store.root))
-
-    monkeypatch.setattr(build_copdem, 'build_copdem', record)
-    main(
-        [
-            'dem',
-            '--bbox',
-            '56',
-            '37',
-            '55',
-            '38',
-            '--resolution',
-            '0.2',
-            '-o',
-            str(tmp_path / 'dem.zarr'),
-        ],
-        configure_logging=False,
-    )
-    assert calls == [((56, 37, 55, 38), 0.2, tmp_path / 'dem.zarr')]
-
-
 @pytest.mark.parametrize('source', ['cfs2', 'cmip6', 'era5'])
 def test_download_cli_preserves_s3_cache_uri(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
@@ -306,3 +271,246 @@ def test_download_cli_preserves_s3_cache_uri(
     assert len(calls) == 1
     assert calls[0].root == 'weather/raw'
     assert calls[0].fs is fs
+
+
+@pytest.mark.parametrize('source', ['era5', 'cfs2'])
+def test_prepare_dem_writes_selected_source_grid(tmp_path: Path, source: str):
+    import numpy as np
+    import xarray as xr
+
+    from weatheasy._cli import main
+    from weatheasy.storage import get_store, prepare_dataset, write_batch
+
+    weather = tmp_path / 'weather.zarr'
+    grids = {
+        'daily': ([55.0, 55.5, 56.0], [37.0, 37.5, 38.0]),
+        'reanalysis/flx': ([40.0, 42.0, 44.0, 84.0], [18.0, 20.0, 22.0, 182.0]),
+    }
+    for group, (lats, lons) in grids.items():
+        ds = xr.Dataset(
+            {
+                'TMP': (
+                    ('time', 'latitude', 'longitude'),
+                    np.ones((1, len(lats), len(lons)), np.float32),
+                    {'units': 'degC'},
+                )
+            },
+            coords={'time': [np.datetime64('2020-01-01')], 'latitude': lats, 'longitude': lons},
+        )
+        write_batch(get_store(weather), group, prepare_dataset(ds, crs='EPSG:4326'))
+    native_lats = np.arange(39.75, 57.0, 0.25)
+    native_lons = np.arange(17.75, 39.0, 0.25)
+    heights = np.broadcast_to(
+        100 + 8 * (native_lons - 19), (len(native_lats), len(native_lons))
+    ).astype(np.float32)
+    native = xr.Dataset(
+        {'height': (('north', 'east'), heights)},
+        coords={'north': native_lats, 'east': native_lons},
+    )
+    native = native.rio.set_spatial_dims(x_dim='east', y_dim='north').rio.write_crs('EPSG:4326')
+    input_path = tmp_path / 'input.zarr'
+    output_path = tmp_path / 'output.zarr'
+    native.to_zarr(input_path, zarr_format=3, consolidated=True)
+    arguments = [
+        'correction',
+        'prepare-dem',
+        source,
+        '--store',
+        str(weather),
+        '--dem-source',
+        str(input_path),
+        '--dem-elevation',
+        'height',
+        '--dem-x',
+        'east',
+        '--dem-y',
+        'north',
+        '--output',
+        str(output_path),
+    ]
+    main(arguments, configure_logging=False)
+    if source == 'era5':
+        expected_lats, expected_lons = [55.0, 55.5, 56.0], [37.0, 37.5, 38.0]
+    else:
+        # CFS2 crops outside all four boundaries of its correction region.
+        expected_lats, expected_lons = [42.0, 44.0], [20.0, 22.0]
+    expected_height = np.broadcast_to(
+        100 + 8 * (np.asarray(expected_lons) - 19), (len(expected_lats), len(expected_lons))
+    )
+    with xr.open_zarr(output_path, consolidated=True, chunks=None) as result:
+        np.testing.assert_array_equal(result.latitude, expected_lats)
+        np.testing.assert_array_equal(result.longitude, expected_lons)
+        np.testing.assert_allclose(result.elevation, expected_height)
+
+    native['height'] = native.height + 20
+    native.to_zarr(input_path, mode='w', zarr_format=3, consolidated=True)
+    with pytest.raises(FileExistsError, match='overwrite'):
+        main(arguments, configure_logging=False)
+    with xr.open_zarr(output_path, consolidated=True, chunks=None) as result:
+        np.testing.assert_allclose(result.elevation, expected_height)
+    main([*arguments, '--overwrite'], configure_logging=False)
+    with xr.open_zarr(output_path, consolidated=True, chunks=None) as result:
+        np.testing.assert_allclose(result.elevation, expected_height + 20)
+
+
+def test_prepare_stations_parquet_and_overwrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import pandas as pd
+
+    from weatheasy._cli import main
+    from weatheasy._cli.commands import correction_prepare_stations as command
+
+    stations = pd.DataFrame(
+        {'station_id': ['a'], 'lat': [55.0], 'lon': [37.0], 'temperature': [12.0]}
+    )
+    source = tmp_path / 'stations.parquet'
+    output = tmp_path / 'enriched.parquet'
+    stations.to_parquet(source, index=False)
+    calls = []
+
+    def prepare(observations, dem, **kwargs):  # noqa: ANN001
+        pd.testing.assert_frame_equal(observations, stations)
+        calls.append((dem.root, kwargs))
+        return observations.assign(elevation=150.0, slope_we=0.1, slope_sn=-0.2)
+
+    monkeypatch.setattr(command, 'prepare_station_terrain', prepare)
+    args = [
+        'correction',
+        'prepare-stations',
+        '--stations',
+        str(source),
+        '--output',
+        str(output),
+        '--dem-source',
+        str(tmp_path / 'dem'),
+        '--dem-elevation',
+        'height',
+        '--dem-x',
+        'longitude',
+        '--dem-y',
+        'latitude',
+    ]
+    main(args, configure_logging=False)
+    expected = stations.assign(elevation=150.0, slope_we=0.1, slope_sn=-0.2)
+    pd.testing.assert_frame_equal(pd.read_parquet(output), expected)
+    assert calls == [(tmp_path / 'dem', {'elevation': 'height', 'x': 'longitude', 'y': 'latitude'})]
+    with pytest.raises(FileExistsError, match='--overwrite'):
+        main(args, configure_logging=False)
+    assert len(calls) == 1
+    main([*args, '--overwrite'], configure_logging=False)
+    assert len(calls) == 2
+    pd.testing.assert_frame_equal(pd.read_parquet(output), expected)
+
+
+@pytest.mark.parametrize('action', ['train', 'apply'])
+@pytest.mark.parametrize('remote_weather', [True, False])
+def test_correction_cli_preserves_s3_uri_and_reuses_filesystem(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch, action: str, *, remote_weather: bool
+):
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    import pandas as pd
+    from zarr.storage import FsspecStore
+
+    from weatheasy import _cli as cli
+    from weatheasy._cli import _storage
+    from weatheasy.correction import apply, training
+    from weatheasy.file_storage import FileStore, get_file_store
+
+    s3fs = pytest.importorskip('s3fs')
+    filesystem = s3fs.S3FileSystem()
+    weather = SimpleNamespace()
+    received = []
+    weather_uri = 's3://weather/prepared' if remote_weather else './weather'
+
+    def artifacts_for_uri(uri, *, filesystem=None):  # noqa: ANN001
+        return get_file_store(
+            uri, filesystem=(filesystem or shared_filesystem) if uri.startswith('s3://') else None
+        )
+
+    shared_filesystem = filesystem
+    monkeypatch.setattr(_storage, 'get_file_store', artifacts_for_uri)
+
+    def open_weather(uri, *, filesystem):  # noqa: ANN001
+        assert uri == weather_uri
+        if remote_weather:
+            assert filesystem.sync_fs is shared_filesystem
+        else:
+            assert filesystem is None
+        return weather
+
+    monkeypatch.setattr(_storage, 'get_storage', open_weather)
+
+    def open_station_file(self: FileStore, name: str = '', mode: str = 'rb') -> BytesIO:
+        assert self.fs is shared_filesystem
+        assert self.root == 'observations/stations.parquet'
+        assert name == ''
+        assert mode == 'rb'
+        stream = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    'station_id': 1,
+                    'lat': 55,
+                    'lon': 37,
+                    'date': '2026-01-01',
+                    'temperature': 8,
+                    'precipitation': 3,
+                    'elevation': 123.0,
+                    'slope_we': 0.1,
+                    'slope_sn': 0.2,
+                }
+            ]
+        ).to_parquet(stream, index=False)
+        stream.seek(0)
+        return stream
+
+    monkeypatch.setattr(FileStore, 'open', open_station_file)
+
+    def build_artifacts(source, root, stations, artifacts, *, only):  # noqa: ANN001, ARG001
+        assert stations.to_dict('records') == [
+            {
+                'station_id': 1,
+                'lat': 55,
+                'lon': 37,
+                'date': '2026-01-01',
+                'temperature': 8,
+                'precipitation': 3,
+                'elevation': 123.0,
+                'slope_we': 0.1,
+                'slope_sn': 0.2,
+            }
+        ]
+        received.append((root, None, artifacts))
+
+    def correct_store(source, root, artifacts, terrain, *, begin, end):  # noqa: ANN001, ARG001
+        received.append((root, terrain, artifacts))
+        return 0
+
+    monkeypatch.setattr(training, 'build_artifacts', build_artifacts)
+    monkeypatch.setattr(apply, 'correct_store', correct_store)
+    arguments = [
+        'correction',
+        action,
+        'era5',
+        '--store',
+        weather_uri,
+        '--artifacts',
+        's3://models/correction',
+    ]
+    if action == 'apply':
+        arguments.extend(['--dem', 's3://terrain/copdem.zarr'])
+    if action == 'train':
+        arguments.extend(['--stations', 's3://observations/stations.parquet'])
+    cli.main(arguments)
+    assert len(received) == 1
+    root, terrain, artifacts = received[0]
+    assert root is weather
+    if action == 'apply':
+        assert isinstance(terrain, FsspecStore)
+        assert terrain.path == 'terrain/copdem.zarr'
+        assert terrain.fs.sync_fs is shared_filesystem
+    else:
+        assert terrain is None
+    assert artifacts.fs is shared_filesystem
+    assert artifacts.root == 'models/correction'

@@ -26,6 +26,7 @@ def test_training_reads_required_fields(
     )
     for column in values:
         observations[column] = -24.5 if column == 'temperature' else 1.7
+    observations[['elevation', 'slope_we', 'slope_sn']] = [123.0, 0.1, 0.2]
     observations['unused'] = 'text'
     observations.to_parquet(path, index=False, compression='zstd')
     storage = SimpleNamespace(
@@ -40,7 +41,6 @@ def test_training_reads_required_fields(
         _source: object,
         _weather: object,
         stations: pd.DataFrame,
-        _dem: object,
         _artifacts: object,
         *,
         only: str | None,
@@ -51,7 +51,6 @@ def test_training_reads_required_fields(
     correction_train.run(
         Namespace(
             store='weather',
-            dem='dem',
             artifacts='artifacts',
             stations=str(path),
             source='era5',
@@ -59,5 +58,7 @@ def test_training_reads_required_fields(
         )
     )
     assert len(captured) == 1
-    pd.testing.assert_frame_equal(captured[0][0], observations.drop(columns='unused'))
+    pd.testing.assert_frame_equal(
+        captured[0][0], observations.drop(columns='unused'), check_like=True
+    )
     assert captured[0][1] == only

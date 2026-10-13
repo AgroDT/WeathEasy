@@ -7,15 +7,14 @@ from weatheasy.correction.sources import SOURCES
 
 
 def run(args: Namespace) -> None:
-    storage = Storage(args.store, args.dem, args.artifacts, args.stations)
+    storage = Storage(args.store, args.artifacts, args.stations)
     weather = storage.group(args.store)
-    dem = storage.store(args.dem)
     artifacts = storage.files(args.artifacts)
     source = SOURCES[args.source]
-    columns = ['station_id', 'lat', 'lon', 'date']
+    columns = ['station_id', 'lat', 'lon', 'date', 'elevation', 'slope_we', 'slope_sn']
     if args.only in (None, 'temp'):
         columns.append('temperature')
     if args.only in (None, 'precip'):
         columns.append('precipitation')
     stations = read_stations(storage.files(args.stations), columns=columns)
-    training.build_artifacts(source, weather, stations, dem, artifacts, only=args.only)
+    training.build_artifacts(source, weather, stations, artifacts, only=args.only)

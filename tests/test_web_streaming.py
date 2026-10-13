@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from copy import copy
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, override
@@ -108,7 +109,10 @@ async def test_http_stream_sends_first_batch_before_reading_rest_and_loads_metad
             item['type'] == 'http.response.body' for item in messages
         ):
             chunks = [key for key in store.read_keys if f'/{variable}/c/' in key]
-            assert len(chunks) == 64, 'First output must precede storage reads for later days'
+            first_group = {'era5': 'daily', 'cfs2': 'reanalysis/flx', 'cmip6': variable}[source]
+            assert chunks == [f'{first_group}/{variable}/c/0/0/0'], (
+                'First output must precede reads for later64-day batches'
+            )
             await limiter.acquire()
             limiter.release()
         messages.append(message)
@@ -124,6 +128,24 @@ async def test_http_stream_sends_first_batch_before_reading_rest_and_loads_metad
         for index in range(130)
     ]
     assert json.loads(body) == expected
+    chunks = [key for key in store.read_keys if f'/{variable}/c/' in key]
+    if source == 'cfs2':
+        # Reanalysis128-day chunk0 serves both first batches. Forecast64-day
+        # chunk0 serves the forecast part of batch2 and both days of batch3.
+        expected_chunks = {
+            f'reanalysis/flx/{variable}/c/0/0/0': 2,
+            f'forecast/flx/{variable}/c/0/0/0': 2,
+        }
+    else:
+        # Missing day65 shifts final dates128/129 to stored positions127/128.
+        # Archive chunks contain128 samples, so batch3 crosses their boundary.
+        group = 'daily' if source == 'era5' else variable
+        expected_chunks = {
+            f'{group}/{variable}/c/0/0/0': 3,
+            f'{group}/{variable}/c/1/0/0': 1,
+        }
+    assert Counter(chunks) == expected_chunks
+
     assert [key for key in store.read_keys if key.endswith('/zarr.json')] == metadata
     assert limiter.borrowed_tokens == 0
 

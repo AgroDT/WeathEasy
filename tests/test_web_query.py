@@ -12,7 +12,13 @@ from zarr.storage import MemoryStore
 
 from weatheasy import query as synchronous
 from weatheasy.query import Coords
-from weatheasy.storage import StorageError, prepare_dataset, set_group_attrs, write_batch
+from weatheasy.storage import (
+    StorageError,
+    open_dataset,
+    prepare_dataset,
+    set_group_attrs,
+    write_batch,
+)
 
 
 if TYPE_CHECKING:
@@ -198,15 +204,32 @@ async def test_async_point_reads_only_requested_weather_chunks(
 
     source, store, _ = prepared_source
     variable = 'tas' if source == 'cmip6' else 'TMP'
+    group = {'era5': 'daily', 'cfs2': 'forecast/flx', 'cmip6': 'tas'}[source]
+    # Explicit weather layout contract: archives128 days, CFS2 forecast64 days.
+    chunk_size = 64 if source == 'cfs2' else 128
+    initial_days = 2 if source == 'cfs2' else 3
+    dates = np.arange('2020-03-03', '2020-07-11', dtype='datetime64[D]')
+    with open_dataset(store, group) as existing:
+        assert existing.sizes['time'] == initial_days
+        template = existing.isel(time=slice(0, 1)).load()
+    appended = xr.concat([template] * 130, dim='time').assign_coords(time=dates)
+    values = (
+        np.arange(130, dtype=np.float32)[:, None, None] * 100
+        + np.arange(2, dtype=np.float32)[None, :, None] * 10
+        + np.arange(4, dtype=np.float32)[None, None, :]
+    )
+    appended[variable].data = values
+    write_batch(store, group, prepare_dataset(appended, crs='EPSG:4326'))
     query = make_query([variable])
-    query['begin'] = query['end'] = date(2020, 3, 1)
+    requested_index = chunk_size - initial_days
+    query['begin'] = query['end'] = date.fromisoformat(str(dates[requested_index]))
     store.read_keys.clear()
     actual = await make_repository(source, store).read(query)
-    np.testing.assert_array_equal(actual, [[113]])
-    prefix = {'era5': 'daily/TMP', 'cfs2': 'forecast/flx/TMP', 'cmip6': 'tas/tas'}[source]
-    time_index = 0 if source == 'cfs2' else 1
-    chunks = [key for key in store.read_keys if key.startswith(f'{prefix}/c/')]
-    assert chunks == [f'{prefix}/c/{time_index}/0/0']
+    np.testing.assert_array_equal(actual, [[requested_index * 100 + 13]])
+    prefix = f'{group}/{variable}'
+    weather_names = ('TMP', 'PRATE', 'PRATE_corr', 'RH', 'tas', 'pr')
+    chunks = [key for key in store.read_keys if any(f'/{name}/c/' in key for name in weather_names)]
+    assert chunks == [f'{prefix}/c/1/0/0']
 
 
 @pytest.mark.anyio

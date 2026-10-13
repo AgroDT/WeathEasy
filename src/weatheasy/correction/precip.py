@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
     import zarr
     from numpy.typing import NDArray
-    from zarr.abc.store import Store
 
     from .sources import Source
     from weatheasy.file_storage import FileStore
@@ -62,10 +61,10 @@ _CALIB_SAMPLE = 50_000
 class PrecipCorrector:
     """Load per-source artifacts and bias-correct a daily precipitation grid (mm/day)."""
 
-    def __init__(self, source: Source, artifacts: FileStore, dem_store: Store) -> None:
+    def __init__(self, source: Source, artifacts: FileStore, terrain: features.Dem | None) -> None:
         self.source = source
         self.dir = artifacts.child(source.name, 'precip')
-        self.dem_store = dem_store
+        self.terrain = terrain
         self.clf: Any = None
         self.climatology: Climatology | None = None
         self.reg: Any = None
@@ -77,7 +76,6 @@ class PrecipCorrector:
         self.train_coords: NDArray[np.float32] | None = None
         self.grid_lats: NDArray[np.float32] | None = None
         self.grid_lons: NDArray[np.float32] | None = None
-        self._dem_cache: dict[tuple[int, int], features.Dem] = {}
 
     def load_artifacts(self) -> PrecipCorrector:
         verify_manifest(self.dir, PRECIP_FILES)
@@ -144,7 +142,10 @@ class PrecipCorrector:
         lat_grid, lon_grid = np.meshgrid(lats, lons, indexing='ij')
         flat_lats, flat_lons = lat_grid.ravel(), lon_grid.ravel()
 
-        elev, slope_we, slope_sn = self._dem_arrays(lats, lons)
+        if self.terrain is None:
+            msg = 'Prepared terrain has not been loaded'
+            raise RuntimeError(msg)
+        elev, slope_we, slope_sn = features.flat_dem(self.terrain)
         coast = np.log1p(features.dist_to_coast(flat_lats, flat_lons)).astype(np.float32)
         monthly_mean = self.climatology.mean[day.month - 1]
         wet_fraction = self.climatology.require_wet_fraction()[day.month - 1]
@@ -241,17 +242,6 @@ class PrecipCorrector:
             if score < best_score:
                 best_score, best_t = score, float(t)
         return best_t
-
-    def _dem_arrays(
-        self,
-        lats: NDArray,
-        lons: NDArray,
-    ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
-        key = (len(lats), len(lons))
-        if key not in self._dem_cache:
-            dem = features.load_dem(self.dem_store)
-            self._dem_cache[key] = features.resample_dem(dem, lats, lons)
-        return features.flat_dem(self._dem_cache[key])
 
 
 def _build_features(  # noqa: PLR0917

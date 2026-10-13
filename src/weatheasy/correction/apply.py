@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import xarray as xr
 
+from . import features
 from .precip import PrecipCorrector
 from .temperature import TemperatureCorrector
 from weatheasy.storage import delete_group, last_date, open_dataset, prepare_dataset, write_batch
@@ -61,8 +62,8 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
         raise ValueError(msg)
 
     lats, lons = source.grid(root)
-    temp = TemperatureCorrector(source, artifacts, dem_store).load_artifacts()
-    precip = PrecipCorrector(source, artifacts, dem_store).load_artifacts()
+    temp = TemperatureCorrector(source, artifacts, None).load_artifacts()
+    precip = PrecipCorrector(source, artifacts, None).load_artifacts()
     temp_climate = temp.climatology
     precip_climate = precip.climatology
     if temp_climate is not None and precip_climate is not None:
@@ -103,6 +104,10 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
             raise ValueError(msg)
     if not pending:
         return 0
+
+    terrain = features.load_dem(dem_store)
+    temp.terrain = terrain
+    precip.terrain = terrain
 
     if crs is None:
         msg = f'{source.name} prepared data have no CRS'

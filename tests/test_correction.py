@@ -16,7 +16,6 @@ from fsspec.implementations.memory import MemoryFileSystem
 from zarr.abc.store import Store
 from zarr.storage import MemoryStore
 
-from weatheasy.build_copdem import _slopes
 from weatheasy.correction import Source, apply, features, training
 from weatheasy.correction.climatology import Climatology, build_climatology
 from weatheasy.correction.precip import WET_FEAT, PrecipCorrector
@@ -48,6 +47,7 @@ def init_stubbed_models(monkeypatch: pytest.MonkeyPatch):
         def correct_grid(self, _day, values, _lats, _lons):  # noqa: ANN001
             return {'corrected': values * self.source.precip_to_mm / 2}
 
+    monkeypatch.setattr(apply.features, 'load_dem', lambda _store: {})
     monkeypatch.setattr(apply, 'TemperatureCorrector', FakeTemperature)
     monkeypatch.setattr(apply, 'PrecipCorrector', FakePrecipitation)
 
@@ -57,7 +57,9 @@ def create_temperature_correction(tmp_path: Path):
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
     corrector = TemperatureCorrector(
-        ERA5, get_file_store(tmp_path), dem_store(tmp_path / 'dem.zarr', lats, lons)
+        ERA5,
+        get_file_store(tmp_path),
+        features.load_dem(dem_store(tmp_path / 'dem.zarr', lats, lons)),
     )
     corrector.model = Constant(1.5)
     corrector.grid_lats, corrector.grid_lons = lats, lons
@@ -97,14 +99,18 @@ def create_recording_corrector(
 ):
     source, root, station, _ = cell_observations
     if request.param == 'temperature':
-        corrector = TemperatureCorrector(source, get_file_store(tmp_path), cell_terrain)
+        corrector = TemperatureCorrector(
+            source, get_file_store(tmp_path), features.load_dem(cell_terrain)
+        )
         corrector.model = RecordTemperature()
         corrector.climatology = build_climatology(source, root, 'TMP', 1.0)
         corrector.seasonal_bias = {
             m: np.ones_like(corrector.climatology.mean[0]) for m in range(1, 13)
         }
     else:
-        corrector = PrecipCorrector(source, get_file_store(tmp_path), cell_terrain)
+        corrector = PrecipCorrector(
+            source, get_file_store(tmp_path), features.load_dem(cell_terrain)
+        )
         corrector.clf = corrector.fallback_clf = RecordWet()
         corrector.reg = corrector.fallback_reg = Constant(np.log1p(8))
         corrector.climatology = build_climatology(
@@ -403,7 +409,9 @@ def test_missing_precipitation_stays_missing(tmp_path: Path, monkeypatch: pytest
     root, first = raw_store(tmp_path)
     lats, lons = ERA5.grid(root)
     corrector = PrecipCorrector(
-        ERA5, get_file_store(tmp_path), dem_store(tmp_path / 'dem.zarr', lats, lons)
+        ERA5,
+        get_file_store(tmp_path),
+        features.load_dem(dem_store(tmp_path / 'dem.zarr', lats, lons)),
     )
     corrector.clf = corrector.fallback_clf = AlwaysWet()
     corrector.reg = corrector.fallback_reg = Constant(np.log1p(8))
@@ -561,7 +569,9 @@ def test_training_discards_missing_observation_and_reanalysis(tmp_path: Path):
             'precipitation': [np.nan, 0, 3],
         }
     ).to_csv(csv, index=False)
-    loaded = training.prepare_stations(pd.read_csv(csv), ['precipitation'])
+    observations = pd.read_csv(csv)
+    observations[['elevation', 'slope_we', 'slope_sn']] = 0
+    loaded = training.prepare_stations(observations, ['precipitation'])
     assert len(loaded) == 2
     root, _ = raw_store(tmp_path)
     sampled = training.sample_reanalysis(ERA5, root, loaded, 'PRATE', 86400)
@@ -595,12 +605,6 @@ def test_training_reports_and_skips_stations_outside_cell_bounds(
         training.sample_reanalysis(ERA5, root, stations[stations.station_id == 2], 'TMP', 1)
 
 
-def test_station_terrain_enrichment(station_weather: tuple, station_dem: features.Dem):
-    _, _, station = station_weather
-    enriched = training.enrich_stations(station, station_dem)
-    assert enriched['elevation'].iloc[0] == 150
-
-
 def test_station_temperature_sampling(station_weather: tuple):
     root, _, station = station_weather
     sampled = training.sample_reanalysis(ERA5, root, station, 'TMP', 1.0)
@@ -613,20 +617,6 @@ def test_source_precipitation_units_and_grid(station_weather: tuple):
     assert lats[0] == pytest.approx(55)
     assert lons[-1] == pytest.approx(38)
     assert raw[5, 5] * ERA5.precip_to_mm == pytest.approx(10)
-
-
-def test_dem_missing_cell_cannot_become_zero_terrain():
-    lats = np.array([55.0, 55.1], np.float32)
-    lons = np.array([37.0, 37.1], np.float32)
-    dem: features.Dem = {
-        'lats': lats,
-        'lons': lons,
-        'elevation': np.array([[150, np.nan], [150, 150]], np.float32),
-        'slope_we': np.zeros((2, 2), np.float32),
-        'slope_sn': np.zeros((2, 2), np.float32),
-    }
-    with pytest.raises(ValueError, match='DEM field elevation contains missing values'):
-        features.resample_dem(dem, lats, lons)
 
 
 def test_longitude_scale_changes_hybrid_distance_and_idw_weights():
@@ -648,13 +638,6 @@ def test_longitude_scale_changes_hybrid_distance_and_idw_weights():
     assert seasonal[1][0, 0] == pytest.approx(10 / 2.25)  # 1:1:1/4 inverse-square weights
 
 
-def test_dem_slope_uses_longitude_scale_at_60_degrees():
-    elevation = np.array([[0, 100], [0, 100]], dtype=np.float32)
-    west_east, south_north = _slopes(elevation, np.array([60.0, 60.1]), 0.1)
-    assert west_east[0, 0] == pytest.approx(100 / (0.1 * 111320 * 0.5))
-    np.testing.assert_allclose(south_north, 0)
-
-
 def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from weatheasy._cli import main
 
@@ -674,22 +657,22 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
         for station in range(6)
         for day in range(2)
     ]
-    pd.DataFrame(
+    observations = pd.DataFrame(
         rows,
         columns=['station_id', 'lat', 'lon', 'date', 'temperature', 'precipitation'],
-    ).to_parquet(stations, index=False, compression='zstd')
+    )
+    observations[['elevation', 'slope_we', 'slope_sn']] = 0
+    observations.to_parquet(stations, index=False, compression='zstd')
     monkeypatch.setitem(training._XGB_PARAMS, 'n_estimators', 8)
     common = [
         'era5',
         '--store',
         str(tmp_path / 'data'),
-        '--dem',
-        str(dem_path),
         '--artifacts',
         str(tmp_path / 'artifacts'),
     ]
     main(['correction', 'train', *common, '--stations', str(stations)])
-    main(['correction', 'apply', *common, '--end', first.isoformat()])
+    main(['correction', 'apply', *common, '--dem', str(dem_path), '--end', first.isoformat()])
     old_id = root[ERA5.correction_path].attrs['correction_artifact_id']
     with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
         assert ds.sizes['time'] == 1
@@ -697,7 +680,7 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
         assert float(ds.TMP_corr.mean()) < 10
         assert np.isnan(ds.PRATE_corr[0, 1, 1])
     main(['correction', 'train', *common, '--stations', str(stations), '--only', 'temp'])
-    main(['correction', 'apply', *common])
+    main(['correction', 'apply', *common, '--dem', str(dem_path)])
     assert root[ERA5.correction_path].attrs['correction_artifact_id'] != old_id
     with open_dataset(root.store, ERA5.corrected_path(root)) as ds:
         assert ds.sizes['time'] == 2  # Rebuilt from the first day with the new model pair.
@@ -736,8 +719,9 @@ def test_filesystem_model_training_application_and_resume(
         columns=['station_id', 'lat', 'lon', 'date', 'temperature', 'precipitation'],
     )
     monkeypatch.setitem(training._XGB_PARAMS, 'n_estimators', 8)
+    stations[['elevation', 'slope_we', 'slope_sn']] = [150.0, 0.01, 0.02]
     original = stations.copy(deep=True)
-    training.build_artifacts(ERA5, root, stations, terrain, artifact_directory)
+    training.build_artifacts(ERA5, root, stations, artifact_directory)
     pd.testing.assert_frame_equal(stations, original)
     # A fresh reader has no handles or in-memory model state from training.
     fresh = FileStore(artifact_directory.fs, artifact_directory.root)
@@ -892,3 +876,52 @@ def test_correction_reads_each_source_chunk_once_across_cropped_time_blocks(
         np.testing.assert_array_equal(result.longitude, longitudes[1:])
         np.testing.assert_array_equal(result.TMP_corr, values[:, 1:43, 1:] - 2)
         np.testing.assert_allclose(result.PRATE_corr, values[:, 1:43, 1:] / 2, rtol=1e-6)
+
+
+@pytest.mark.usefixtures('stubbed_models')
+def test_apply_loads_terrain_once_and_shares_it_between_correctors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root, first = raw_store(tmp_path)
+    shared = {'elevation': np.ones((2, 2), np.float32)}
+    loaded = []
+    used = []
+
+    def read_terrain(store: Store):
+        loaded.append(store)
+        return shared
+
+    temp_method = apply.TemperatureCorrector.correct_grid
+    precip_method = apply.PrecipCorrector.correct_grid
+
+    def temp_correct(self, *args, **kwargs):  # noqa: ANN001
+        used.append(self.terrain)
+        return temp_method(self, *args, **kwargs)
+
+    def precip_correct(self, *args, **kwargs):  # noqa: ANN001
+        used.append(self.terrain)
+        return precip_method(self, *args, **kwargs)
+
+    monkeypatch.setattr(features, 'load_dem', read_terrain)
+    monkeypatch.setattr(apply.TemperatureCorrector, 'correct_grid', temp_correct)
+    monkeypatch.setattr(apply.PrecipCorrector, 'correct_grid', precip_correct)
+    store = get_store(tmp_path / 'unused-terrain.zarr')
+    assert apply.correct_store(ERA5, root, get_file_store(tmp_path), store, end=first) == 1
+    assert loaded == [store]
+    assert len(used) == 2
+    assert all(value is shared for value in used)
+
+
+@pytest.mark.usefixtures('stubbed_models')
+def test_apply_does_not_load_terrain_without_pending_days(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root, first = raw_store(tmp_path)
+    store = get_store(tmp_path / 'unused-terrain.zarr')
+    assert apply.correct_store(ERA5, root, get_file_store(tmp_path), store, end=first) == 1
+
+    def unexpected_load(_store: Store):
+        pytest.fail('Terrain must not be loaded without pending days')
+
+    monkeypatch.setattr(features, 'load_dem', unexpected_load)
+    assert apply.correct_store(ERA5, root, get_file_store(tmp_path), store, end=first) == 0

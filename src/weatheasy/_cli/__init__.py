@@ -37,7 +37,6 @@ def _build_parser() -> ArgumentParser:
     )
     _add_query(groups)
     _add_download(groups)
-    _add_dem(groups)
     _add_correction(groups)
     _add_emdna(groups)
     return parser
@@ -112,37 +111,58 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
             )
 
 
-def _add_dem(groups: _SubParsersAction[ArgumentParser]) -> None:
-    dem = groups.add_parser(
-        'dem', help='prepare terrain features', formatter_class=ArgumentDefaultsHelpFormatter
+def _dem_source(parser: ArgumentParser) -> None:
+    parser.add_argument(
+        '--dem-source',
+        default='s3://datasets/copernicus-dem-90m.zarr',
+        help=(
+            'source elevation Zarr path, s3:// URI or HTTP(S) URL; '
+            'requires EPSG:4326 (WGS84), assumed when CRS metadata is absent'
+        ),
     )
-    dem.set_defaults(handler='dem')
-    dem.add_argument(
-        '--bbox',
-        type=int,
-        nargs=4,
-        required=True,
-        metavar=('NORTH', 'WEST', 'SOUTH', 'EAST'),
-        help='bounding box in whole degrees EPSG:4326, without antimeridian crossing',
-    )
-    dem.add_argument('--resolution', type=float, default=0.1)
-    dem.add_argument('-o', '--output', required=True, help='Zarr path or s3:// URI')
+    parser.add_argument('--dem-elevation', default='elevation', help='source elevation variable')
+    parser.add_argument('--dem-x', default='x', help='source horizontal coordinate')
+    parser.add_argument('--dem-y', default='y', help='source vertical coordinate')
+    parser.add_argument('--dem-headers-file', help='JSON file of HTTP headers for source DEM reads')
 
 
 def _add_correction(groups: _SubParsersAction[ArgumentParser]) -> None:
     correction = groups.add_parser('correction', help='train and apply bias correction')
     actions = correction.add_subparsers(required=True)
+    prepare = actions.add_parser('prepare-dem', formatter_class=ArgumentDefaultsHelpFormatter)
+    prepare.set_defaults(handler='correction_prepare_dem')
+    prepare.add_argument('source', choices=('cfs2', 'era5'))
+    _store(prepare, required=True)
+    prepare.add_argument('--output', '-o', required=True, help='terrain Zarr path or s3:// URI')
+    _dem_source(prepare)
+    prepare.add_argument('--overwrite', action='store_true', help='replace an existing output')
+    stations = actions.add_parser('prepare-stations', formatter_class=ArgumentDefaultsHelpFormatter)
+    stations.set_defaults(handler='correction_prepare_stations')
+    stations.add_argument(
+        '--stations', required=True, help='input station Parquet path or s3:// URI'
+    )
+    stations.add_argument(
+        '--output', '-o', required=True, help='enriched station Parquet path or s3:// URI'
+    )
+    _dem_source(stations)
+    stations.add_argument('--overwrite', action='store_true', help='replace an existing output')
     for action in ('train', 'apply'):
         sub = actions.add_parser(action, formatter_class=ArgumentDefaultsHelpFormatter)
         sub.set_defaults(handler=f'correction_{action}')
         sub.add_argument('source', choices=('cfs2', 'era5'))
         _store(sub, required=True)
-        sub.add_argument('--dem', required=True, help='DEM Zarr path or s3:// URI')
         sub.add_argument('--artifacts', default='artifacts', help='model directory or s3:// URI')
         if action == 'train':
-            sub.add_argument('--stations', required=True, help='station Parquet path or s3:// URI')
+            sub.add_argument(
+                '--stations',
+                required=True,
+                help='station Parquet with prepared terrain features, local path or s3:// URI',
+            )
             sub.add_argument('--only', choices=('temp', 'precip'))
         else:
+            sub.add_argument(
+                '--dem', required=True, help='source-grid prepared terrain Zarr path or s3:// URI'
+            )
             sub.add_argument('--begin', type=date.fromisoformat)
             sub.add_argument('--end', type=date.fromisoformat)
 

@@ -1,9 +1,9 @@
 """Shared terrain / geography features for the bias-correction models.
 
-Ported from the production scripts; Russia-scoped (coast reference points and the
-Copernicus DEM dataset both cover Russia). Used by both the temperature and the
-precipitation correctors, at training and inference time, so training-time station
-enrichment and inference-time grid resampling read identical terrain features.
+Station training uses native-resolution elevation and local slopes prepared in
+advance. Inference reads source-grid mean elevation and slopes of that coarse
+surface, prepared separately and shared by both correction models. This module
+also contains geography features and standalone terrain interpolation helpers.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def load_dem(store: Store) -> Dem:
     """Load terrain features from a prepared local or S3 Zarr store."""
     with xr.open_zarr(store, consolidated=False, chunks=None, decode_coords='all') as ds:
         if ds.attrs.get('build_status', 'complete') != 'complete':
-            msg = 'DEM build is incomplete; resume weatheasy dem before using it'
+            msg = 'DEM preparation is incomplete; finish preparation before using it'
             raise ValueError(msg)
         dem: Dem = {
             'lats': ds['latitude'].to_numpy().astype(np.float32),
@@ -126,55 +126,11 @@ def load_dem(store: Store) -> Dem:
             'slope_we': ds['slope_we'].to_numpy().astype(np.float32),
             'slope_sn': ds['slope_sn'].to_numpy().astype(np.float32),
         }
-    return resample_dem(dem, dem['lats'], dem['lons'])
-
-
-def resample_dem(dem: Dem, lats: NDArray, lons: NDArray) -> Dem:
-    """Linearly interpolate the DEM onto a target grid (no-op if grids already match)."""
-    src_lats = dem['lats']
-    src_lons = dem['lons']
-    for key in ('elevation', 'slope_we', 'slope_sn'):
-        if not np.isfinite(dem[key]).all():
-            msg = f'DEM field {key} contains missing values'
-            raise ValueError(msg)
-
-    # Use absolute tolerance only: rtol would scale with coordinate magnitude
-    # (e.g. 50° * 1e-5 ≈ 0.0005° ≈ 50 m), which is too loose for grid matching.
-    tgt_lats = np.asarray(lats, np.float32)
-    tgt_lons = np.asarray(lons, np.float32)
-    grids_match = (
-        len(src_lats) == len(tgt_lats)
-        and len(src_lons) == len(tgt_lons)
-        and np.allclose(src_lats, tgt_lats, rtol=0, atol=1e-6)
-        and np.allclose(src_lons, tgt_lons, rtol=0, atol=1e-6)
-    )
-    if grids_match:
-        # Return with canonical target coords so the caller always gets what it asked for.
-        return {**dem, 'lats': tgt_lats, 'lons': tgt_lons}
-
-    def resample(data: NDArray[np.float32], key: str) -> NDArray[np.float32]:
-        da = xr.DataArray(
-            data,
-            coords={'latitude': src_lats, 'longitude': src_lons},
-            dims=['latitude', 'longitude'],
-        )
-        resampled = da.interp(latitude=tgt_lats, longitude=tgt_lons, method='linear').to_numpy()
-        if not np.isfinite(resampled).all():
-            msg = f'DEM field {key} is missing on the correction grid'
-            raise ValueError(msg)
-        return resampled.astype(np.float32)
-
-    return {
-        'lats': tgt_lats,
-        'lons': tgt_lons,
-        'elevation': resample(dem['elevation'], 'elevation'),
-        'slope_we': resample(dem['slope_we'], 'slope_we'),
-        'slope_sn': resample(dem['slope_sn'], 'slope_sn'),
-    }
+    return dem
 
 
 def flat_dem(dem: Dem) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
-    """Flattened elevation / slope_we / slope_sn for a resampled DEM."""
+    """Flattened elevation / slope_we / slope_sn for prepared terrain."""
     return (
         dem['elevation'].ravel(),
         dem['slope_we'].ravel(),

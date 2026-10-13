@@ -136,9 +136,9 @@ servers, and (possibly) star positions.
 
 | Command | Required extra for local data |
 | --- | --- |
-| `query`, `list-vars`, `dem`, `download cmip6` | Base package |
+| `query`, `list-vars`, `download cmip6` | Base package |
 | `download cfs2`, `download era5` | `prepare` |
-| `correction train`, `correction apply` | `correction` |
+| `correction train`, `correction apply`, `correction prepare-dem`, `correction prepare-stations` | `correction` |
 | `emdna temperature`, `emdna precipitation` | `emdna` |
 
 All CLI commands can be invoked as `weatheasy ...` or `python -m weatheasy ...`.
@@ -392,55 +392,95 @@ atomic multi-object transaction on S3.
 
 ## Terrain for bias correction
 
-Build the static Copernicus DEM once and publish it as a spatial Zarr v3 dataset:
-Specify `--bbox NORTH WEST SOUTH EAST` in whole degrees EPSG:4326 and an explicit
-output path with `--output` (`-o`); both are required.
+The correction workflow reads a native-resolution source elevation Zarr directly,
+without building a common intermediate DEM. By default this is
+`s3://datasets/copernicus-dem-90m.zarr` on the endpoint `https://s3.esoil.ru`.
+Configure the endpoint with the existing S3 settings (`AWS_ENDPOINT_URL_S3`).
+The source options shared by both preparation commands are:
+
+| Option | Default |
+| --- | --- |
+| `--dem-source` | `s3://datasets/copernicus-dem-90m.zarr` |
+| `--dem-elevation` | `elevation` |
+| `--dem-x` | `x` |
+| `--dem-y` | `y` |
+| `--dem-headers-file` | None; JSON file of HTTP request headers |
+
+Pass a local Zarr path, another S3 URI or an HTTP(S) Zarr URL and explicit variable/coordinate names
+for another source. Preparation supports EPSG:4326 sources with monotonic
+coordinates in either direction; coordinate spacing comes from the dataset.
+CRS comes from dataset metadata. If CRS metadata is absent, the source is assumed
+to use EPSG:4326 (WGS84). Other declared coordinate reference systems are rejected;
+preparation does not reproject coordinates.
+For HTTP(S), `--dem-headers-file` reads a JSON object of string headers, for example
+`{"Authorization": "Bearer TOKEN"}` in `/run/secrets/dem-headers.json`. Supply
+only the file path on the command line. Basic authorization headers and custom
+headers such as `X-API-Key` are also supported. These headers apply only to source
+DEM reads, independently of S3 settings for weather and output stores:
 
 ```sh
-weatheasy dem --bbox 56 37 55 38 -o ./copdem.zarr
-# Publish directly to S3 using the same command:
-weatheasy dem --bbox 56 37 55 38 -o s3://weatheasy/copdem.zarr
+weatheasy correction prepare-stations --stations ./stations.parquet \
+    --output ./stations-terrain.parquet --dem-source https://example.org/dem.zarr \
+    --dem-headers-file /run/secrets/dem-headers.json
 ```
 
-Source COG tiles are read directly from their public HTTPS addresses using
-Rasterio/GDAL range requests; no local or S3 tile cache is created. The output
-contains `latitude`, `longitude`, `elevation` (metres), `slope_we` and `slope_sn`
-(m/m), with EPSG:4326 and CF metadata written through rioxarray.
+Without an explicit `Authorization` header, HTTP(S) reads also use standard
+`.netrc` credentials (or the file selected by `NETRC`) and environment proxy settings.
+An explicit authorization header takes precedence over `.netrc` and disables
+environment-derived HTTP authentication and proxy settings for that source.
 
-Repeat the same command to resume an interrupted build. Root attributes record
-`build_config` (bbox, resolution, source, algorithm version and tile block shape) and `build_status`
-(`initializing`, `building`, `computing_slopes`, `complete`). Different parameters
-or an existing output without build metadata are rejected; choose a new output
-path for a different build. Completed builds are left intact.
+For the [Earth Data Hub GLO-90 dataset](https://earthdatahub.destine.eu/collections/copernicus-dem/datasets/GLO-90),
+[create an API key](https://earthdatahub.destine.eu/getting-started) and use Basic auth
+with username `edh` and the key as the password. Place credentials in `.netrc`:
 
-The retained uint8 `tile_status` array records one value per 1 degree source tile:
-0 pending, 1 done, 2 missing (HTTP 404). Initialization writes only coordinates
-and metadata; elevation, slope and status chunks are created on demand. Unwritten
-fields read as NaN and unwritten statuses as 0. Tiles are assembled in memory into
-blocks of 32 x 32 source tiles, limited by the bbox. The output chunk shape is
-computed from the resolution: at 0.1 degrees a full block contains 320 x 320
-float32 cells (400 KiB before compression).
-Each elevation block is written once, followed by its tile statuses in one matching
-status chunk. An interrupted block is read again in full; no partial block progress
-or intermediate data group is kept. In an interactive terminal, nested tqdm bars
-show completed chunks and tiles in the current chunk, including the current tile
-name. Resumed builds count previously completed chunks immediately. Progress is
-written to stderr and disabled when stderr is not a terminal. Other HTTP/read failures interrupt the build.
-Missing tiles and nodata cells are filled with zero, as ocean/no coverage.
-Slopes are computed after all tiles finish and are recomputed if interrupted.
-Training and correction reject unfinished builds; older DEM datasets without a
-build status remain readable. Use only one writer per output; coordinate readers
-so they start after the build completes. This is not a concurrent-writer protocol.
+```text
+machine data.earthdatahub.destine.eu
+login edh
+password YOUR_API_KEY
+```
 
-Both training and application read the same prepared DEM. Their `--dem` argument
-accepts a local Zarr path or S3 URI:
+Then run:
 
 ```sh
-weatheasy correction train era5 --store s3://weatheasy/era5.zarr \
-    --stations ./stations.parquet --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
-weatheasy correction apply era5 --store s3://weatheasy/era5.zarr \
-    --dem s3://weatheasy/copdem.zarr --artifacts s3://weatheasy/models
+weatheasy correction prepare-dem era5 --store ./era5.zarr --output ./era5-terrain.zarr \
+    --dem-source https://data.earthdatahub.destine.eu/copernicus-dem/GLO-90-v0.zarr \
+    --dem-elevation dsm --dem-x lon --dem-y lat
 ```
+
+The same source and authentication arguments work with `correction prepare-stations`.
+
+Prepare one terrain Zarr per corrected weather source, and station terrain
+features separately:
+
+```sh
+weatheasy correction prepare-dem era5 --store ./era5.zarr --output ./era5-terrain.zarr
+weatheasy correction prepare-dem cfs2 --store ./cfs2.zarr --output ./cfs2-terrain.zarr
+weatheasy correction prepare-stations --stations ./stations.parquet \
+    --output ./stations-terrain.parquet
+weatheasy correction train era5 --store ./era5.zarr \
+    --stations ./stations-terrain.parquet --artifacts ./models
+weatheasy correction apply era5 --store ./era5.zarr \
+    --dem ./era5-terrain.zarr --artifacts ./models
+```
+
+Weather preparation averages elevation over each correction cell using spherical
+area weights and computes slopes on that surface. Global longitude sources wrap
+cells across the antimeridian. Native nodata values contribute zero elevation,
+preserving the existing ocean policy; missing coordinate coverage is an error
+during preparation. Its Zarr v3 output contains `elevation`,
+`slope_we`, `slope_sn` and weather-grid coordinates, with spatial chunks up to
+320 x 320 and consolidated metadata. Station preparation preserves observation
+columns and attaches elevation and local slopes from native-resolution terrain.
+Both commands read source terrain in spatial windows instead of loading the
+entire source dataset. Existing outputs require explicit `--overwrite`.
+
+`correction apply --dem` now means prepared source-grid terrain. Application
+loads it once and shares the arrays between temperature and precipitation;
+it performs no interpolation or checks against the weather grid. Prepare and
+supply the correct dataset yourself. Training has no `--dem` argument: its
+station Parquet must already contain `elevation`, `slope_we` and `slope_sn`.
+Existing users must prepare source-specific terrain, enrich their stations and
+retrain models because the terrain features have changed.
 
 The model directory accepts a local path or S3 URI. It contains separate joblib,
 NumPy and manifest files under `<source>/temp` and `<source>/precip`. Application
@@ -450,20 +490,19 @@ before correction starts. Coordinate retraining and application to avoid reading
 a model while its files are being replaced. Station Parquet files accept local
 paths or S3 URIs.
 
-Library training receives station observations as a `pandas.DataFrame`; reading
-the Parquet file belongs to the CLI. Training CLI inputs require `station_id`,
-`lat`, `lon`, `date`, and `temperature` (°C) / `precipitation` (mm/day), according
-to `--only`; only these columns are loaded. Calendar columns `year`/`month`/`day`
-are supported by the library API, but the training CLI requires `date`.
-Create a prepared `FileStore` with
+Library training receives enriched station observations as a `pandas.DataFrame`;
+reading the Parquet file belongs to the CLI. Training CLI inputs require
+`station_id`, `lat`, `lon`, `date`, `elevation`, `slope_we`, `slope_sn`, and
+`temperature` (°C) / `precipitation` (mm/day), according to `--only`.
+Calendar columns `year`/`month`/`day` are supported by the library API, but the
+training CLI requires `date`. Create a prepared `FileStore` with
 `weatheasy.file_storage.get_file_store` for model artifacts and pass it to training
-or correction.
-The correction CLI shares one synchronous S3 filesystem with an asynchronous
-adapter for weather and DEM Zarr access, reusing the same S3 client. Other callers
-can supply their filesystem when resolving S3 artifact directories.
+or correction. The correction CLI shares one synchronous S3 filesystem with an
+asynchronous adapter for weather and DEM Zarr access, reusing the same S3 client.
+Other callers can supply their filesystem when resolving S3 artifact directories.
 
-Create a prepared DEM `Store` with `weatheasy.storage.get_store` and pass it to
-`build_copdem`, training or correction. Direct xarray consumers can open the DEM
+Create source and prepared terrain `Store` instances with
+`weatheasy.storage.get_store`. Direct xarray consumers can open prepared terrain
 with `xr.open_zarr(store, consolidated=True, chunks=None, decode_coords="all")`.
 
 ## AquaCrop weather

@@ -3,10 +3,10 @@ revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'ARM64' and sys_platform == 'win32'",
-    "python_full_version < '3.14' and platform_machine == 'ARM64' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and platform_machine != 'ARM64' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.14' and platform_machine == 'ARM64' and sys_platform == 'win32'",
     "python_full_version < '3.14' and platform_machine != 'ARM64' and sys_platform == 'win32'",
     "python_full_version < '3.14' and sys_platform == 'emscripten'",
     "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
@@ -2329,13 +2329,13 @@ dependencies = [
     { name = "numpy" },
     { name = "rasterio" },
     { name = "rioxarray" },
-    { name = "tqdm" },
     { name = "xarray" },
     { name = "zarr" },
 ]
 
 [package.optional-dependencies]
 correction = [
+    { name = "aiohttp" },
     { name = "joblib" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -2377,6 +2377,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", marker = "extra == 'correction'", specifier = ">=3.10,<4" },
     { name = "cdsapi", marker = "extra == 'prepare'", specifier = ">=0.7.7,<0.8" },
     { name = "cfgrib", marker = "extra == 'prepare'", specifier = ">=0.9.15,<0.10" },
     { name = "eccodes", marker = "extra == 'prepare'", specifier = ">=2.43,<3" },
@@ -2397,7 +2398,6 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 's3'", specifier = "~=2026.9" },
     { name = "scikit-learn", marker = "extra == 'correction'", specifier = ">=1.5,<2" },
     { name = "scipy", marker = "extra == 'emdna'", specifier = ">=1.14,<2" },
-    { name = "tqdm", specifier = ">=4.70,<5" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.54" },
     { name = "uvloop", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32' and extra == 'web'", specifier = ">=0.22.1" },
     { name = "xarray", specifier = ">=2025.6,<2027" },
