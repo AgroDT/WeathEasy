@@ -96,6 +96,13 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
             default=7,
             help='retention of unneeded working files in days; needed files are always retained',
         )
+        if source == 'cfs2':
+            sub.add_argument(
+                '--artifacts',
+                help='correction model directory or s3:// URI; '
+                'when set, the downloaded forecast is bias-corrected (requires --dem)',
+            )
+            sub.add_argument('--dem', help='DEM Zarr path or s3:// URI for forecast correction')
         if source == 'era5':
             sub.add_argument(
                 '--max-pending-requests',
@@ -142,6 +149,12 @@ def _add_correction(groups: _SubParsersAction[ArgumentParser]) -> None:
         if action == 'train':
             sub.add_argument('--stations', required=True, help='station Parquet path or s3:// URI')
             sub.add_argument('--only', choices=('temp', 'precip'))
+            sub.add_argument(
+                '--cv-folds',
+                type=int,
+                default=5,
+                help='station-grouped folds for the quality report; 0 skips the scores',
+            )
         else:
             sub.add_argument('--begin', type=date.fromisoformat)
             sub.add_argument('--end', type=date.fromisoformat)

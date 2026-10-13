@@ -64,7 +64,7 @@ class PrecipCorrector:
 
     def __init__(self, source: Source, artifacts: FileStore, dem_store: Store) -> None:
         self.source = source
-        self.dir = artifacts.child(source.name, 'precip')
+        self.dir = artifacts.child(source.model.name, 'precip')
         self.dem_store = dem_store
         self.clf: Any = None
         self.climatology: Climatology | None = None
@@ -81,7 +81,7 @@ class PrecipCorrector:
 
     def load_artifacts(self) -> PrecipCorrector:
         verify_manifest(self.dir, PRECIP_FILES)
-        self.climatology = Climatology.load(self.dir, self.source, self.source.precip_var)
+        self.climatology = Climatology.load(self.dir, self.source.model, self.source.precip_var)
         with self.dir.open('clf.joblib') as stream:
             self.clf = joblib.load(stream)
         with self.dir.open('reg.joblib') as stream:

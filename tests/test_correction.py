@@ -17,10 +17,10 @@ from zarr.abc.store import Store
 from zarr.storage import MemoryStore
 
 from weatheasy.build_copdem import _slopes
-from weatheasy.correction import Source, apply, features, training
+from weatheasy.correction import Source, apply, features, quality, training
 from weatheasy.correction.climatology import Climatology, build_climatology
 from weatheasy.correction.precip import WET_FEAT, PrecipCorrector
-from weatheasy.correction.sources import CFS2, ERA5
+from weatheasy.correction.sources import CFS2, CFS2_FORECAST, ERA5
 from weatheasy.correction.temperature import FEATURE_COLS, TemperatureCorrector
 from weatheasy.error import CoordsError
 from weatheasy.file_storage import FileStore, get_file_store
@@ -892,3 +892,199 @@ def test_correction_reads_each_source_chunk_once_across_cropped_time_blocks(
         np.testing.assert_array_equal(result.longitude, longitudes[1:])
         np.testing.assert_array_equal(result.TMP_corr, values[:, 1:43, 1:] - 2)
         np.testing.assert_allclose(result.PRATE_corr, values[:, 1:43, 1:] / 2, rtol=1e-6)
+
+
+def forecast_store(root: zarr.Group, first: date, *, temperature: float = 20.0) -> None:
+    """Write a coarser forecast grid than the CFS2 reanalysis, as T126 differs from 0.5 deg."""
+    lats, lons = np.arange(39.0, 86.0, 2.0), np.arange(17.0, 184.0, 2.0)
+    shape = (3, len(lats), len(lons))
+    ds = xr.Dataset(
+        {
+            'TMP': (
+                ('time', 'latitude', 'longitude'),
+                np.full(shape, temperature, np.float32),
+                {'units': 'degC'},
+            ),
+            'PRATE': (
+                ('time', 'latitude', 'longitude'),
+                np.full(shape, 10 / 21600, np.float32),
+                {'units': 'kg m-2 s-1'},
+            ),
+        },
+        coords={
+            'time': [np.datetime64(first) + np.timedelta64(n, 'D') for n in range(3)],
+            'latitude': lats,
+            'longitude': lons,
+        },
+    )
+    write_batch(root.store, CFS2_FORECAST.path(root), prepare_dataset(ds, crs='EPSG:4326'))
+
+
+@pytest.mark.usefixtures('stubbed_models')
+def test_forecast_correction_uses_reanalysis_models_on_reanalysis_grid(tmp_path: Path):
+    root, first = raw_store(tmp_path, CFS2)
+    issue = first + timedelta(days=3)  # updated - CFS2_REANALYSIS_LAST_DATE_OFFSET
+    forecast_store(root, issue)
+    args = (root, get_file_store(tmp_path / 'artifacts'), get_store(tmp_path / 'dem.zarr'))
+    assert apply.correct_store(CFS2, *args) == 2
+    assert apply.correct_forecast(*args) == 3
+    assert apply.correct_forecast(*args) == 0  # Current issue and models: nothing to redo.
+    with open_dataset(root.store, CFS2_FORECAST.corrected_path(root)) as ds:
+        lats, lons = CFS2.grid(root)
+        np.testing.assert_array_equal(ds.latitude, lats)
+        np.testing.assert_array_equal(ds.longitude, lons)
+        np.testing.assert_allclose(ds.TMP_corr, 18)
+        np.testing.assert_allclose(ds.PRATE_corr, 5, rtol=1e-6)
+    result = get_cfs2_data(
+        store=root.store,
+        begin=first,
+        end=issue + timedelta(days=2),
+        coords=Coords(55, 37),
+        variables=['TMP', 'TMP_corr', 'PRATE_corr'],
+    )
+    np.testing.assert_allclose(result[:, :2], [[10, 10], [8, 8], [5, 5]])
+    assert np.isnan(result[:, 2]).all()  # No reanalysis or forecast for this day.
+    np.testing.assert_allclose(result[:, 3:], [[20] * 3, [18] * 3, [5] * 3], rtol=1e-6)
+
+    # A new forecast issue hides the old correction until it is rebuilt.
+    root.attrs['updated'] = (issue + timedelta(days=4)).isoformat()
+    stale = get_cfs2_data(
+        store=root.store,
+        begin=issue + timedelta(days=1),
+        end=issue + timedelta(days=2),
+        coords=Coords(55, 37),
+        variables=['TMP_corr'],
+    )
+    assert np.isnan(stale).all()
+    assert apply.correct_forecast(*args) == 3
+    fresh = get_cfs2_data(
+        store=root.store,
+        begin=issue + timedelta(days=1),
+        end=issue + timedelta(days=2),
+        coords=Coords(55, 37),
+        variables=['TMP_corr'],
+    )
+    np.testing.assert_allclose(fresh, [[18, 18]])
+
+
+@pytest.mark.usefixtures('stubbed_models')
+def test_forecast_correction_without_forecast_is_noop(tmp_path: Path):
+    root, _ = raw_store(tmp_path, CFS2)
+    assert (
+        apply.correct_forecast(
+            root, get_file_store(tmp_path / 'artifacts'), get_store(tmp_path / 'dem.zarr')
+        )
+        == 0
+    )
+    assert CFS2_FORECAST.correction_path not in root
+
+
+def station_frame(first: date, days: int = 2, stations: int = 6) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            (
+                station,
+                55.1 + station * 0.1,
+                37.1 + station * 0.1,
+                (first + timedelta(days=day)).isoformat(),
+                8.0 + station * 0.1,
+                3.0 if (station + day) % 2 else 0.0,
+            )
+            for station in range(stations)
+            for day in range(days)
+        ],
+        columns=['station_id', 'lat', 'lon', 'date', 'temperature', 'precipitation'],
+    )
+
+
+def test_training_writes_cross_validated_quality_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root, first = raw_store(tmp_path)
+    terrain = dem_store(tmp_path / 'dem.zarr', *ERA5.grid(root))
+    artifacts = get_file_store(tmp_path / 'artifacts')
+    monkeypatch.setitem(training._XGB_PARAMS, 'n_estimators', 8)
+    training.build_artifacts(ERA5, root, station_frame(first), terrain, artifacts, cv_folds=3)
+    report = json.loads((tmp_path / 'artifacts' / 'era5' / quality.REPORT_JSON).read_text())
+    assert report['source'] == 'era5'
+    temp = report['temp']
+    assert (temp['folds'], temp['stations'], temp['station_days']) == (3, 6, 12)
+    # Raw ERA5 is 10 degC against 8.0..8.5 degC observations.
+    assert temp['raw']['bias'] == pytest.approx(10 - np.mean(8.0 + np.arange(6) * 0.1))
+    assert temp['corrected']['rmse'] < temp['raw']['rmse']
+    assert set(temp['monthly']) == {'1'}
+    precip = report['precip']
+    assert (precip['folds'], precip['station_days']) == (3, 11)  # One raw cell is missing.
+    assert precip['observed_wet_fraction'] == pytest.approx(6 / 11)
+    assert {'pod', 'far', 'csi', 'hss', 'total_ratio'} <= set(precip['corrected'])
+    assert 'forecast_temp' not in report  # ERA5 has no forecast.
+    markdown = (tmp_path / 'artifacts' / quality.REPORT_MARKDOWN).read_text(encoding='utf-8')
+    assert '## ERA5-Land reanalysis: temperature' in markdown
+    assert '## ERA5-Land reanalysis: precipitation' in markdown
+    assert '| RMSE, degC |' in markdown
+
+    # Retraining one corrector keeps the other section; cv_folds=0 skips scores.
+    training.build_artifacts(
+        ERA5, root, station_frame(first), terrain, artifacts, only='temp', cv_folds=0
+    )
+    report = json.loads((tmp_path / 'artifacts' / 'era5' / quality.REPORT_JSON).read_text())
+    assert 'skipped' in report['temp']
+    assert report['precip']['folds'] == 3
+
+
+def test_held_out_station_gets_interpolated_seasonal_features():
+    frame = pd.DataFrame(
+        {
+            'station_id': [1, 2, 3, 1],
+            'month': [1, 1, 1, 2],
+            'lat': [60.0, 61.0, 62.0, 60.0],
+            'lon': [2.0, 0.0, 0.0, 2.0],
+            'bias': [0.0, 10.0, 0.0, 5.0],
+        }
+    )
+    points = pd.DataFrame({'lat': [60.0, 60.0, 60.0], 'lon': [0.0, 0.0, 0.0], 'month': [1, 2, 1]})
+    values = training.idw_points(frame, 'bias', points)
+    seasonal = training.idw_seasonal(frame, 'bias', np.array([60.0]), np.array([0.0]))
+    np.testing.assert_allclose(values, [seasonal[1][0, 0], 0, seasonal[1][0, 0]], rtol=1e-6)
+    assert values[1] == 0  # Fewer than three stations in February: no seasonal bias.
+
+
+def test_cfs2_training_reports_forecast_shift_next_to_reanalysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root, first = raw_store(tmp_path, CFS2)
+    forecast_store(root, first + timedelta(days=3), temperature=12.0)
+    terrain = dem_store(tmp_path / 'dem.zarr', *CFS2.grid(root))
+    artifacts = get_file_store(tmp_path / 'artifacts')
+    monkeypatch.setitem(training._XGB_PARAMS, 'n_estimators', 8)
+    training.build_artifacts(CFS2, root, station_frame(first), terrain, artifacts, only='temp')
+    report = json.loads((tmp_path / 'artifacts' / 'cfs2' / quality.REPORT_JSON).read_text())
+    forecast = report['forecast_temp']
+    assert forecast['issued'] == root.attrs['updated']
+    assert forecast['sampled_days'] == 1  # Every seventh of three forecast days.
+    january = forecast['monthly']['1']
+    assert january['forecast']['raw_mean'] == pytest.approx(12.0)
+    assert january['forecast']['shift'] == pytest.approx(
+        january['forecast']['corrected_mean'] - 12.0
+    )
+    assert january['reanalysis']['raw_mean'] == pytest.approx(10.0)
+    assert january['reanalysis']['days'] == 2
+    markdown = (tmp_path / 'artifacts' / quality.REPORT_MARKDOWN).read_text(encoding='utf-8')
+    assert '## CFSv2 forecast: temperature' in markdown
+    assert 'Forecast errors are not evaluated' in markdown
+
+
+def test_forecast_correction_on_download_requires_artifacts_and_dem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from weatheasy import download
+    from weatheasy._cli import main
+
+    calls = []
+    monkeypatch.setattr(
+        download, 'download_cfs2_data', lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    store = ['download', 'cfs2', '--store', str(tmp_path / 'cfs2.zarr')]
+    with pytest.raises(ValueError, match='requires both --artifacts and --dem'):
+        main([*store, '--artifacts', str(tmp_path / 'artifacts')])
+    assert not calls  # Rejected before the long download starts.

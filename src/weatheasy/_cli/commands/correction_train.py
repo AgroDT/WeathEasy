@@ -18,4 +18,6 @@ def run(args: Namespace) -> None:
     if args.only in (None, 'precip'):
         columns.append('precipitation')
     stations = read_stations(storage.files(args.stations), columns=columns)
-    training.build_artifacts(source, weather, stations, dem, artifacts, only=args.only)
+    training.build_artifacts(
+        source, weather, stations, dem, artifacts, only=args.only, cv_folds=args.cv_folds
+    )

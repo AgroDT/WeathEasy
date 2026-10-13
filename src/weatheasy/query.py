@@ -19,6 +19,7 @@ from weatheasy.error import (
 from weatheasy.storage import (
     StorageError,
     group_attrs,
+    group_exists,
     open_dataset,
     pristine_group,
     select_point,
@@ -52,6 +53,13 @@ def get_cfs2_data(  # noqa: C901
     except KeyError as err:
         raise CFS2Error from err
     boundary = date.fromisoformat(str(updated)) - const.CFS2_REANALYSIS_LAST_DATE_OFFSET
+    corrected_groups = {
+        'reanalysis': 'reanalysis/correction',
+        # A correction of an earlier forecast issue must not be served as current.
+        'forecast': const.CFS2_FORECAST_CORRECTION
+        if forecast_correction_current(store, str(updated))
+        else None,
+    }
     result = np.full((len(variables), (end - begin).days + 1), np.nan, np.float32)
     for kind, first, last in (
         ('reanalysis', begin, min(end, boundary - const.ONE_DAY)),
@@ -73,12 +81,13 @@ def get_cfs2_data(  # noqa: C901
             offset = (first - begin).days
             for index, variable in enumerate(selected):
                 result[variables.index(variable), offset : offset + values.shape[1]] = values[index]
-        if kind == 'reanalysis':
+        corrected_group = corrected_groups[kind]
+        if corrected_group is not None:
             corrected = [var for var in variables if var in ('TMP_corr', 'PRATE_corr')]
             if corrected:
                 values = _read_point(
                     store,
-                    'reanalysis/correction',
+                    corrected_group,
                     first,
                     last,
                     coords,
@@ -90,6 +99,15 @@ def get_cfs2_data(  # noqa: C901
                         index
                     ]
     return daily_precipitation(result, variables, 'PRATE', 21600)
+
+
+def forecast_correction_current(store: Store, updated: str) -> bool:
+    """Whether the published forecast correction belongs to the ``updated`` issue."""
+    path = const.CFS2_FORECAST_CORRECTION
+    return (
+        group_exists(store, path)
+        and group_attrs(store, path).get(const.CFS2_KEY_FORECAST_UPDATED) == updated
+    )
 
 
 def get_cmip6_data(

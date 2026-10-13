@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
     from s3fs import S3FileSystem
+    from zarr import AsyncGroup
     from zarr.abc.store import Store
 
     from .models import DataQuery
@@ -247,14 +248,20 @@ class Cfs2Repository(WeatherRepository):
                 regions.append(
                     ReadRegion(selection, [variables.index(name) for name in selected], first, last)
                 )
-            if kind == 'reanalysis':
-                selected = [name for name in variables if name in ('TMP_corr', 'PRATE_corr')]
-                if selected:
-                    group = await reader.group('reanalysis/correction')
-                    selection = await reader.prepare(group, coords, selected)
-                    regions.append(
-                        ReadRegion(
-                            selection, [variables.index(name) for name in selected], first, last
-                        )
-                    )
+            selected = [name for name in variables if name in ('TMP_corr', 'PRATE_corr')]
+            if selected and (group := await self._correction(kind, str(updated))) is not None:
+                selection = await reader.prepare(group, coords, selected)
+                regions.append(
+                    ReadRegion(selection, [variables.index(name) for name in selected], first, last)
+                )
         return ReadPlan(variables, regions, precipitation_factor=21600)
+
+    async def _correction(self, kind: str, updated: str) -> AsyncGroup | None:
+        if kind == 'reanalysis':
+            return await self._reader.group('reanalysis/correction')
+        try:
+            group = await self._reader.group(const.CFS2_FORECAST_CORRECTION)
+        except FileNotFoundError:
+            return None
+        # A correction of an earlier forecast issue must not be served as current.
+        return group if group.attrs.get(const.CFS2_KEY_FORECAST_UPDATED) == updated else None

@@ -38,6 +38,9 @@ CFS2_REANALYSIS_FIRST_DATE = date(2011, 4, 1)
 CFS2_REANALYSIS_LAST_DATE_OFFSET = timedelta(days=3)
 
 CFS2_FORECAST_DIR = 'forecast'
+CFS2_FORECAST_CORRECTION = 'forecast/correction'
+# Issue date of the forecast a published forecast correction was computed from.
+CFS2_KEY_FORECAST_UPDATED = 'forecast_updated'
 CFS2_FORECAST_DAYS = timedelta(days=180)
 
 
