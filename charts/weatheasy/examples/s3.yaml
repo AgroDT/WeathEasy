@@ -1,0 +1,60 @@
+s3:
+  endpoint: https://s3.example.org
+envFrom:
+  - secretRef:
+      name: weatheasy-s3
+api:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+sources:
+  cfs2:
+    store: s3://weatheasy/cfs2.zarr
+    update:
+      enabled: true
+      schedule: "0 5 * * *"
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          memory: 8Gi
+      correction:
+        enabled: true
+        dem: s3://weatheasy/copdem.zarr
+        artifacts: s3://weatheasy/models/cfs2
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            memory: 8Gi
+  era5:
+    store: s3://weatheasy/era5.zarr
+    update:
+      enabled: true
+      schedule: "0 6 10 * *"
+      envFrom:
+        - secretRef:
+            name: weatheasy-cds
+      bbox: [56, 37, 55, 38]
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          memory: 8Gi
+      correction:
+        enabled: true
+        dem: s3://weatheasy/copdem.zarr
+        artifacts: s3://weatheasy/models/era5
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            memory: 8Gi

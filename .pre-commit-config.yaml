@@ -5,12 +5,19 @@ repos:
       - id: check-added-large-files
       - id: check-toml
       - id: check-yaml
+        exclude: ^charts/[^/]+/templates/
       - id: end-of-file-fixer
       - id: mixed-line-ending
         args: [--fix, lf]
       - id: trailing-whitespace
   - repo: local
     hooks:
+      - id: chart-generate
+        name: generate chart values and documentation
+        language: system
+        entry: uv run --frozen python scripts/generate_chart.py
+        files: ^(scripts/generate_chart\.py|charts/weatheasy/(values\.schema\.json|values\.yaml|README\.md))$
+        pass_filenames: false
       - id: uv-lock
         name: uv lock
         language: system
@@ -30,10 +37,10 @@ repos:
         entry: uv
         args: [run, --frozen, ruff, format, src]
         pass_filenames: false
-      - id: mypy
-        name: mypy
+      - id: ty
+        name: ty
         language: system
         entry: uv
-        args: [run, --frozen, mypy]
+        args: [run, --frozen, ty, check]
         files: ^src/
         types: [file, python]

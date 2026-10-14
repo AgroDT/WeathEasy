@@ -1,0 +1,1203 @@
+{
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Application image repository.",
+          "default": "ghcr.io/agrodt/weatheasy"
+        },
+        "tag": {
+          "type": "string",
+          "description": "Image tag; empty uses Chart.appVersion.",
+          "default": ""
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
+          "description": "Kubernetes image pull policy.",
+          "default": "IfNotPresent"
+        }
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Existing image pull Secret references.",
+      "default": []
+    },
+    "nameOverride": {
+      "type": "string",
+      "description": "Override the chart name used in resource names.",
+      "default": ""
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Override the complete resource name (truncated to 48 characters).",
+      "default": ""
+    },
+    "s3": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "S3-compatible endpoint; empty uses the SDK default.",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "downloadCache": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shared downloaded-file cache for source update jobs: local directory or s3:// URI.",
+      "default": "/var/lib/weatheasy/downloads"
+    },
+    "envFrom": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Existing Secret/ConfigMap references for all containers.",
+      "default": []
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Additional Kubernetes EnvVar entries for all containers.",
+      "default": []
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Create a ServiceAccount.",
+          "default": true
+        },
+        "name": {
+          "type": "string",
+          "description": "Existing or created account name; empty uses the release resource name.",
+          "default": ""
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Account annotations, including workload identity configuration.",
+          "default": {}
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean",
+          "description": "Mount the standard Kubernetes API token.",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "description": "Pod security settings.",
+      "default": {
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "runAsGroup": 1000,
+        "fsGroup": 1000
+      }
+    },
+    "securityContext": {
+      "type": "object",
+      "description": "Container security settings.",
+      "default": {
+        "allowPrivilegeEscalation": false,
+        "readOnlyRootFilesystem": true,
+        "capabilities": {
+          "drop": [
+            "ALL"
+          ]
+        },
+        "seccompProfile": {
+          "type": "RuntimeDefault"
+        }
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Node label constraints.",
+      "default": {}
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Kubernetes scheduling tolerations.",
+      "default": []
+    },
+    "affinity": {
+      "type": "object",
+      "description": "Kubernetes affinity settings.",
+      "default": {}
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Annotations on API and update Pods.",
+      "default": {}
+    },
+    "workVolume": {
+      "type": "object",
+      "properties": {
+        "sizeLimit": {
+          "type": "string",
+          "description": "Size limit of writable home/work directory emptyDir.",
+          "default": "10Gi"
+        },
+        "existingClaim": {
+          "type": "string",
+          "description": "Existing PVC mounted at /var/lib/weatheasy. Required to retain working downloads across Job Pods; empty uses emptyDir.",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "tmpVolume": {
+      "type": "object",
+      "properties": {
+        "sizeLimit": {
+          "type": "string",
+          "description": "Size limit of /tmp emptyDir.",
+          "default": "1Gi"
+        }
+      },
+      "additionalProperties": false
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create API Deployment and Service.",
+          "default": true
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of API replicas.",
+          "default": 1
+        },
+        "precision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Decimal precision of API results.",
+          "default": 6
+        },
+        "enableCors": {
+          "type": "boolean",
+          "description": "Enable application CORS.",
+          "default": false
+        },
+        "resources": {
+          "type": "object",
+          "description": "API container resource requests and limits.",
+          "default": {}
+        },
+        "startupProbe": {
+          "$ref": "#/definitions/startupProbe"
+        },
+        "readinessProbe": {
+          "$ref": "#/definitions/readinessProbe"
+        },
+        "livenessProbe": {
+          "$ref": "#/definitions/livenessProbe"
+        }
+      },
+      "additionalProperties": false
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
+          "description": "ClusterIP, NodePort or LoadBalancer.",
+          "default": "ClusterIP"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Service annotations, including cloud load balancer settings.",
+          "default": {}
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Service port; containers listen on port 8000.",
+          "default": 8000
+        }
+      },
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "properties": {
+        "cfs2": {
+          "type": "object",
+          "properties": {
+            "store": {
+              "type": "string",
+              "pattern": "^$|^s3://[^/]+/.+",
+              "description": "Independent CFS2 Zarr store URI; empty disables this source.",
+              "default": ""
+            },
+            "update": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Create the source CronJob.",
+                  "default": false
+                },
+                "schedule": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Cron schedule.",
+                  "default": "0 5 * * *"
+                },
+                "timeZone": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Schedule time zone.",
+                  "default": "Etc/UTC"
+                },
+                "suspend": {
+                  "type": "boolean",
+                  "description": "Pause scheduled runs; does not stop active Jobs.",
+                  "default": false
+                },
+                "backoffLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Job retry limit.",
+                  "default": 2
+                },
+                "startingDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "Maximum lateness for starting a scheduled run; null omits the deadline.",
+                  "default": null
+                },
+                "activeDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "description": "Maximum total Job duration, including retries; null omits the deadline.",
+                  "default": null
+                },
+                "successfulJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of successful Jobs to retain.",
+                  "default": 3
+                },
+                "failedJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of failed Jobs to retain.",
+                  "default": 1
+                },
+                "resources": {
+                  "type": "object",
+                  "description": "Download container resource requests and limits.",
+                  "default": {}
+                },
+                "envFrom": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific Secret/ConfigMap references, appended to global entries.",
+                  "default": []
+                },
+                "extraEnv": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific EnvVar entries, appended to global entries.",
+                  "default": []
+                },
+                "correction": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Apply correction after successful download.",
+                      "default": false
+                    },
+                    "dem": {
+                      "type": "string",
+                      "description": "Published DEM Zarr URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "artifacts": {
+                      "type": "string",
+                      "description": "Published model artifact directory URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "resources": {
+                      "type": "object",
+                      "description": "Correction container resource requests and limits.",
+                      "default": {}
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "allOf": [
+                      {
+                        "properties": {
+                          "correction": {
+                            "properties": {
+                              "enabled": {
+                                "const": true
+                              }
+                            },
+                            "required": [
+                              "enabled"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "correction"
+                        ]
+                      },
+                      {
+                        "properties": {
+                          "enabled": {
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "enabled"
+                        ]
+                      }
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "correction": {
+                        "allOf": [
+                          {
+                            "properties": {
+                              "dem": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "dem"
+                            ]
+                          },
+                          {
+                            "properties": {
+                              "artifacts": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "artifacts"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "update": {
+                    "properties": {
+                      "enabled": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "enabled"
+                    ]
+                  }
+                },
+                "required": [
+                  "update"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "store": {
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "store"
+                ]
+              }
+            }
+          ]
+        },
+        "era5": {
+          "type": "object",
+          "properties": {
+            "store": {
+              "type": "string",
+              "pattern": "^$|^s3://[^/]+/.+",
+              "description": "Independent ERA5 Zarr store URI; empty disables this source.",
+              "default": ""
+            },
+            "update": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Create the source CronJob.",
+                  "default": false
+                },
+                "schedule": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Cron schedule.",
+                  "default": "0 6 10 * *"
+                },
+                "timeZone": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Schedule time zone.",
+                  "default": "Etc/UTC"
+                },
+                "suspend": {
+                  "type": "boolean",
+                  "description": "Pause scheduled runs; does not stop active Jobs.",
+                  "default": false
+                },
+                "backoffLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Job retry limit.",
+                  "default": 2
+                },
+                "startingDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "Maximum lateness for starting a scheduled run; null omits the deadline.",
+                  "default": null
+                },
+                "activeDeadlineSeconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "description": "Maximum total Job duration, including retries; null omits the deadline.",
+                  "default": null
+                },
+                "successfulJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of successful Jobs to retain.",
+                  "default": 3
+                },
+                "failedJobsHistoryLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Number of failed Jobs to retain.",
+                  "default": 1
+                },
+                "resources": {
+                  "type": "object",
+                  "description": "Download container resource requests and limits.",
+                  "default": {}
+                },
+                "envFrom": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific Secret/ConfigMap references, appended to global entries.",
+                  "default": []
+                },
+                "extraEnv": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Source-specific EnvVar entries, appended to global entries.",
+                  "default": [
+                    {
+                      "name": "CDSAPI_URL",
+                      "value": "https://cds.climate.copernicus.eu/api"
+                    }
+                  ]
+                },
+                "bbox": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "oneOf": [
+                    {
+                      "maxItems": 0
+                    },
+                    {
+                      "minItems": 4,
+                      "maxItems": 4
+                    }
+                  ],
+                  "description": "Optional ERA5 bounding box [north, west, south, east].",
+                  "default": []
+                },
+                "correction": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Apply correction after successful download.",
+                      "default": false
+                    },
+                    "dem": {
+                      "type": "string",
+                      "description": "Published DEM Zarr URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "artifacts": {
+                      "type": "string",
+                      "description": "Published model artifact directory URI; required when this update and correction are enabled.",
+                      "default": ""
+                    },
+                    "resources": {
+                      "type": "object",
+                      "description": "Correction container resource requests and limits.",
+                      "default": {}
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "allOf": [
+                      {
+                        "properties": {
+                          "correction": {
+                            "properties": {
+                              "enabled": {
+                                "const": true
+                              }
+                            },
+                            "required": [
+                              "enabled"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "correction"
+                        ]
+                      },
+                      {
+                        "properties": {
+                          "enabled": {
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "enabled"
+                        ]
+                      }
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "correction": {
+                        "allOf": [
+                          {
+                            "properties": {
+                              "dem": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "dem"
+                            ]
+                          },
+                          {
+                            "properties": {
+                              "artifacts": {
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "artifacts"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "update": {
+                    "properties": {
+                      "enabled": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "enabled"
+                    ]
+                  }
+                },
+                "required": [
+                  "update"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "store": {
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "store"
+                ]
+              }
+            }
+          ]
+        },
+        "cmip6": {
+          "type": "object",
+          "properties": {
+            "store": {
+              "type": "string",
+              "pattern": "^$|^s3://[^/]+/.+",
+              "description": "Independent CMIP6 Zarr store URI; empty disables this source.",
+              "default": ""
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create an Ingress; requires API.",
+          "default": false
+        },
+        "className": {
+          "type": "string",
+          "description": "Ingress controller class.",
+          "default": ""
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Ingress controller annotations.",
+          "default": {}
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Host/path rules; each path requires path and pathType.",
+          "default": [
+            {
+              "host": "weatheasy.example.org",
+              "paths": [
+                {
+                  "path": "/",
+                  "pathType": "Prefix"
+                }
+              ]
+            }
+          ]
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "TLS host lists and existing Secret names.",
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "httpRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create an HTTPRoute; requires API and installed Gateway API.",
+          "default": false
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "HTTPRoute annotations.",
+          "default": {}
+        },
+        "parentRefs": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Existing Gateway references; required when enabled.",
+          "default": []
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Hostnames accepted by the route; empty leaves matching to the Gateway.",
+          "default": []
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Gateway API match objects; empty matches all requests.",
+          "default": [
+            {
+              "path": {
+                "type": "PathPrefix",
+                "value": "/"
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "global": {
+      "type": "object",
+      "description": "Shared Helm values; optional and unset by default."
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WeathEasy chart values",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "api": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "api"
+        ]
+      },
+      "then": {
+        "properties": {
+          "sources": {
+            "anyOf": [
+              {
+                "properties": {
+                  "cfs2": {
+                    "properties": {
+                      "store": {
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "store"
+                    ]
+                  }
+                },
+                "required": [
+                  "cfs2"
+                ]
+              },
+              {
+                "properties": {
+                  "era5": {
+                    "properties": {
+                      "store": {
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "store"
+                    ]
+                  }
+                },
+                "required": [
+                  "era5"
+                ]
+              },
+              {
+                "properties": {
+                  "cmip6": {
+                    "properties": {
+                      "store": {
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "store"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmip6"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "sources"
+        ]
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "properties": {
+              "ingress": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            },
+            "required": [
+              "ingress"
+            ]
+          },
+          {
+            "properties": {
+              "httpRoute": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            },
+            "required": [
+              "httpRoute"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "api": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "api"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "httpRoute": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "httpRoute"
+        ]
+      },
+      "then": {
+        "properties": {
+          "httpRoute": {
+            "properties": {
+              "parentRefs": {
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ingress": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "ingress"
+        ]
+      },
+      "then": {
+        "properties": {
+          "ingress": {
+            "properties": {
+              "hosts": {
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "host",
+                    "paths"
+                  ],
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "paths": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "path",
+                          "pathType"
+                        ],
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "pattern": "^/"
+                          },
+                          "pathType": {
+                            "enum": [
+                              "Exact",
+                              "Prefix",
+                              "ImplementationSpecific"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "startupProbe": {
+      "type": "object",
+      "properties": {
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "successThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "const": 1
+        }
+      },
+      "additionalProperties": false,
+      "description": "Startup probe timings and thresholds; endpoint is /startupz.",
+      "default": {
+        "initialDelaySeconds": 0,
+        "periodSeconds": 5,
+        "timeoutSeconds": 1,
+        "failureThreshold": 30,
+        "successThreshold": 1
+      }
+    },
+    "readinessProbe": {
+      "type": "object",
+      "properties": {
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "successThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "description": "Readiness probe timings and thresholds; endpoint is /readyz.",
+      "default": {
+        "initialDelaySeconds": 0,
+        "periodSeconds": 10,
+        "timeoutSeconds": 1,
+        "failureThreshold": 3,
+        "successThreshold": 1
+      }
+    },
+    "livenessProbe": {
+      "type": "object",
+      "properties": {
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "successThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "const": 1
+        }
+      },
+      "additionalProperties": false,
+      "description": "Liveness probe timings and thresholds; endpoint is /livez.",
+      "default": {
+        "initialDelaySeconds": 0,
+        "periodSeconds": 10,
+        "timeoutSeconds": 1,
+        "failureThreshold": 3,
+        "successThreshold": 1
+      }
+    }
+  }
+}

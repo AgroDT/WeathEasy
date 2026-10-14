@@ -1,35 +1,43 @@
-from functools import cache, cached_property
+from functools import cached_property
+from typing import Annotated, ClassVar
 
-import zarr
-from pydantic import PositiveInt, computed_field
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from weatheasy.util import FormatFloat, float_formatter_factory, get_storage
+from weatheasy.util import FormatFloat, float_formatter_factory
+
+
+DEFAULT_STORAGE_READ_TIMEOUT = 60
+DEFAULT_STORAGE_OPERATION_TIMEOUT = 10
+
+
+class SourceSettings(BaseModel):
+    store: Annotated[str, Field(min_length=1)]
+
+
+class SourcesSettings(BaseModel):
+    model_config: ClassVar[ConfigDict] = {'extra': 'forbid'}
+
+    cfs2: SourceSettings | None = None
+    era5: SourceSettings | None = None
+    cmip6: SourceSettings | None = None
 
 
 class Settings(BaseSettings):
-    model_config = {
+    model_config: ClassVar[SettingsConfigDict] = {
         'env_prefix': 'WEATHEASY__',
         'env_nested_delimiter': '__',
         'env_file': ('.env', '.local.env'),
         'extra': 'ignore',
     }
 
-    data_root: str
+    sources: Annotated[SourcesSettings, Field(default_factory=SourcesSettings)]
+    storage_read_timeout: PositiveInt = DEFAULT_STORAGE_READ_TIMEOUT
+    storage_operation_timeout: PositiveInt = DEFAULT_STORAGE_OPERATION_TIMEOUT
     precision: PositiveInt = 6
     enable_cors: bool = False
 
-    @computed_field  # type: ignore[prop-decorator]
-    @cached_property
-    def storage(self) -> zarr.Group:
-        return get_storage(self.data_root)
-
-    @computed_field  # type: ignore[prop-decorator]
+    @computed_field
     @cached_property
     def format_float(self) -> FormatFloat:
         return float_formatter_factory('null', self.precision)
-
-
-@cache
-def get_config() -> Settings:
-    return Settings()

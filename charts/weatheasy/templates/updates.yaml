@@ -1,0 +1,106 @@
+{{- define "weatheasy.updateContainer" -}}
+{{- $root := .root -}}
+{{- $job := .job -}}
+- name: {{ if .correction }}correction{{ else }}download{{ end }}
+  image: {{ include "weatheasy.image" $root }}
+  imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+  command: [weatheasy]
+  args:
+    {{- if .correction }}
+    - correction
+    - apply
+    {{- else }}
+    - download
+    {{- end }}
+    - {{ .source | quote }}
+    - --store
+    - {{ required (printf "sources.%s.store is required" .source) (index $root.Values.sources .source).store | quote }}
+    {{- if .correction }}
+    - --dem
+    - {{ required (printf "sources.%s.update.correction.dem is required" .source) $job.correction.dem | quote }}
+    - --artifacts
+    - {{ required (printf "sources.%s.update.correction.artifacts is required" .source) $job.correction.artifacts | quote }}
+    {{- else }}
+    - --download-cache
+    - {{ $root.Values.downloadCache | quote }}
+    - --work-dir
+    - /var/lib/weatheasy
+    {{- if and (eq .source "era5") $job.bbox }}
+    - --bbox
+    {{- range $job.bbox }}
+    - {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+  workingDir: /var/lib/weatheasy
+  securityContext:
+    {{- toYaml $root.Values.securityContext | nindent 4 }}
+  env:
+    {{- include "weatheasy.env" $root | nindent 4 }}
+    {{- with $job.extraEnv }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with concat $root.Values.envFrom $job.envFrom }}
+  envFrom:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  resources:
+    {{- if .correction }}
+    {{- toYaml $job.correction.resources | nindent 4 }}
+    {{- else }}
+    {{- toYaml $job.resources | nindent 4 }}
+    {{- end }}
+  volumeMounts:
+    {{- include "weatheasy.volumeMounts" $root | nindent 4 }}
+{{- end -}}
+{{- range $source, $settings := .Values.sources }}
+{{- with $settings.update }}
+{{- $job := . }}
+{{- if $job.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "weatheasy.fullname" $ }}-{{ $source }}
+  labels:
+    {{- include "weatheasy.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ printf "update-%s" $source }}
+spec:
+  schedule: {{ $job.schedule | quote }}
+  timeZone: {{ $job.timeZone | quote }}
+  suspend: {{ $job.suspend }}
+  concurrencyPolicy: Forbid
+  {{- if ne $job.startingDeadlineSeconds nil }}
+  startingDeadlineSeconds: {{ $job.startingDeadlineSeconds }}
+  {{- end }}
+  successfulJobsHistoryLimit: {{ $job.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $job.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $job.backoffLimit }}
+      {{- if ne $job.activeDeadlineSeconds nil }}
+      activeDeadlineSeconds: {{ $job.activeDeadlineSeconds }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "weatheasy.selectorLabels" $ | nindent 12 }}
+            app.kubernetes.io/component: {{ printf "update-%s" $source }}
+          {{- with $.Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "weatheasy.podSettings" $ | nindent 10 }}
+          restartPolicy: Never
+          {{- if $job.correction.enabled }}
+          initContainers:
+            {{- include "weatheasy.updateContainer" (dict "root" $ "job" $job "source" $source "correction" false) | nindent 12 }}
+          {{- end }}
+          containers:
+            {{- include "weatheasy.updateContainer" (dict "root" $ "job" $job "source" $source "correction" $job.correction.enabled) | nindent 12 }}
+          volumes:
+            {{- include "weatheasy.volumes" $ | nindent 12 }}
+{{- end }}
+{{- end }}
+{{- end }}

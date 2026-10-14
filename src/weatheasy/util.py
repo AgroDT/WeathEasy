@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import zarr
 
-from weatheasy.error import S3ImportError
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-try:
-    from weatheasy._version import version as _version
-except ImportError:
-    _version = 'unknown version'
+    from fsspec.asyn import AsyncFileSystem
 
 
 type FormatFloat = Callable[[np.floating], str]
@@ -24,7 +21,7 @@ def utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
 
-def get_storage(root: str) -> zarr.Group:
+def get_storage(root: str | Path, *, filesystem: AsyncFileSystem | None = None) -> zarr.Group:
     """Initialize zarr group.
 
     To work with S3 pass `root` in format `s3://<bucket>[/path]`.
@@ -35,33 +32,15 @@ def get_storage(root: str) -> zarr.Group:
     - AWS_SECRET_ACCESS_KEY
     - AWS_ENDPOINT_URL_S3
     - etc.
+
+    Supply ``filesystem`` to share one asynchronous S3 filesystem between
+    this weather store and other Zarr stores in the same job.
     """
+    from weatheasy.storage import get_store  # noqa: PLC0415
 
-    if root.startswith('s3://'):
-        try:
-            import s3fs
-        except ImportError as exc:
-            raise S3ImportError from exc
-        else:
-            store = s3fs.S3Map(root[5:], s3fs.S3FileSystem())
-    else:
-        store = root
-
-    return zarr.group(store)
-
-
-def init_parser(module: str = __package__) -> ArgumentParser:
-    parser = ArgumentParser(module, formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-v', '--version', action='version', version=_version)
-    parser.add_argument(
-        '-d',
-        '--data',
-        default=Path.cwd().joinpath('weatheasy', 'zarr').as_posix(),
-        metavar='STORE',
-        help='Zarr store for downloaded data',
+    return zarr.open_group(
+        get_store(root, filesystem=filesystem), mode='a', zarr_format=3, use_consolidated=False
     )
-
-    return parser
 
 
 def float_formatter_factory(nan: str, precision: int) -> FormatFloat:
