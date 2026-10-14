@@ -7,6 +7,7 @@ Renaming a field never converts it. Preparation performs conversions explicitly.
 
 from __future__ import annotations
 
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 import xarray as xr
@@ -29,12 +30,14 @@ def read_grib(
     variable: str | None = None,
     name: str | None = None,
     filter_by_keys: dict | None = None,
+    indexpath: str = '',
 ) -> xr.Dataset:
     """Read one field/valid time without flattening Gaussian latitude.
 
     Install weatheasy[prepare]. Select heterogeneous files with filter_by_keys
     (shortName, typeOfLevel, level, stepType as needed), never a numeric band ID.
-    No .idx sidecar is written. Multiple valid times/levels require explicit
+    No .idx sidecar is written by default. A loader may supply a temporary
+    indexpath to reuse indexes across fields. Multiple valid times/levels require explicit
     selection/aggregation in a source loader, not silent squeezing here.
     """
     # The optional decoder must never be imported by prepared-data readers.
@@ -45,7 +48,7 @@ def read_grib(
         raise ImportError(msg) from err
 
     backend = {
-        'indexpath': '',
+        'indexpath': indexpath,
         'errors': 'raise',
         'filter_by_keys': filter_by_keys or {},
         'read_keys': ['edition', 'radius'],
@@ -135,6 +138,13 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
     with missing statistical-processing metadata; no six-hour interval is inferred.
     Daily reduction is performed by the loader using the existing statistics.
     """
+    # cfgrib hashes the indexed keys, sharing an index between compatible filters.
+    # Keep each file's indexes local to this read, outside the raw-file cache.
+    with TemporaryDirectory(prefix='weatheasy-cfs2-grib-') as directory:
+        return _read_cfs2(path, kind=kind, indexpath=f'{directory}/{{short_hash}}.idx')
+
+
+def _read_cfs2(path: str | Path, *, kind: str, indexpath: str) -> xr.Dataset:
     bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
     fields = []
     source_grib = {}
@@ -168,6 +178,7 @@ def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
             filter_by_keys=filters,
             crs=const.CFS2_CRS,
             units=const.CFS2_SOURCE_UNITS[name],
+            indexpath=indexpath,
         )
         source_grib.update(field.attrs.pop('source_grib'))
         units = field[name].attrs['units']

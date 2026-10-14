@@ -189,6 +189,11 @@ def _download_cfs2_reanalysis(
             date_ += const.ONE_DAY
         for kind, path in groups.items():
             last = previous[kind]
+            _LOG.info(
+                'Processing %s: %s downloaded days; staging before Zarr write',
+                path,
+                len(paths_by_day),
+            )
             write_batches(
                 store,
                 path,
@@ -199,11 +204,14 @@ def _download_cfs2_reanalysis(
                 ),
             )
             previous[kind] = last_date(store, path)
+            _LOG.info('Saved %s through %s', path, previous[kind])
         for _, paths in paths_by_day:
             download_dir.release(paths)
 
 
 def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset | None = None):
+    started = time.perf_counter()
+    _LOG.info('Processing CFS2 %s %s: %s GRIB files', kind, date_, len(paths))
     fields = [read_cfs2(path, kind=kind) for path in paths]
     if not fields:
         if template is None:
@@ -247,6 +255,7 @@ def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset 
     }
     if source_grib:
         result.attrs['source_grib'] = source_grib
+    _LOG.info('Processed CFS2 %s %s in %.2f s', kind, date_, time.perf_counter() - started)
     return result
 
 
@@ -286,12 +295,14 @@ def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Pat
         if template is None:
             msg = f'No forecast files for {kind}; forecast remains unavailable'
             raise ValueError(msg)
+        _LOG.info('Processing %s: %s days; staging before Zarr write', group, len(paths_by_day))
         write_batches(
             store,
             group,
             (_daily_cfs2(paths, kind, date_, template) for date_, paths in paths_by_day),
             time_chunk=64,
         )
+        _LOG.info('Saved %s: %s days', group, len(paths_by_day))
 
 
 class _Cfs2ReanalysisDownloader:

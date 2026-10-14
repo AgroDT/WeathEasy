@@ -165,3 +165,58 @@ def test_pevpr_selects_instant_and_converts_units(tmp_path: Path, monkeypatch: p
     result = read_cfs2(path, kind='flx')
     np.testing.assert_allclose(result.PEVPR, 3.526530612, rtol=1e-6)
     assert result.PEVPR.attrs['units'] == 'mm/day'
+
+
+def test_cfs2_shared_indexes_preserve_fields_layers_and_file_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from weatheasy.sources import read_cfs2
+
+    ec = pytest.importorskip('eccodes')
+    names = ('TMP', 'TMIN', 'SOILW_0-0.1m', 'SOILW_0.1-0.4m')
+    monkeypatch.setattr(
+        const, 'CFS2_FLX_BANDS', {name: const.CFS2_FLX_BANDS[name] for name in names}
+    )
+    for index in range(2):
+        path = tmp_path / f'fields-{index}.grb2'
+        grib_fixture(path)
+        with path.open('rb') as stream:
+            template = ec.codes_grib_new_from_file(stream)
+        try:
+            with path.open('wb') as stream:
+                for discipline, category, number, top, bottom, value in (
+                    (0, 0, 0, None, None, 290 + index),
+                    (0, 0, 5, None, None, 270 + index),
+                    (2, 0, 192, 0, 10, 0.1 + index),
+                    (2, 0, 192, 10, 40, 0.3 + index),
+                ):
+                    handle = ec.codes_clone(template)
+                    try:
+                        updates = {
+                            'centre': 'kwbc',
+                            'discipline': discipline,
+                            'parameterCategory': category,
+                            'parameterNumber': number,
+                        }
+                        if top is not None:
+                            updates.update(
+                                typeOfLevel='depthBelowLandLayer',
+                                scaleFactorOfFirstFixedSurface=2,
+                                scaledValueOfFirstFixedSurface=top,
+                                scaleFactorOfSecondFixedSurface=2,
+                                scaledValueOfSecondFixedSurface=bottom,
+                            )
+                        for key, val in updates.items():
+                            ec.codes_set(handle, key, val)
+                        ec.codes_set_values(handle, np.full(12, value))
+                        ec.codes_write(handle, stream)
+                    finally:
+                        ec.codes_release(handle)
+        finally:
+            ec.codes_release(template)
+        result = read_cfs2(path, kind='flx')
+        for name, expected in zip(
+            names, (16.85 + index, -3.15 + index, 0.1 + index, 0.3 + index), strict=True
+        ):
+            np.testing.assert_allclose(result[name], expected, atol=1e-4)
+        assert not list(tmp_path.glob('*.idx'))
