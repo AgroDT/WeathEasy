@@ -141,7 +141,10 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         sub.add_argument(
             '--work-dir',
             type=Path,
-            help='local directory for remote cache files; unset uses the platform state directory',
+            help=(
+                'local directory for remote cache files and CFS2 weather blocks; '
+                'unset uses the platform state directory'
+            ),
         )
         sub.add_argument(
             '--work-max-age-days',

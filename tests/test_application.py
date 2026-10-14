@@ -11,7 +11,7 @@ from zarr.abc.store import Store
 from weatheasy import const, download
 from weatheasy.query import Coords, get_cfs2_data, get_cmip6_data
 from weatheasy.raw_cache import DownloadCache
-from weatheasy.storage import get_store
+from weatheasy.storage import get_store, open_dataset
 from weatheasy.util import get_storage
 
 
@@ -175,8 +175,8 @@ def test_cfs2_public_download_extrema_missing_and_resume(
 
     monkeypatch.setattr(download, '_download_cfs2_forecast', forecast)
     root = get_storage(str(tmp_path / 'data'))
-    download.download_cfs2_data(get_store(tmp_path / 'data'))
-    download.download_cfs2_data(root.store)
+    download.download_cfs2_data(get_store(tmp_path / 'data'), work_dir=tmp_path / 'work')
+    download.download_cfs2_data(root.store, work_dir=tmp_path / 'work')
     assert calls == [date(2026, 9, 18)]
     result = get_cfs2_data(
         store=root.store,
@@ -221,19 +221,27 @@ def test_cfs2_public_download_extrema_missing_and_resume(
         expected,
         atol=1e-4,
     )
-    check_forecast_replacement(root, monkeypatch, missing_reanalysis)
+    check_forecast_replacement(root, monkeypatch, missing_reanalysis, tmp_path / 'work')
 
 
 def check_forecast_replacement(
     root: zarr.Group,
     monkeypatch: pytest.MonkeyPatch,
     missing_reanalysis: bool,  # noqa: FBT001
+    work_dir: Path,
 ):
     # A sentinel verifies deletion of the previous forecast before any new write.
     root['forecast'].attrs['old_forecast'] = True
-    previous_reanalysis_attrs = dict(root['reanalysis/flx'].attrs)
-    original_write = download.write_batches
+    previous_reanalysis = {}
+    if not missing_reanalysis:
+        for kind in ('flx', 'pgb'):
+            with open_dataset(root.store, f'reanalysis/{kind}') as dataset:
+                previous_reanalysis[kind] = dataset.load()
+    original_write = download.write_blocks
     monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 9, 23, tzinfo=UTC))
+    # Exercise forecast replacement without appending to the fixture's partial
+    # reanalysis chunk; CFS2 now permits appends only at full chunk boundaries.
+    monkeypatch.setattr(download._Cfs2ReanalysisDownloader, '__call__', lambda _self, _day: None)
 
     def fail_second_grid(
         store: Store,
@@ -250,9 +258,9 @@ def check_forecast_replacement(
         return original_write(store, group, datasets, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(download, 'write_batches', fail_second_grid)
+        patch.setattr(download, 'write_blocks', fail_second_grid)
         with pytest.raises(OSError, match='second-grid'):
-            download.download_cfs2_data(root.store)
+            download.download_cfs2_data(root.store, work_dir=work_dir)
         assert const.CFS2_KEY_UPDATED not in root[''].attrs
         from weatheasy.error import CFS2Error
 
@@ -264,14 +272,15 @@ def check_forecast_replacement(
                 coords=Coords(55, 0),
                 variables=['TMP'],
             )
-        # Reanalysis data is appended independently, never deleted with forecast.
+        # Forecast replacement preserves the committed reanalysis.
         assert 'reanalysis/flx' in root
-        if not missing_reanalysis:
-            assert (
-                root['reanalysis/flx'].attrs['committed_length']
-                >= previous_reanalysis_attrs['committed_length']  # ty: ignore[unsupported-operator]
-            )
-    download.download_cfs2_data(root.store)
+        for kind, before in previous_reanalysis.items():
+            with open_dataset(root.store, f'reanalysis/{kind}') as after:
+                xr.testing.assert_identical(after, before)
+    download.download_cfs2_data(root.store, work_dir=work_dir)
+    for kind, before in previous_reanalysis.items():
+        with open_dataset(root.store, f'reanalysis/{kind}') as after:
+            xr.testing.assert_identical(after, before)
     assert root[''].attrs['updated'] == '2026-09-23'
     assert set(root.get_group('forecast').group_keys()) == {'flx', 'pgb'}
     # Direct consumers use a permanent group path; no pointer lookup is needed.

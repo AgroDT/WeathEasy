@@ -174,6 +174,9 @@ Use `--work-dir` to choose this directory. Defaults are
 on Linux, `%LOCALAPPDATA%\weatheasy\downloads` (otherwise
 `~\AppData\Local\weatheasy\downloads`) on Windows, and
 `~/Library/Application Support/weatheasy/downloads` on macOS.
+CFS2 also stages its 128-day weather blocks in this working directory, including
+when the download cache is local. Each temporary block is removed after writing
+or on failure. Choose a directory on a disk with enough space for the uncompressed block.
 Before each run, the loader checks which files are still needed from the committed
 results and current request parameters. Only unneeded files older than
 `--work-max-age-days` (default: 7) are removed; needed files are retained regardless
@@ -352,7 +355,7 @@ ERA5-Land and CFS2 GRIB preparation write bounded time blocks. Dask is not requi
 Weather chunks use `(time, latitude, longitude)`: `(128, 32, 32)` for ERA5,
 CFS2 reanalysis and corrections, and CMIP6; CFS2 forecasts use `(64, 32, 32)`.
 Spatial chunks are capped by the grid dimensions. Original source grids are retained.
-Before appending into a partly filled time chunk, existing chunk objects are
+For the general weather writer, before appending into a partly filled time chunk, existing chunk objects are
 backed up inside the group. Retry restores their committed contents (including
 absent all-NaN chunks) before discarding the uncommitted tail. Backups are retired
 only after publishing the completed append. Existing stores keep their chunk
@@ -360,6 +363,9 @@ layout; this change does not repack stored data.
 Writes stage the transaction in temporary local binary files and copy one
 aligned destination chunk at a time. This requires temporary disk space for the
 transaction's uncompressed fields; it avoids holding the entire block in RAM.
+CFS2 stages at most 128 days at a time in `--work-dir`, maps one field at a time,
+and copies spatial tiles into Zarr before processing the next block. It appends
+only at complete time-chunk boundaries, without partial-chunk backup or recovery.
 Correction reads source time chunks in spatial tiles into temporary memory-mapped
 files, runs the existing daily models, and writes the resulting time block.
 Temporary disk holds both raw and corrected fields for the current source block.

@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import date
+from itertools import chain, islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, cast
@@ -39,6 +41,7 @@ from weatheasy.error import S3ImportError
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterable
+    from mmap import mmap
     from os import PathLike
 
     from fsspec.asyn import AsyncFileSystem
@@ -449,6 +452,78 @@ def write_batches(  # noqa: C901, PLR0912, PLR0915
     target.attrs.put(final_attrs)
     zarr.consolidate_metadata(store)
     sync(store.delete_dir(f'{group}/.append-backup/'))
+
+
+def write_blocks(
+    store: Store,
+    group: str,
+    datasets: Iterable[xr.Dataset],
+    *,
+    work_dir: str | Path,
+    time_chunk: int = 128,
+) -> None:
+    """Stage up to 128 daily fields in the working directory, then write full chunks."""
+    log = logging.getLogger(__name__)
+    directory = Path(work_dir).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
+    target = root.require_group(group)
+    count = int(cast('int', target.attrs.get('committed_length', 0)))
+    days = iter(datasets)
+    while (first := next(days, None)) is not None:
+        if count % time_chunk:
+            msg = 'Cannot append to a partial time chunk'
+            raise StorageError(msg)
+        attrs = dict(
+            first.attrs,
+            grid_signature=_signature(first),
+            committed_length=count,
+            write_state='writing',
+        )
+        with TemporaryDirectory(prefix='weatheasy-weather-', dir=directory) as temporary:
+            template = first.isel(time=slice(0, 0)).copy()
+            template.attrs = attrs
+            filenames = {
+                name: Path(temporary) / f'{index}.raw'
+                for index, name in enumerate(['time', *(str(name) for name in first.data_vars)])
+            }
+            log.info('Staging %s: up to 128 days in %s', group, temporary)
+            written = 0
+            for day in chain((first,), islice(days, 127)):
+                for name, filename in filenames.items():
+                    values = (
+                        day.time.to_numpy().astype('datetime64[s]').astype(np.int64)
+                        if name == 'time'
+                        else day[name].to_numpy()
+                    )
+                    with filename.open('ab') as stream:
+                        values.tofile(stream)
+                written += day.sizes['time']
+            del first, day, values
+            log.info('Writing %s: %s days', group, written)
+            root.update_attributes(dict(root.attrs))
+            target.attrs.update(attrs)
+            if not count:
+                _write_time_batch(store, group, template, tile_size=32, time_chunk=time_chunk)
+                target = root.get_group(group)
+            for name, filename in filenames.items():
+                staged = np.memmap(
+                    filename,
+                    mode='r',
+                    dtype=np.int64 if name == 'time' else template[name].dtype,
+                    shape=(written,)
+                    if name == 'time'
+                    else (written, template.sizes['latitude'], template.sizes['longitude']),
+                )
+                try:
+                    _copy_staged(target, {name: staged}, count, written)
+                finally:
+                    cast('mmap', staged.base).close()
+                    del staged
+        count += written
+        target.attrs.update(dict(attrs, committed_length=count, write_state='complete'))
+        zarr.consolidate_metadata(store)
+        log.info('Saved %s: %s committed days', group, count)
 
 
 def _copy_staged(

@@ -23,6 +23,7 @@ from weatheasy.storage import (
     set_group_attrs,
     write_batch,
     write_batches,
+    write_blocks,
 )
 from weatheasy.util import get_storage
 
@@ -35,6 +36,29 @@ if TYPE_CHECKING:
 @pytest.fixture(name='regional_field')
 def create_regional_field():
     return field(longitude=(170, 175, -180, -175))
+
+
+@pytest.fixture(name='tiled_field')
+def create_tiled_field():
+    values = np.arange(3 * 33 * 34, dtype=np.float32).reshape(3, 33, 34)
+    precipitation = values + 10000
+    values[1, 32, 33] = np.nan
+    return prepare_dataset(
+        xr.Dataset(
+            {
+                'TMP': (('time', 'latitude', 'longitude'), values, {'units': 'K'}),
+                'PRATE': (('time', 'latitude', 'longitude'), precipitation, {'units': 'mm/day'}),
+            },
+            coords={
+                'time': np.array(
+                    ['2026-01-01', '2026-01-02', '2026-01-03'], dtype='datetime64[ns]'
+                ),
+                'latitude': np.arange(33),
+                'longitude': np.arange(34),
+            },
+        ),
+        crs='EPSG:4326',
+    )
 
 
 def field(
@@ -299,6 +323,120 @@ def test_streamed_month_is_published_only_after_iterator_finishes_and_retry_reco
         np.testing.assert_array_equal(result.TMP[0], before.TMP[0])
         np.testing.assert_array_equal(result.TMP[1], field().TMP[0])
         np.testing.assert_array_equal(result.TMP[2], field().TMP[0])
+
+
+@pytest.mark.parametrize('time_chunk', [64, 128])
+def test_staged_blocks_commit_before_reading_next_day(tmp_path: Path, time_chunk: int):
+    store = MemoryStore()
+
+    def days():
+        for index in range(257):
+            if index and index % 128 == 0:
+                with open_dataset(store, 'grid') as saved:
+                    assert saved.sizes['time'] == index
+                    np.testing.assert_array_equal(saved.TMP[:, 0, 0], np.arange(index))
+            dataset = field(day=str(np.datetime64('2026-01-01') + np.timedelta64(index, 'D')))
+            dataset.TMP.data[:] = index
+            yield dataset
+
+    write_blocks(store, 'grid', days(), work_dir=tmp_path, time_chunk=time_chunk)
+    with open_dataset(store, 'grid') as saved:
+        assert saved.sizes['time'] == 257
+        np.testing.assert_array_equal(saved.TMP[:, 0, 0], np.arange(257))
+        np.testing.assert_array_equal(
+            saved.time, np.datetime64('2026-01-01') + np.arange(257).astype('timedelta64[D]')
+        )
+
+
+def test_staged_blocks_preserve_fields_and_values_across_spatial_tiles(
+    tmp_path: Path, tiled_field: xr.Dataset
+):
+    store = MemoryStore()
+    write_blocks(
+        store,
+        'grid',
+        (tiled_field.isel(time=slice(day, day + 1)) for day in range(3)),
+        work_dir=tmp_path,
+    )
+    with open_dataset(store, 'grid') as saved:
+        assert saved.sizes == {'time': 3, 'latitude': 33, 'longitude': 34}
+        assert saved.spatial_ref.ndim == 0
+        for time, lat, lon, temperature, precipitation in (
+            (0, 0, 0, 0, 10000),
+            (0, 31, 31, 1085, 11085),
+            (0, 31, 32, 1086, 11086),
+            (0, 32, 31, 1119, 11119),
+            (0, 32, 33, 1121, 11121),
+            (1, 0, 0, 1122, 11122),
+            (1, 32, 33, np.nan, 12243),
+            (2, 32, 33, 3365, 13365),
+        ):
+            point = saved.isel(time=time, latitude=lat, longitude=lon)
+            np.testing.assert_allclose(point.TMP, temperature, atol=0, rtol=0)
+            np.testing.assert_allclose(point.PRATE, precipitation, atol=0, rtol=0)
+
+
+def test_staged_blocks_reject_partial_chunk_append(tmp_path: Path):
+    store = MemoryStore()
+    write_blocks(store, 'grid', [field()], work_dir=tmp_path)
+    before = open_dataset(store, 'grid').load()
+    with pytest.raises(StorageError, match='partial time chunk'):
+        write_blocks(store, 'grid', [field(day='2026-01-02')], work_dir=tmp_path)
+    with open_dataset(store, 'grid') as saved:
+        xr.testing.assert_identical(saved, before)
+
+
+def test_staged_blocks_keep_completed_block_when_next_input_fails(tmp_path: Path):
+    store = MemoryStore()
+
+    def days():
+        for index in range(128):
+            yield field(day=str(np.datetime64('2026-01-01') + np.timedelta64(index, 'D')))
+        msg = 'next GRIB failed'
+        raise OSError(msg)
+
+    with pytest.raises(OSError, match='next GRIB failed'):
+        write_blocks(store, 'grid', days(), work_dir=tmp_path)
+    with open_dataset(store, 'grid') as saved:
+        assert saved.sizes['time'] == saved.attrs['committed_length'] == 128
+        np.testing.assert_array_equal(saved.TMP[:, 1, 1], np.full(128, 3))
+
+
+def test_staged_block_removes_working_files_when_decoding_fails(tmp_path: Path):
+    store = MemoryStore()
+
+    def days():
+        yield field()
+        assert any(tmp_path.iterdir())
+        msg = 'GRIB decoding failed'
+        raise OSError(msg)
+
+    with pytest.raises(OSError, match='GRIB decoding failed'):
+        write_blocks(store, 'grid', days(), work_dir=tmp_path)
+    assert not any(tmp_path.iterdir())
+
+
+def test_staged_block_removes_working_files_when_zarr_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from weatheasy import storage
+
+    store = MemoryStore()
+    original = storage._copy_staged
+
+    def fail_after_copy(target, staged, count, written):  # noqa: ANN001
+        original(target, staged, count, written)
+        if 'TMP' in staged:
+            msg = 'Zarr write failed'
+            raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, '_copy_staged', fail_after_copy)
+        with pytest.raises(OSError, match='Zarr write failed'):
+            write_blocks(store, 'grid', [field()], work_dir=tmp_path)
+    assert not any(tmp_path.iterdir())
+    with pytest.raises(StorageError, match='completed'):
+        open_dataset(store, 'grid')
 
 
 def test_zarr_read_does_not_import_grib_decoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

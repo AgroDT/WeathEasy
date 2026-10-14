@@ -6,6 +6,7 @@ import time
 from contextlib import ExitStack
 from datetime import date
 from itertools import product
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -13,7 +14,7 @@ import xarray as xr
 from httpx2 import Client, HTTPTransport
 
 from weatheasy import const
-from weatheasy.raw_cache import DownloadCache, download_cache
+from weatheasy.raw_cache import DownloadCache, default_work_dir, download_cache
 from weatheasy.sources import read_cfs2, read_netcdf
 from weatheasy.storage import (
     delete_group,
@@ -23,13 +24,12 @@ from weatheasy.storage import (
     remove_group_attr,
     set_group_attrs,
     write_batches,
+    write_blocks,
 )
 from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from zarr.abc.store import Store
 
     from weatheasy.file_storage import FileStore
@@ -42,6 +42,7 @@ def download_cfs2_data(
     work_dir: str | Path | None = None,
     work_max_age_days: int = 7,
 ) -> None:
+    work_dir = Path(work_dir).expanduser() if work_dir is not None else default_work_dir()
     set_group_attrs(store, '')
     today = utc_now().date()
     updated = group_attrs(store, '').get(const.CFS2_KEY_UPDATED)
@@ -97,10 +98,10 @@ def download_cfs2_data(
             return
         forecast = forecast_cache.child(today.isoformat())
         session = stack.enter_context(_session())
-        _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis)
+        _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis, work_dir=work_dir)
         _download_cfs2_forecast(forecast_begin, yesterday, session, forecast)
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast)
-        _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast.root)
+        _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast.root, work_dir=work_dir)
         set_group_attrs(store, '', updated=today.isoformat())
         forecast.release(forecast.root.glob('*.grb2'))
 
@@ -166,7 +167,7 @@ def _session() -> Client:
 
 
 def _download_cfs2_reanalysis(
-    store: Store, end: date, session: Client, download_dir: DownloadCache
+    store: Store, end: date, session: Client, download_dir: DownloadCache, *, work_dir: Path
 ):
     download = _Cfs2ReanalysisDownloader(session, download_dir)
     groups = {kind: f'{const.CFS2_REANALYSIS_DIR}/{kind}' for kind in ('flx', 'pgb')}
@@ -190,11 +191,11 @@ def _download_cfs2_reanalysis(
         for kind, path in groups.items():
             last = previous[kind]
             _LOG.info(
-                'Processing %s: %s downloaded days; staging before Zarr write',
+                'Processing %s: %s downloaded days; writing in 128-day blocks',
                 path,
                 len(paths_by_day),
             )
-            write_batches(
+            write_blocks(
                 store,
                 path,
                 (
@@ -202,6 +203,7 @@ def _download_cfs2_reanalysis(
                     for day, paths in paths_by_day
                     if last is None or day > last
                 ),
+                work_dir=work_dir,
             )
             previous[kind] = last_date(store, path)
             _LOG.info('Saved %s through %s', path, previous[kind])
@@ -270,7 +272,9 @@ def _download_cfs2_forecast(
     download('pgb', f'pgbf{{}}{{}}.01.{begin:%Y%m%d}00.grb2', const.CFS2_PGB_PARAMS)
 
 
-def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Path):
+def _merge_cfs2_forecast(
+    store: Store, begin: date, end: date, download_dir: Path, *, work_dir: Path
+):
     # In-place replacement deliberately makes forecast data unavailable. Clear
     # readiness before deleting any chunks, then publish only after both grids.
     remove_group_attr(store, '', const.CFS2_KEY_UPDATED)
@@ -295,11 +299,12 @@ def _merge_cfs2_forecast(store: Store, begin: date, end: date, download_dir: Pat
         if template is None:
             msg = f'No forecast files for {kind}; forecast remains unavailable'
             raise ValueError(msg)
-        _LOG.info('Processing %s: %s days; staging before Zarr write', group, len(paths_by_day))
-        write_batches(
+        _LOG.info('Processing %s: %s days; writing in 128-day blocks', group, len(paths_by_day))
+        write_blocks(
             store,
             group,
             (_daily_cfs2(paths, kind, date_, template) for date_, paths in paths_by_day),
+            work_dir=work_dir,
             time_chunk=64,
         )
         _LOG.info('Saved %s: %s days', group, len(paths_by_day))
