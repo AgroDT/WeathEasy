@@ -18,6 +18,16 @@ from weatheasy.util import get_storage
 
 
 FIXTURES = Path(__file__).parent / 'fixtures' / 'era5'
+ACCUMULATED_VARIABLES = {
+    'total_precipitation',
+    'potential_evaporation',
+    'surface_latent_heat_flux',
+    'surface_sensible_heat_flux',
+    'surface_solar_radiation_downwards',
+    'surface_thermal_radiation_downwards',
+    'surface_net_solar_radiation',
+    'surface_net_thermal_radiation',
+}
 
 
 @pytest.fixture(name='isolated_work_dir', autouse=True)
@@ -274,15 +284,28 @@ def test_public_monthly_download_resume_getter_and_cli(
     root = get_storage(str(tmp_path / 'store'))
     bbox = (55.3, 37.1, 55.2, 37.3)
     era5.download_era5_data(get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox)
-    assert len(cds_client.calls) == 6
+    assert len(cds_client.calls) == 4
+    hourly = [request for request in cds_client.calls if len(request['time']) == 24]
+    assert len(hourly) == 2
+    assert all(len(request['day']) == 31 for request in hourly)
+    hourly_variables = [variable for request in hourly for variable in request['variable']]
+    assert len(hourly_variables) == len(set(hourly_variables)) == 16
+    assert not set(hourly_variables) & ACCUMULATED_VARIABLES
+    accumulated = [request for request in cds_client.calls if request['time'] == ['00:00']]
+    assert len(accumulated) == 2
+    assert all(set(request['variable']) == ACCUMULATED_VARIABLES for request in accumulated)
+    assert [(request['month'], request['day']) for request in accumulated] == [
+        ('01', [f'{day:02d}' for day in range(1, 32)]),
+        ('02', ['01']),
+    ]
     assert all(request['area'] == list(bbox) for request in cds_client.calls)
     assert root[''].attrs['request_bbox'] == list(bbox)
     assert root[''].attrs['last_month'] == [2000, 1]
     assert root[''].attrs['era5_requests'] == {}
     root[''].attrs['last_month'] = [1999, 12]  # crash before convenience marker
-    root[''].attrs['era5_requests'] = {'committed-month': 'job-6'}
+    root[''].attrs['era5_requests'] = {'committed-month': 'job-4'}
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
-    assert len(cds_client.calls) == 6
+    assert len(cds_client.calls) == 4
     assert root[''].attrs['last_month'] == [2000, 1]
     assert root[''].attrs['era5_requests'] == {}
     values = get_era5_data(
@@ -341,11 +364,11 @@ def test_failed_month_preserves_committed_period_and_recovers(
             era5.download_era5_data(root.store, bbox=bbox)
         assert root[''].attrs['last_month'] == [2000, 1]
         assert era5.available_period(root.store)[1] == date(2000, 1, 31)
-        assert len(root[''].attrs['era5_requests']) == 6
+        assert len(root[''].attrs['era5_requests']) == 4
     era5.download_era5_data(root.store, bbox=bbox)
     assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
     assert root['daily'].attrs['committed_length'] == 60
-    assert len(cds_client.calls) == 12
+    assert len(cds_client.calls) == 8
     assert root[''].attrs['era5_requests'] == {}
 
 
@@ -374,7 +397,7 @@ def test_interrupted_month_append_preserves_commit_and_recovers(
     era5.download_era5_data(root.store, bbox=bbox)
     assert era5.available_period(root.store) == (date(2000, 1, 1), date(2000, 2, 29))
     assert root['daily'].attrs['committed_length'] == 60
-    assert len(cds_client.calls) == 12
+    assert len(cds_client.calls) == 8
     assert root[''].attrs['era5_requests'] == {}
 
 
@@ -458,12 +481,12 @@ def test_restart_resumes_persisted_job(
         assert era5.group_attrs(get_store(store_path), '')['era5_requests'] == saved
     else:
         result = restarted.retrieve(date(2000, 1, 1), boundary=True)
-        assert len(cds_client.calls) == 3 + replacement
+        assert len(cds_client.calls) == 1 + replacement
         assert result.sizes['time'] == 1
         current = era5.group_attrs(get_store(store_path), '')['era5_requests']
-        assert len(current) == 3
+        assert len(current) == 1
         assert ('job-1' not in current.values()) == bool(replacement)
-        assert len(list((tmp_path / 'cache').glob('*.grib'))) == 3
+        assert len(list((tmp_path / 'cache').glob('*.grib'))) == 1
 
 
 def test_grib_single_midnight():
@@ -642,9 +665,12 @@ def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def requested_source(month: date, request: Mapping):
     names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
     names.update({cds: nc for nc, cds in era5.EXTRA.items()})
-    return source(month, boundary=len(request['time']) == 1)[
-        [names[name] for name in request['variable']]
+    times = [
+        np.datetime64(f'{month:%Y-%m}-{day}T{hour}')
+        for day in request['day']
+        for hour in request['time']
     ]
+    return source(month)[[names[name] for name in request['variable']]].sel(time=times)
 
 
 def test_partial_request_missing_variable_preserves_raw_but_never_publishes_daily(
@@ -680,13 +706,13 @@ def test_partial_request_missing_variable_preserves_raw_but_never_publishes_dail
     # Failed reads retain raw responses; retry encounters the same missing variable.
     with pytest.raises(KeyError):
         era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
-    assert len(cds_client.calls) == 5
+    assert len(cds_client.calls) == 4
     assert 'daily' not in root
     # Explicitly discard the invalid response before fetching corrected source data.
     read_paths[-1].unlink()
     broken = False
     era5.download_era5_data(root.store, tmp_path / 'cache', bbox=bbox)
-    assert len(cds_client.calls) == 6  # Reuse the interrupted job as well as the cached file.
+    assert len(cds_client.calls) == 4  # Reuse the interrupted job as well as the cached file.
     assert 'job-2' in cds_client.resumed
     readonly = zarr.open_group(str(tmp_path / 'store'), mode='r')
     result = get_era5_data(
@@ -723,7 +749,7 @@ def test_cache_publish_failure_retains_jobs_until_month_commits(
         assert era5.last_date(store, 'daily') is None
     # The temporary raw directory disappears: retry recovers the first job.
     era5.download_era5_data(get_store(tmp_path / 'store'), bbox=bbox)
-    assert len(cds_client.calls) == 6
+    assert len(cds_client.calls) == 4
     assert set(cds_client.resumed) == {'job-1', 'job-2', 'job-3', 'job-4'}
     assert era5.group_attrs(store, '')['era5_requests'] == {}
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
@@ -742,10 +768,10 @@ def test_s3_monthly_cache_reused_by_fresh_preparation(
     cache = FileStore(fs, f'{tmp_path.name}/raw')
     bbox = (55.3, 37.1, 55.2, 37.3)
     era5.download_era5_data(get_store(tmp_path / 'first'), cache, bbox=bbox)
-    assert len(cds_client.calls) == 6
-    assert len(cache.child('era5').glob('*.grib')) == 6
+    assert len(cds_client.calls) == 4
+    assert len(cache.child('era5').glob('*.grib')) == 4
     era5.download_era5_data(get_store(tmp_path / 'second'), cache, bbox=bbox)
-    assert len(cds_client.calls) == 6
+    assert len(cds_client.calls) == 4
     with era5.open_dataset(get_store(tmp_path / 'second'), 'daily') as ds:
         assert ds.sizes['time'] == 31
 
@@ -859,7 +885,7 @@ def test_processing_failure_preserves_download_before_grib_read(
         assert remote_reads == []
         assert not reads[0].exists()
         assert not (reads[0].parent / 'obsolete.grib').exists()
-    assert len(cds_client.calls) == 6
+    assert len(cds_client.calls) == 4
     assert set(cds_client.resumed) == {'job-2', 'job-3', 'job-4'}
     assert era5.available_period(store) == (date(2000, 1, 1), date(2000, 1, 31))
 
@@ -868,6 +894,10 @@ def test_processing_failure_preserves_download_before_grib_read(
 def test_submission_window_and_restart_keep_next_month_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient, limit: int
 ):
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy.file_storage import FileStore
+
     downloaded = []
 
     def download(_self, _request, call, path):  # noqa: ANN001
@@ -881,20 +911,150 @@ def test_submission_window_and_restart_keep_next_month_jobs(
         era5._Downloader, '_read', lambda _self, part: requested_source(part.month, part.request)
     )
     store = get_store(tmp_path / 'store')
-    cache = tmp_path / 'cache'
+    backing = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    cache = era5.DownloadCache(tmp_path / 'cache', backing)
     bbox = (55.3, 37.1, 55.2, 37.3)
     loader = era5._Downloader(cds_client, cache, bbox, store, limit)
-    loader.plan(date(2000, 1, 1), date(2000, 3, 10))
+    latest = date(2000, 3, 10)
+    loader.plan(date(2000, 1, 1), latest)
     assert len(cds_client.calls) == limit
     if limit == 3:
         cds_client.jobs['job-1'].results_ready = False
-    loader.retrieve_month(date(2000, 1, 1))
-    assert downloaded == ([1, 2, 3, 4, 5, 6] if limit == 1 else [2, 1, 3, 4, 5, 6])
-    assert len(cds_client.calls) == 6 + limit
+    main, boundary = loader.retrieve_month(date(2000, 1, 1), latest)
+    main.close()
+    boundary.close()
+    assert downloaded == ([1, 2, 3, 4] if limit == 1 else [2, 1, 3, 4])
+    assert len(cds_client.calls) == 4 + limit
     loader.commit(date(2000, 1, 1))
     saved = era5.group_attrs(store, '')['era5_requests']
-    assert set(saved.values()) == {f'job-{i}' for i in range(7, 7 + limit)}
+    assert set(saved.values()) == {f'job-{i}' for i in range(4, 5 + limit)}
+    # Committing January frees its working copies, retaining all February midnights.
+    remaining = list(cache.root.glob('*.grib'))
+    assert len(remaining) == 1
+    assert remaining[0].name.startswith('200002-')
+    old = time.time() - 30 * 86400
+    os.utime(remaining[0], (old, old))
+    obsolete = cache.root / 'obsolete.grib'
+    obsolete.write_bytes(b'obsolete')
+    os.utime(obsolete, (old, old))
     restarted = era5._Downloader(cds_client, cache, bbox, store, limit)
-    restarted.plan(date(2000, 2, 1), date(2000, 3, 10))
-    assert len(cds_client.calls) == 6 + limit
-    assert set(cds_client.resumed) == set(saved.values())
+    restarted.cleanup(date(2000, 2, 1), latest, max_age_days=7)
+    assert remaining[0].is_file()
+    assert not obsolete.exists()
+    restarted.plan(date(2000, 2, 1), latest)
+    assert len(cds_client.calls) == 4 + limit
+    assert set(cds_client.resumed) == set(saved.values()) - {'job-4'}
+    main, boundary = restarted.retrieve_month(date(2000, 2, 1), latest)
+    main.close()
+    boundary.close()
+    assert sorted(downloaded) == list(range(1, 8))
+    assert len(cds_client.calls) == 7
+    restarted.commit(date(2000, 2, 1))
+    assert not list(cache.root.glob('*.grib'))
+    assert era5.group_attrs(store, '')['era5_requests'] == {}
+
+
+@pytest.mark.parametrize(
+    ('month', 'following', 'end'),
+    [
+        (date(2000, 1, 1), date(2000, 2, 1), date(2000, 3, 1)),
+        (date(2000, 2, 1), date(2000, 3, 1), date(2000, 4, 1)),
+        (date(2000, 12, 1), date(2001, 1, 1), date(2001, 2, 1)),
+    ],
+    ids=['into-leap-month', 'out-of-leap-month', 'year-boundary'],
+)
+def test_rolling_months_reuse_midnights_with_correct_daily_values(
+    tmp_path: Path,
+    cds_client: FakeCDSClient,
+    month: date,
+    following: date,
+    end: date,
+):
+    def distinguish_midnights(ds: xr.Dataset, request: Mapping, _call: int) -> xr.Dataset:
+        if 'tp' in ds:
+            requested_month = date(int(request['year']), int(request['month']), 1)
+            if requested_month == following:
+                ds['tp'][:] = 0.019
+                ds['tp'][0] = 0.012
+            elif requested_month == end:
+                ds['tp'][:] = 0.023
+        return ds
+
+    cds_client.transform = distinguish_midnights
+    loader = era5._Downloader(
+        cds_client,
+        tmp_path / 'cache',
+        (55.3, 37.1, 55.2, 37.3),
+        get_store(tmp_path / 'store'),
+    )
+    loader.plan(month, end)
+    main, boundary = loader.retrieve_month(month, end)
+    np.testing.assert_array_equal(
+        boundary.time,
+        np.arange(np.datetime64(following), np.datetime64(end)).astype('datetime64[ns]'),
+    )
+    daily = era5.process_day(main, boundary, following - const.ONE_DAY)
+    np.testing.assert_allclose(daily.PRATE * 86400, 12)
+    main.close()
+    boundary.close()
+    loader.commit(month)
+
+    loader.plan(following, end)
+    main, boundary = loader.retrieve_month(following, end)
+    daily = era5.process_day(main, boundary, following)
+    np.testing.assert_allclose(daily.PRATE * 86400, 19)
+    np.testing.assert_allclose(daily.TMP, 20)
+    np.testing.assert_allclose(daily.WIND, 5)
+    daily = era5.process_day(main, boundary, end - const.ONE_DAY)
+    np.testing.assert_allclose(daily.PRATE * 86400, 23)
+    main.close()
+    boundary.close()
+    loader.commit(following)
+
+    assert len(cds_client.calls) == 7
+    midnights = [request for request in cds_client.calls if request['time'] == ['00:00']]
+    assert len(midnights) == 3
+    assert all(set(request['variable']) == ACCUMULATED_VARIABLES for request in midnights)
+    assert [
+        (int(request['year']), int(request['month']), len(request['day'])) for request in midnights
+    ] == [
+        (month.year, month.month, (following - month).days),
+        (following.year, following.month, (end - following).days),
+        (end.year, end.month, 1),
+    ]
+
+
+def test_available_next_month_midnights_survive_waiting_for_its_boundary(
+    tmp_path: Path, cds_client: FakeCDSClient
+):
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    from weatheasy.file_storage import FileStore
+
+    store = get_store(tmp_path / 'store')
+    backing = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    cache = era5.DownloadCache(tmp_path / 'cache', backing)
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    loader = era5._Downloader(cds_client, cache, bbox, store)
+    # All February midnights are available, but March 1 is still unavailable.
+    latest = date(2000, 2, 29)
+    loader.plan(date(2000, 1, 1), latest)
+    main, boundary = loader.retrieve_month(date(2000, 1, 1), latest)
+    assert boundary.sizes['time'] == 29
+    np.testing.assert_array_equal(
+        boundary.time,
+        np.arange('2000-02-01', '2000-03-01', dtype='datetime64[D]').astype('datetime64[ns]'),
+    )
+    main.close()
+    boundary.close()
+    loader.commit(date(2000, 1, 1))
+    remaining = list(cache.root.glob('*.grib'))
+    assert len(remaining) == 1
+    assert remaining[0].name.startswith('200002-')
+    old = time.time() - 30 * 86400
+    os.utime(remaining[0], (old, old))
+
+    restarted = era5._Downloader(cds_client, cache, bbox, store)
+    restarted.cleanup(date(2000, 2, 1), latest, max_age_days=7)
+    assert remaining[0].is_file()
+    assert len(cds_client.calls) == 4

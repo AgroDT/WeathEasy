@@ -158,7 +158,7 @@ def download_era5_data(
             started = time.monotonic()
             downloader.plan(first, latest)
             LOGGER.info('Preparing ERA5-Land %s', first.strftime('%Y-%m'))
-            main, boundary = downloader.retrieve_month(first)
+            main, boundary = downloader.retrieve_month(first, latest)
             try:
                 _validate_boundary(main, boundary)
                 write_batches(store, path, _daily_batches(main, boundary, first, bbox))
@@ -227,34 +227,54 @@ class _Downloader:
         return remote
 
     def _parts(self, month: date, *, boundary: bool) -> list[_Part]:
-        names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
-        names.update({cds: nc for nc, cds in EXTRA.items()})
+        if boundary:
+            return [self._accumulated_part(month, boundary=True)]
+        names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values() if not v.accumulated}
+        names[EXTRA['d2m']] = 'd2m'
         variables = sorted(names)
         return [
-            self._part(month, variables[offset : offset + 8], names, boundary=boundary)
+            self._part(month, variables[offset : offset + 8], names, boundary=False)
             for offset in range(0, len(variables), 8)
-        ]
+        ] + [self._accumulated_part(month)]
+
+    def _accumulated_part(self, month: date, *, boundary: bool = False) -> _Part:
+        names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values() if v.accumulated}
+        names.update({EXTRA[name]: name for name in ('ssr', 'str')})
+        return self._part(month, sorted(names), names, boundary=boundary, accumulated=True)
+
+    def _boundary_part(self, month: date, latest: date) -> _Part:
+        following = next_month(month)
+        # Reuse these midnights when processing the following month. Only the
+        # newest available month needs a separate first-midnight request.
+        incomplete = next_month(following) - const.ONE_DAY > latest
+        return self._accumulated_part(following, boundary=incomplete)
 
     def cleanup(self, first: date, latest: date, *, max_age_days: int) -> None:
         """Protect every pending month and its boundary before age-based cleanup."""
-        needed = set()
+        # The first uncommitted month can already have prefetched midnights even
+        # if its own following midnight is not available yet.
+        needed = {part.filename for part in self._parts(first, boundary=False)}
         month = first
         while next_month(month) <= latest:
             needed.update(
                 part.filename
-                for part in self._parts(month, boundary=False)
-                + self._parts(next_month(month), boundary=True)
+                for part in [
+                    *self._parts(month, boundary=False),
+                    self._boundary_part(month, latest),
+                ]
             )
             month = next_month(month)
         self.cache.cleanup(needed.__contains__, max_age_days=max_age_days)
 
     def plan(self, month: date, latest: date) -> None:
-        # Only this month and the next may occupy the submission window.
+        # Prioritize this month's inputs, including the following midnights,
+        # before prefetching inputs for the next month.
         for owner in (month, next_month(month)):
             if next_month(owner) <= latest:
-                for part in self._parts(owner, boundary=False) + self._parts(
-                    next_month(owner), boundary=True
-                ):
+                for part in [
+                    *self._parts(owner, boundary=False),
+                    self._boundary_part(owner, latest),
+                ]:
                     self.parts[part.key] = part
         self.requests = {key: value for key, value in self.requests.items() if key in self.parts}
         set_group_attrs(self.store, '', era5_requests=self.requests)
@@ -267,13 +287,12 @@ class _Downloader:
             if key not in self.pending and not self.cache.exists(part.filename):
                 self.pending[key] = self._request(key, part.request)
 
-    def retrieve_month(self, month: date) -> tuple[xr.Dataset, xr.Dataset]:
+    def retrieve_month(self, month: date, latest: date) -> tuple[xr.Dataset, xr.Dataset]:
         main = self._parts(month, boundary=False)
-        boundary = self._parts(next_month(month), boundary=True)
-        pieces = self._retrieve(main + boundary)
+        pieces = self._retrieve([*main, self._boundary_part(month, latest)])
         return (
             merge_grib_fields(*pieces[: len(main)]),
-            merge_grib_fields(*pieces[len(main) :]),
+            pieces[-1],
         )
 
     def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
@@ -309,7 +328,13 @@ class _Downloader:
         return [pieces[part.key] for part in parts]
 
     def commit(self, month: date) -> None:
-        parts = self._parts(month, boundary=False) + self._parts(next_month(month), boundary=True)
+        # A full set of next-month midnights belongs to that next month: retain
+        # its local file and journal entry until that month's writes commit.
+        parts = [
+            part
+            for part in self.parts.values()
+            if part.month == month or (part.boundary and part.month == next_month(month))
+        ]
         for part in parts:
             self.requests.pop(part.key, None)
             self.parts.pop(part.key, None)
@@ -325,14 +350,14 @@ class _Downloader:
         names: dict[str, str],
         *,
         boundary: bool,
+        accumulated: bool = False,
     ) -> _Part:
         if boundary:
             day = ['01']
-            time_ = ['00:00']
         else:
             day_count = calendar.monthrange(month.year, month.month)[1]
             day = [f'{d:02d}' for d in range(1, day_count + 1)]
-            time_ = [f'{h:02d}:00' for h in range(24)]
+        time_ = ['00:00'] if accumulated else [f'{h:02d}:00' for h in range(24)]
         request = {
             'variable': variables,
             'year': str(month.year),

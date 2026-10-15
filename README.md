@@ -198,7 +198,16 @@ weatheasy download era5 --store ./era5.zarr --bbox 56 37 55 38
 ```
 
 ERA5-Land requests use the native GRIB format, avoiding server-side NetCDF
-conversion. The loader opens fields lazily through xarray/cfgrib and decodes
+conversion. Each month has two hourly requests of eight instantaneous variables
+and one request for eight accumulated variables at 00:00 UTC only. Accumulations
+at midnight describe the previous day. To finish a historical month, the loader
+uses the first midnight from the following month's accumulated-variable file,
+then retains that file for processing the following month. Only when the following
+month's full set of midnights is not yet available does it request the first
+midnight separately. The new request layout has different cache keys from the
+former all-hourly requests; existing prepared months remain usable.
+
+The loader opens fields lazily through xarray/cfgrib and decodes
 one hourly spatial field at a time, reducing inputs into one day of output. A day spans multiple
 Zarr chunks, `(128, 32, 32)` each; GRIB fields are not repeatedly decoded
 for individual spatial tiles. Daily reductions are staged on local disk and written as aligned time blocks.
@@ -213,8 +222,9 @@ The loader keeps up to three outstanding CDS requests by default. Set
 Ready results are downloaded independently of submission order within each
 month, and the window is refilled before raw-cache uploads. Requests
 may be submitted for the current and next month; processing and Zarr writes
-remain sequential. Temporary GRIB working copies are removed after their month
-commits; a persistent local download cache is retained.
+remain sequential. Temporary GRIB working copies are removed after their own month
+commits; prefetched monthly midnights survive the preceding month's commit and
+restarts. A persistent local download cache is retained.
 
 The target Zarr's root attribute `era5_requests` maps request hashes to CDS job
 IDs, saved immediately after submission. Restarts reuse downloaded files or
