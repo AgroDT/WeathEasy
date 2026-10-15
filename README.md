@@ -367,7 +367,11 @@ aligned destination chunk at a time. This requires temporary disk space for the
 transaction's uncompressed fields; it avoids holding the entire block in RAM.
 CFS2 stages at most 128 days at a time in `--work-dir`, maps one field at a time,
 and copies spatial tiles into Zarr before processing the next block. It appends
-only at complete time-chunk boundaries, without partial-chunk backup or recovery.
+into the final partial time chunk as well, preserving its committed values with
+the same backup and retry mechanism as other weather writes. Missing CFS2
+reanalysis days remain on the calendar axis. If any of the four six-hourly
+files is missing, all daily fields are NaN; daily values are computed only
+when all four files are available.
 Correction reads source time chunks in spatial tiles into temporary memory-mapped
 files, runs the existing daily models, and writes the resulting time block.
 Temporary disk holds both raw and corrected fields for the current source block.

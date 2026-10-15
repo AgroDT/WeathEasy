@@ -376,14 +376,73 @@ def test_staged_blocks_preserve_fields_and_values_across_spatial_tiles(
             np.testing.assert_allclose(point.PRATE, precipitation, atol=0, rtol=0)
 
 
-def test_staged_blocks_reject_partial_chunk_append(tmp_path: Path):
+@pytest.mark.parametrize('time_chunk', [64, 128])
+def test_staged_blocks_append_across_partial_chunk(
+    tmp_path: Path, time_chunk: int, tiled_field: xr.Dataset
+):
     store = MemoryStore()
-    write_blocks(store, 'grid', [field()], work_dir=tmp_path)
-    before = open_dataset(store, 'grid').load()
-    with pytest.raises(StorageError, match='partial time chunk'):
-        write_blocks(store, 'grid', [field(day='2026-01-02')], work_dir=tmp_path)
+    write_blocks(store, 'grid', [tiled_field], work_dir=tmp_path, time_chunk=time_chunk)
+    days = np.arange(3, 132)
+    additions = (
+        tiled_field.isel(time=slice(0, 1)).assign_coords(
+            time=[np.datetime64('2026-01-01') + np.timedelta64(int(day), 'D')]
+        )
+        for day in days
+    )
+    write_blocks(store, 'grid', additions, work_dir=tmp_path, time_chunk=time_chunk)
+    write_blocks(
+        store,
+        'grid',
+        [tiled_field.isel(time=slice(2, 3)).assign_coords(time=[np.datetime64('2026-05-13')])],
+        work_dir=tmp_path,
+        time_chunk=time_chunk,
+    )
     with open_dataset(store, 'grid') as saved:
-        xr.testing.assert_identical(saved, before)
+        xr.testing.assert_equal(saved.isel(time=slice(0, 3)), tiled_field)
+        np.testing.assert_array_equal(
+            saved.time, np.arange('2026-01-01', '2026-05-14', dtype='datetime64[D]')
+        )
+        assert saved.attrs['committed_length'] == 133
+        np.testing.assert_array_equal(saved.TMP[3:132, 32, 33], np.full(129, 1121))
+        np.testing.assert_array_equal(saved.PRATE[3:132, 32, 33], np.full(129, 11121))
+        assert saved.TMP[-1, 32, 33] == 3365
+
+
+@pytest.mark.parametrize('missing_committed', [False, True])
+def test_staged_partial_append_retry_preserves_committed_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tiled_field: xr.Dataset,
+    *,
+    missing_committed: bool,
+):
+    from weatheasy import storage
+
+    store = MemoryStore()
+    before = xr.full_like(tiled_field, np.nan) if missing_committed else tiled_field
+    write_blocks(store, 'grid', [before], work_dir=tmp_path)
+    addition = tiled_field.assign_coords(
+        time=np.arange('2026-01-04', '2026-01-07', dtype='datetime64[D]')
+    )
+    original = storage._copy_staged
+
+    def fail_after_copy(target, staged, count, written):  # noqa: ANN001
+        original(target, staged, count, written)
+        if 'TMP' in staged:
+            # An interrupted chunk upload can damage previously committed cells.
+            target.get_array('TMP')[:] = 999
+            msg = 'append interrupted'
+            raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, '_copy_staged', fail_after_copy)
+        with pytest.raises(OSError, match='append interrupted'):
+            write_blocks(store, 'grid', [addition], work_dir=tmp_path)
+    with pytest.raises(StorageError, match='completed'):
+        open_dataset(store, 'grid')
+    write_blocks(store, 'grid', [addition], work_dir=tmp_path)
+    with open_dataset(store, 'grid') as saved:
+        xr.testing.assert_equal(saved, xr.concat([before, addition], dim='time'))
 
 
 def test_staged_blocks_keep_completed_block_when_next_input_fails(tmp_path: Path):

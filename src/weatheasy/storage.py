@@ -454,7 +454,7 @@ def write_batches(  # noqa: C901, PLR0912, PLR0915
     sync(store.delete_dir(f'{group}/.append-backup/'))
 
 
-def write_blocks(
+def write_blocks(  # noqa: C901, PLR0912, PLR0915
     store: Store,
     group: str,
     datasets: Iterable[xr.Dataset],
@@ -462,7 +462,7 @@ def write_blocks(
     work_dir: str | Path,
     time_chunk: int = 128,
 ) -> None:
-    """Stage up to 128 daily fields in the working directory, then write full chunks."""
+    """Stage up to 128 daily fields on disk and append, including to partial chunks."""
     log = logging.getLogger(__name__)
     directory = Path(work_dir).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
@@ -471,12 +471,26 @@ def write_blocks(
     count = int(cast('int', target.attrs.get('committed_length', 0)))
     days = iter(datasets)
     while (first := next(days, None)) is not None:
-        if count % time_chunk:
-            msg = 'Cannot append to a partial time chunk'
+        if time_chunk < 1 or first.attrs.get('storage_schema') != SCHEMA:
+            msg = 'A prepared dataset and positive chunk sizes are required'
             raise StorageError(msg)
+        signature = _signature(first)
+        if count:
+            if target.attrs.get('grid_signature') != signature:
+                msg = 'Existing group has a conflicting grid, CRS, variables or units'
+                raise StorageError(msg)
+            time_array = target.get_array('time')
+            last = decode_cf_datetime(
+                time_array[count - 1 : count],
+                cast('str', time_array.attrs['units']),
+                cast('str', time_array.attrs['calendar']),
+            )[0]
+            if first.time.to_numpy()[0] <= last:
+                msg = 'New timestamps must follow all committed timestamps'
+                raise StorageError(msg)
         attrs = dict(
             first.attrs,
-            grid_signature=_signature(first),
+            grid_signature=signature,
             committed_length=count,
             write_state='writing',
         )
@@ -489,7 +503,14 @@ def write_blocks(
             }
             log.info('Staging %s: up to 128 days in %s', group, temporary)
             written = 0
+            previous = None
             for day in chain((first,), islice(days, 127)):
+                if _signature(day) != signature:
+                    msg = 'A batch has a conflicting grid, CRS, variables or units'
+                    raise StorageError(msg)
+                if previous is not None and day.time.to_numpy()[0] <= previous:
+                    msg = 'New timestamps must follow all previous batches'
+                    raise StorageError(msg)
                 for name, filename in filenames.items():
                     values = (
                         day.time.to_numpy().astype('datetime64[s]').astype(np.int64)
@@ -499,9 +520,14 @@ def write_blocks(
                     with filename.open('ab') as stream:
                         values.tofile(stream)
                 written += day.sizes['time']
+                previous = day.time.to_numpy()[-1]
             del first, day, values
             log.info('Writing %s: %s days', group, written)
             root.update_attributes(dict(root.attrs))
+            if count:
+                _restore_append_backup(store, target)
+                _truncate_uncommitted(target, count)
+                _save_append_backup(store, target, count)
             target.attrs.update(attrs)
             if not count:
                 _write_time_batch(store, group, template, tile_size=32, time_chunk=time_chunk)
@@ -521,8 +547,9 @@ def write_blocks(
                     cast('mmap', staged.base).close()
                     del staged
         count += written
-        target.attrs.update(dict(attrs, committed_length=count, write_state='complete'))
+        target.attrs.put(dict(attrs, committed_length=count, write_state='complete'))
         zarr.consolidate_metadata(store)
+        sync(store.delete_dir(f'{group}/.append-backup/'))
         log.info('Saved %s: %s committed days', group, count)
 
 

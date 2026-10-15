@@ -178,20 +178,29 @@ def _download_cfs2_reanalysis(
         last + const.ONE_DAY if last else const.CFS2_REANALYSIS_FIRST_DATE
         for last in previous.values()
     )
+    if date_ >= end:
+        return
+    templates, prefetched = _reanalysis_templates(
+        store, groups, previous, date_, end, download=download
+    )
     while date_ < end:
         block_end = min(date_ + 128 * const.ONE_DAY, end)
         paths_by_day = []
         while date_ < block_end:
-            paths = download(date_)
-            if paths:
-                paths_by_day.append((date_, paths))
-            else:
-                _LOG.warning('%s was not found on the server', date_)
+            paths = prefetched.pop(date_) if date_ in prefetched else download(date_) or []
+            paths_by_day.append((date_, paths))
+            if len(paths) < len(const.CFS2_HHS):
+                _LOG.warning(
+                    'CFS2 %s: found %s of %s files; saving NaN for all fields',
+                    date_,
+                    len(paths),
+                    len(const.CFS2_HHS),
+                )
             date_ += const.ONE_DAY
         for kind, path in groups.items():
             last = previous[kind]
             _LOG.info(
-                'Processing %s: %s downloaded days; writing in 128-day blocks',
+                'Processing %s: %s calendar days; writing in 128-day blocks',
                 path,
                 len(paths_by_day),
             )
@@ -199,7 +208,7 @@ def _download_cfs2_reanalysis(
                 store,
                 path,
                 (
-                    _daily_cfs2(paths, kind, day)
+                    _daily_cfs2(paths, kind, day, templates[kind])
                     for day, paths in paths_by_day
                     if last is None or day > last
                 ),
@@ -211,34 +220,63 @@ def _download_cfs2_reanalysis(
             download_dir.release(paths)
 
 
+def _reanalysis_templates(
+    store: Store,
+    groups: dict[str, str],
+    previous: dict[str, date | None],
+    begin: date,
+    end: date,
+    *,
+    download: _Cfs2ReanalysisDownloader,
+):
+    templates = {}
+    for kind, path in groups.items():
+        if previous[kind] is not None:
+            # Only the grid/field metadata are needed, also after an interrupted
+            # append. Never read possibly uncommitted weather values here.
+            with xr.open_zarr(
+                store, group=path, consolidated=False, chunks=None, decode_coords='all'
+            ) as saved:
+                templates[kind] = xr.full_like(saved.isel(time=slice(0, 1)), np.nan).load()
+    # A new store may start with missing days. Find a real source grid before
+    # writing them, retaining the downloaded paths for the normal block loop.
+    prefetched = {}
+    sample_day = begin
+    while len(templates) < len(groups) and sample_day < end:
+        paths = download(sample_day) or []
+        prefetched[sample_day] = paths
+        if paths:
+            for kind in groups:
+                if kind not in templates:
+                    templates[kind] = read_cfs2(paths[0], kind=kind)
+        sample_day += const.ONE_DAY
+    if len(templates) < len(groups):
+        msg = 'Cannot determine the reanalysis grid without any source files'
+        raise ValueError(msg)
+    return templates, prefetched
+
+
 def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset | None = None):
     started = time.perf_counter()
     _LOG.info('Processing CFS2 %s %s: %s GRIB files', kind, date_, len(paths))
     fields = [read_cfs2(path, kind=kind) for path in paths]
-    if not fields:
+    bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
+    if len(paths) < len(const.CFS2_HHS):
+        if fields:
+            template = fields[0]
         if template is None:
             msg = 'Cannot determine the grid without any source files'
             raise ValueError(msg)
         daily = xr.full_like(template, np.nan)
+        for name, info in bands.items():
+            daily[name].attrs['cell_methods'] = f'time: {info.daily_stat.__name__}'
     else:
         sample = fields[0]
         # Exact spatial alignment; only the sample time axis may differ.
         combined = xr.concat(fields, dim='time', join='exact')
-        bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
         data = {}
         for name, info in bands.items():
             values = combined[name].to_numpy()
-            if len(paths) < len(const.CFS2_HHS):
-                values = np.concatenate(
-                    (
-                        values,
-                        np.full(
-                            (len(const.CFS2_HHS) - len(paths), *values.shape[1:]),
-                            np.nan,
-                            np.float32,
-                        ),
-                    )
-                )
             data[name] = xr.DataArray(
                 info.daily_stat(values, axis=0),
                 dims=('latitude', 'longitude'),
@@ -315,7 +353,7 @@ class _Cfs2ReanalysisDownloader:
         self._session = session
         self._download_dir = download_dir
 
-    def __call__(self, date_: date) -> list[Path] | None:
+    def __call__(self, date_: date) -> list[Path]:
         ymd = date_.strftime('%Y%m%d')
         ym = ymd[:-2]
         url_template = (
@@ -330,7 +368,8 @@ class _Cfs2ReanalysisDownloader:
                 _LOG.info('Downloading %s', url)
                 response = self._session.get(url, timeout=180)
                 if response.status_code == 404:
-                    return None
+                    _LOG.warning('Missing CFS2 file: %s', url)
+                    continue
                 if not response.is_success:
                     msg = f'Failed to download {url}'
                     raise RuntimeError(msg)

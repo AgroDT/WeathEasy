@@ -435,6 +435,81 @@ def test_cfs2_cleanup_respects_both_grids_and_current_forecast(
     assert not obsolete.parent.exists()
 
 
+@pytest.mark.parametrize('leading_missing', [1, 128])
+def test_cfs2_reanalysis_keeps_calendar_and_appends_missing_days(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leading_missing: int
+):
+    begin = date(2026, 1, 1)
+    monkeypatch.setattr(const, 'CFS2_REANALYSIS_FIRST_DATE', begin)
+    monkeypatch.setattr(const, 'CFS2_FLX_BANDS', {'TMP': const.CFS2_FLX_BANDS['TMP']})
+    store = get_store(tmp_path / 'prepared')
+    requests = []
+    decoded = set()
+
+    def respond(request: Request):
+        parts = request.url.path.split('/')
+        day = date.fromisoformat(parts[-2])
+        hour = int(parts[-1].split('.t')[1][:2])
+        offset = (day - begin).days
+        requests.append((offset, hour))
+        if (
+            offset < leading_missing
+            or offset > leading_missing + 1
+            or (offset == leading_missing and hour == 6)
+        ):
+            return Response(404)
+        return Response(200, content=f'{day}T{hour:02d}:00:00'.encode())
+
+    def read(path: Path, *, kind: str):
+        when = np.datetime64(path.read_text())
+        offset = int((when.astype('datetime64[D]') - np.datetime64(begin)).astype(int))
+        hour = int(str(when)[11:13])
+        decoded.add((kind, offset, hour))
+        name, units = ('TMP', 'K') if kind == 'flx' else ('RH', '%')
+        return xr.Dataset(
+            {
+                name: (
+                    ('time', 'latitude', 'longitude'),
+                    np.full((1, 2, 2), offset * 10 + hour, dtype=np.float32),
+                    {'units': units},
+                )
+            },
+            coords={'time': [when], 'latitude': [0, 1], 'longitude': [0, 1]},
+        )
+
+    monkeypatch.setattr(download, 'read_cfs2', read)
+    end = begin + (leading_missing + 2) * const.ONE_DAY
+    with (
+        Client(transport=MockTransport(respond)) as session,
+        download_cache(tmp_path / 'raw', 'cfs2', 'reanalysis', work_dir=tmp_path / 'work') as cache,
+    ):
+        download._download_cfs2_reanalysis(store, end, session, cache, work_dir=tmp_path / 'work')
+        # A subsequent scheduled run has no source files at all for the new day.
+        download._download_cfs2_reanalysis(
+            store, end + const.ONE_DAY, session, cache, work_dir=tmp_path / 'work'
+        )
+    assert requests == [
+        (offset, hour) for offset in range(leading_missing + 3) for hour in (0, 6, 12, 18)
+    ]
+    assert decoded == {
+        (kind, offset, hour)
+        for kind in ('flx', 'pgb')
+        for offset, hours in (
+            (leading_missing, (0, 12, 18)),
+            (leading_missing + 1, (0, 6, 12, 18)),
+        )
+        for hour in hours
+    }
+    expected_time = np.datetime64(begin) + np.arange(leading_missing + 3).astype('timedelta64[D]')
+    expected_values = np.full(leading_missing + 3, np.nan)
+    expected_values[leading_missing + 1] = (leading_missing + 1) * 10 + 9
+    for kind, name in (('flx', 'TMP'), ('pgb', 'RH')):
+        with open_dataset(store, f'reanalysis/{kind}') as saved:
+            np.testing.assert_array_equal(saved.time, expected_time)
+            np.testing.assert_allclose(saved[name][:, 0, 0], expected_values, rtol=0, atol=0)
+            assert saved.attrs['committed_length'] == leading_missing + 3
+
+
 @pytest.mark.parametrize(
     ('platform', 'environment', 'relative'),
     [

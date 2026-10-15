@@ -147,15 +147,15 @@ def test_cfs2_public_download_extrema_missing_and_resume(
     # Min and max are intentionally different fields; sharing the old band fails.
     flx = {name: const.CFS2_FLX_BANDS[name] for name in ('TMP', 'TMIN', 'TMAX')}
     monkeypatch.setattr(const, 'CFS2_FLX_BANDS', flx)
-    monkeypatch.setattr(const, 'CFS2_REANALYSIS_FIRST_DATE', date(2026, 9, 18))
+    monkeypatch.setattr(const, 'CFS2_REANALYSIS_FIRST_DATE', date(2026, 9, 17))
     monkeypatch.setattr(const, 'CFS2_FORECAST_DAYS', const.ONE_DAY * 2)
     monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 9, 22, tzinfo=UTC))
     calls = []
 
     def reanalysis(_self: download._Cfs2ReanalysisDownloader, day: date):
         calls.append(day)
-        if missing_reanalysis:
-            return None
+        if missing_reanalysis and day == date(2026, 9, 18):
+            return []
         paths = []
         for hour in (0, 6, 12, 18):
             path = tmp_path / f'r{day}-{hour}.grb2'
@@ -177,7 +177,7 @@ def test_cfs2_public_download_extrema_missing_and_resume(
     root = get_storage(str(tmp_path / 'data'))
     download.download_cfs2_data(get_store(tmp_path / 'data'), work_dir=tmp_path / 'work')
     download.download_cfs2_data(root.store, work_dir=tmp_path / 'work')
-    assert calls == [date(2026, 9, 18)]
+    assert calls == [date(2026, 9, 17), date(2026, 9, 18)]
     result = get_cfs2_data(
         store=root.store,
         begin=date(2026, 9, 18),
@@ -208,7 +208,7 @@ def test_cfs2_public_download_extrema_missing_and_resume(
                 coords=Coords(55, 0),
                 variables=['TMP'],
             )
-        target.attrs.clear()
+        target.attrs['write_state'] = 'complete'
     np.testing.assert_allclose(result, expected, atol=1e-4)
     np.testing.assert_allclose(
         get_cfs2_data(
@@ -221,27 +221,23 @@ def test_cfs2_public_download_extrema_missing_and_resume(
         expected,
         atol=1e-4,
     )
-    check_forecast_replacement(root, monkeypatch, missing_reanalysis, tmp_path / 'work')
+    check_forecast_replacement(root, monkeypatch, tmp_path / 'work')
 
 
 def check_forecast_replacement(
     root: zarr.Group,
     monkeypatch: pytest.MonkeyPatch,
-    missing_reanalysis: bool,  # noqa: FBT001
     work_dir: Path,
 ):
     # A sentinel verifies deletion of the previous forecast before any new write.
     root['forecast'].attrs['old_forecast'] = True
     previous_reanalysis = {}
-    if not missing_reanalysis:
-        for kind in ('flx', 'pgb'):
-            with open_dataset(root.store, f'reanalysis/{kind}') as dataset:
-                previous_reanalysis[kind] = dataset.load()
+    for kind in ('flx', 'pgb'):
+        with open_dataset(root.store, f'reanalysis/{kind}') as dataset:
+            previous_reanalysis[kind] = dataset.load()
     original_write = download.write_blocks
     monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 9, 23, tzinfo=UTC))
-    # Exercise forecast replacement without appending to the fixture's partial
-    # reanalysis chunk; CFS2 now permits appends only at full chunk boundaries.
-    monkeypatch.setattr(download._Cfs2ReanalysisDownloader, '__call__', lambda _self, _day: None)
+    monkeypatch.setattr(download._Cfs2ReanalysisDownloader, '__call__', lambda _self, _day: [])
 
     def fail_second_grid(
         store: Store,
@@ -276,7 +272,11 @@ def check_forecast_replacement(
         assert 'reanalysis/flx' in root
         for kind, before in previous_reanalysis.items():
             with open_dataset(root.store, f'reanalysis/{kind}') as after:
-                xr.testing.assert_identical(after, before)
+                xr.testing.assert_equal(after.isel(time=slice(0, 2)), before)
+                assert after.time.to_numpy()[-1] == np.datetime64('2026-09-19')
+                for field in after.data_vars.values():
+                    assert np.isnan(field[-1]).all()
+                previous_reanalysis[kind] = after.load()
     download.download_cfs2_data(root.store, work_dir=work_dir)
     for kind, before in previous_reanalysis.items():
         with open_dataset(root.store, f'reanalysis/{kind}') as after:
@@ -348,9 +348,28 @@ def test_http_prepared_data_uses_getter_without_prepare_imports(
     assert response.json() == [{'tas': 280, 'date': '2000-01-01'}]
 
 
-def test_daily_missing_forecast_sample_remains_nan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(const, 'CFS2_FLX_BANDS', {'TMP': const.CFS2_FLX_BANDS['TMP']})
-    path = tmp_path / 'sample.grb2'
-    write_grib(path, datetime(2026, 9, 22, tzinfo=UTC), [(0, 280)])
-    daily = download._daily_cfs2([path], 'flx', date(2026, 9, 22))
-    assert np.isnan(daily.TMP.to_numpy()).all()
+@pytest.mark.parametrize('file_count', [0, 1, 2, 3, 4])
+def test_daily_cfs2_requires_all_files_for_every_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_count: int
+):
+    names = ('TMP', 'TMIN', 'TMAX')
+    monkeypatch.setattr(
+        const, 'CFS2_FLX_BANDS', {name: const.CFS2_FLX_BANDS[name] for name in names}
+    )
+    paths = []
+    for hour in (0, 6, 12, 18):
+        path = tmp_path / f'sample-{hour}.grb2'
+        write_grib(
+            path,
+            datetime(2026, 9, 22, hour, tzinfo=UTC),
+            [(0, 280 + hour), (4, 300 + hour), (5, 260 - hour)],
+        )
+        paths.append(path)
+    template = download.read_cfs2(paths[0], kind='flx')
+    daily = download._daily_cfs2(paths[:file_count], 'flx', date(2026, 9, 22), template)
+    np.testing.assert_array_equal(daily.time, [np.datetime64('2026-09-22')])
+    # The GRIB temperatures in kelvin are converted to degrees Celsius.
+    for name, expected in (('TMP', 15.85), ('TMIN', -31.15), ('TMAX', 44.85)):
+        np.testing.assert_allclose(
+            daily[name], expected if file_count == 4 else np.nan, rtol=0, atol=1e-4
+        )
