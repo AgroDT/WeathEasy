@@ -26,6 +26,11 @@ def init_isolated_work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv('USERPROFILE', str(tmp_path / 'home'))
 
 
+@pytest.fixture(name='grib_content')
+def get_grib_content() -> bytes:
+    return Path(__file__).with_name('fixtures').joinpath('era5', 'day.grib').read_bytes()
+
+
 @pytest.fixture(name='working_cache_files')
 def create_working_cache_files(tmp_path: Path):
     remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
@@ -181,8 +186,116 @@ def test_cmip6_public_download_processes_working_file_and_reuses_cache(
         assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc']
 
 
+@pytest.mark.parametrize('cached', [None, 'local', 'remote'])
+@pytest.mark.parametrize('empty_response', [False, True])
+def test_cfs2_reanalysis_retries_empty_cache_and_skips_empty_responses(
+    tmp_path: Path, cached: str | None, grib_content: bytes, *, empty_response: bool
+):
+    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    name = '201810/20181015.cdas1.t06z.pgrbh00.grib2'
+    calls = []
+
+    def respond(request: Request) -> Response:
+        calls.append(request.url.path)
+        if empty_response and '.t06z.' in request.url.path:
+            return Response(200, content=b'')
+        return Response(200, content=grib_content)
+
+    with (
+        download_cache(remote, work_dir=tmp_path / 'work') as cache,
+        Client(transport=MockTransport(respond)) as session,
+    ):
+        if cached == 'local':
+            cache.file(name).write_bytes(b'')
+        elif cached == 'remote':
+            with remote.write_atomic(name) as stream:
+                stream.write(b'')
+        downloader = download._Cfs2ReanalysisDownloader(session, cache)
+        paths = downloader(date(2018, 10, 15))
+        assert len(calls) == 4
+        assert len(paths) == (3 if empty_response else 4)
+        assert all(path.read_bytes() == grib_content for path in paths)
+        if empty_response:
+            assert not (cache.root / name).exists()
+            if remote.exists(name):
+                with remote.open(name) as stream:
+                    assert stream.read() == b''
+            assert len(remote.glob('**/*.grib2')) == (4 if cached == 'remote' else 3)
+        else:
+            with remote.open(name) as stream:
+                assert stream.read() == grib_content
+            assert downloader(date(2018, 10, 15)) == paths
+            assert len(calls) == 4
+
+
+@pytest.mark.parametrize('cached', ['local', 'remote'])
+def test_cfs2_reanalysis_replaces_truncated_cache(tmp_path: Path, cached: str, grib_content: bytes):
+    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    name = '201810/20181015.cdas1.t06z.pgrbh00.grib2'
+    calls = []
+
+    def respond(request: Request) -> Response:
+        calls.append(request.url.path)
+        return Response(200, content=grib_content)
+
+    with (
+        download_cache(remote, work_dir=tmp_path / 'work') as cache,
+        Client(transport=MockTransport(respond)) as session,
+    ):
+        # Keep a complete first message and the final terminator: checking only
+        # the beginning/end of the file would incorrectly accept this truncation.
+        broken = grib_content[:-5] + grib_content[-4:]
+        if cached == 'local':
+            cache.file(name).write_bytes(broken)
+        with remote.write_atomic(name) as stream:
+            stream.write(broken)
+        downloader = download._Cfs2ReanalysisDownloader(session, cache)
+        paths = downloader(date(2018, 10, 15))
+        assert len(paths) == 4
+        assert all(path.read_bytes() == grib_content for path in paths)
+        with remote.open(name) as stream:
+            assert stream.read() == grib_content
+        cache.release(paths)
+        assert len(downloader(date(2018, 10, 15))) == 4
+        assert len(calls) == 4
+
+
+@pytest.mark.parametrize('corruption', ['truncated', 'header', 'length', 'footer', 'html'])
+def test_cfs2_reanalysis_rejects_invalid_response_and_recovers(
+    tmp_path: Path, grib_content: bytes, corruption: str
+):
+    broken = {
+        'truncated': grib_content[:-5] + grib_content[-4:],
+        'header': grib_content + b'GRIB',
+        'length': grib_content[:8] + bytes(8) + grib_content[16:],
+        'footer': grib_content[:-4] + b'0000',
+        'html': b'<html>upstream error</html>',
+    }[corruption]
+    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    calls = []
+
+    def respond(request: Request) -> Response:
+        calls.append(request.url.path)
+        return Response(200, content=broken if len(calls) == 1 else grib_content)
+
+    with (
+        download_cache(remote, work_dir=tmp_path / 'work') as cache,
+        Client(transport=MockTransport(respond)) as session,
+    ):
+        downloader = download._Cfs2ReanalysisDownloader(session, cache)
+        with pytest.raises(RuntimeError, match='Incomplete or invalid CFS2 GRIB download: https:'):
+            downloader(date(2018, 10, 15))
+        assert remote.glob('**/*.grib2') == []
+        assert list(cache.root.rglob('*.grib2')) == []
+        paths = downloader(date(2018, 10, 15))
+        assert len(paths) == 4
+        assert all(path.read_bytes() == grib_content for path in paths)
+        assert len(remote.glob('**/*.grib2')) == 4
+        assert len(calls) == 5
+
+
 def test_cfs2_downloaders_reuse_remote_files_without_http(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grib_content: bytes
 ):
     fs = TrackingFileSystem(skip_instance_cache=True)
     remote = FileStore(fs, f'{tmp_path.name}/raw')
@@ -190,7 +303,7 @@ def test_cfs2_downloaders_reuse_remote_files_without_http(
 
     def get(request: Request) -> Response:
         calls.append(str(request.url))
-        return Response(200, content=b'GRIB')
+        return Response(200, content=grib_content)
 
     monkeypatch.setattr(download._Cfs2ForecastDownloader, '_min_interval', 0)
     with Client(transport=MockTransport(get)) as session:
@@ -199,7 +312,7 @@ def test_cfs2_downloaders_reuse_remote_files_without_http(
                 paths = download._Cfs2ReanalysisDownloader(session, cache)(date(2000, 1, 1))
                 assert paths is not None
                 assert len(paths) == 4
-                assert all(path.read_bytes() == b'GRIB' for path in paths)
+                assert all(path.read_bytes() == grib_content for path in paths)
                 assert len(remote.child('reanalysis').glob('**/*.grib2')) == 4
             with download_cache(remote, 'forecast') as cache:
                 downloader = download._Cfs2ForecastDownloader(
@@ -208,7 +321,7 @@ def test_cfs2_downloaders_reuse_remote_files_without_http(
                 downloader('flx', 'file{}{}', {})
                 paths = list(cache.root.glob('*.grb2'))
                 assert len(paths) == 4
-                assert all(path.read_bytes() == b'GRIB' for path in paths)
+                assert all(path.read_bytes() == grib_content for path in paths)
                 assert len(remote.child('forecast').glob('*.grb2')) == 4
             assert len(calls) == 8
             assert fs.reads == []
@@ -436,8 +549,13 @@ def test_cfs2_cleanup_respects_both_grids_and_current_forecast(
 
 
 @pytest.mark.parametrize('leading_missing', [1, 128])
+@pytest.mark.parametrize('missing_status', [404, 200], ids=['not-found', 'empty-body'])
 def test_cfs2_reanalysis_keeps_calendar_and_appends_missing_days(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leading_missing: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leading_missing: int,
+    missing_status: int,
+    grib_content: bytes,
 ):
     begin = date(2026, 1, 1)
     monkeypatch.setattr(const, 'CFS2_REANALYSIS_FIRST_DATE', begin)
@@ -457,11 +575,12 @@ def test_cfs2_reanalysis_keeps_calendar_and_appends_missing_days(
             or offset > leading_missing + 1
             or (offset == leading_missing and hour == 6)
         ):
-            return Response(404)
-        return Response(200, content=f'{day}T{hour:02d}:00:00'.encode())
+            return Response(missing_status)
+        return Response(200, content=grib_content)
 
     def read(path: Path, *, kind: str):
-        when = np.datetime64(path.read_text())
+        day, cycle = path.name.split('.cdas1.t')
+        when = np.datetime64(f'{day[:4]}-{day[4:6]}-{day[6:]}T{cycle[:2]}:00:00')
         offset = int((when.astype('datetime64[D]') - np.datetime64(begin)).astype(int))
         hour = int(str(when)[11:13])
         decoded.add((kind, offset, hour))

@@ -5,6 +5,7 @@ import sys
 import time
 from contextlib import ExitStack
 from datetime import date
+from io import BytesIO
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -30,6 +31,8 @@ from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
+    from typing import BinaryIO
+
     from zarr.abc.store import Store
 
     from weatheasy.file_storage import FileStore
@@ -348,6 +351,25 @@ def _merge_cfs2_forecast(
         _LOG.info('Saved %s: %s days', group, len(paths_by_day))
 
 
+def _complete_grib2(stream: BinaryIO) -> bool:
+    """Check every message envelope without decoding weather fields or writing indexes."""
+    size = stream.seek(0, 2)
+    offset = 0
+    while offset < size:
+        stream.seek(offset)
+        header = stream.read(16)
+        if len(header) != 16 or header[:4] != b'GRIB' or header[7] != 2:
+            return False
+        length = int.from_bytes(header[8:16], 'big')
+        if length < 20 or length > size - offset:
+            return False
+        stream.seek(offset + length - 4)
+        if stream.read(4) != b'7777':
+            return False
+        offset += length
+    return size > 0
+
+
 class _Cfs2ReanalysisDownloader:
     def __init__(self, session: Client, download_dir: DownloadCache) -> None:
         self._session = session
@@ -363,6 +385,13 @@ class _Cfs2ReanalysisDownloader:
         paths = []
         for hhs in const.CFS2_HHS:
             path = self._download_dir.file(f'{ym}/{ymd}.cdas1.t{hhs}z.pgrbh00.grib2')
+            invalid_cached = False
+            if path.is_file():
+                with path.open('rb') as stream:
+                    invalid_cached = not _complete_grib2(stream)
+            if invalid_cached:
+                _LOG.warning('Retrying incomplete or invalid CFS2 cache file: %s', path)
+                path.unlink()
             if not path.is_file():
                 url = url_template.format(hhs)
                 _LOG.info('Downloading %s', url)
@@ -373,9 +402,15 @@ class _Cfs2ReanalysisDownloader:
                 if not response.is_success:
                     msg = f'Failed to download {url}'
                     raise RuntimeError(msg)
+                if not response.content:
+                    _LOG.warning('Empty CFS2 response; treating file as missing: %s', url)
+                    continue
+                if not _complete_grib2(BytesIO(response.content)):
+                    msg = f'Incomplete or invalid CFS2 GRIB download: {url} (cache file: {path})'
+                    raise RuntimeError(msg)
                 _LOG.info('Writing %s', path)
                 self._download_dir.write(path, response.content)
-            self._download_dir.publish([path])
+            self._download_dir.publish([path], overwrite=invalid_cached)
             paths.append(path)
         return paths
 

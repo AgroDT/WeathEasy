@@ -88,13 +88,13 @@ class DownloadCache:
         finally:
             pending.unlink(missing_ok=True)
 
-    def publish(self, paths: Iterable[Path]) -> None:
-        """Publish complete downloads, also retrying uploads from earlier processes."""
+    def publish(self, paths: Iterable[Path], *, overwrite: bool = False) -> None:
+        """Publish complete downloads, optionally replacing a known invalid cache entry."""
         if self.remote is None:
             return
         for path in paths:
             name = path.relative_to(self.root).as_posix()
-            if not self.remote.exists(name):
+            if overwrite or not self.remote.exists(name):
                 with path.open('rb') as source, self.remote.write_atomic(name) as target:
                     shutil.copyfileobj(source, target)
 
