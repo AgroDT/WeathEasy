@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import xarray as xr
-from httpx2 import Client, HTTPTransport
+from httpx2 import Client, HTTPTransport, ReadError, ReadTimeout, RemoteProtocolError
 
 from weatheasy import const
 from weatheasy.raw_cache import DownloadCache, default_work_dir, download_cache
@@ -33,6 +33,7 @@ from weatheasy.util import utc_now
 if TYPE_CHECKING:
     from typing import BinaryIO
 
+    from httpx2 import Response
     from zarr.abc.store import Store
 
     from weatheasy.file_storage import FileStore
@@ -375,6 +376,22 @@ class _Cfs2ReanalysisDownloader:
         self._session = session
         self._download_dir = download_dir
 
+    def _get(self, url: str) -> Response:
+        # Transport retries cover connection setup, not interrupted response bodies.
+        for attempt in range(3):
+            try:
+                return self._session.get(url, timeout=180)
+            except (ReadError, ReadTimeout, RemoteProtocolError):
+                delay = 2**attempt
+                _LOG.warning(
+                    'CFS2 download interrupted (attempt %s/4); retrying in %s s: %s',
+                    attempt + 1,
+                    delay,
+                    url,
+                )
+                time.sleep(delay)
+        return self._session.get(url, timeout=180)
+
     def __call__(self, date_: date) -> list[Path]:
         ymd = date_.strftime('%Y%m%d')
         ym = ymd[:-2]
@@ -395,7 +412,7 @@ class _Cfs2ReanalysisDownloader:
             if not path.is_file():
                 url = url_template.format(hhs)
                 _LOG.info('Downloading %s', url)
-                response = self._session.get(url, timeout=180)
+                response = self._get(url)
                 if response.status_code == 404:
                     _LOG.warning('Missing CFS2 file: %s', url)
                     continue

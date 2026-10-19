@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -10,7 +11,16 @@ import numpy as np
 import pytest
 import xarray as xr
 from fsspec.implementations.memory import MemoryFileSystem
-from httpx2 import Client, MockTransport, Request, Response
+from httpx2 import (
+    Client,
+    MockTransport,
+    ReadError,
+    ReadTimeout,
+    RemoteProtocolError,
+    Request,
+    Response,
+    SyncByteStream,
+)
 
 from weatheasy import const, download, raw_cache
 from weatheasy.file_storage import FileStore
@@ -184,6 +194,52 @@ def test_cmip6_public_download_processes_working_file_and_reuses_cache(
     assert len(processed) == 3
     if remote:
         assert fs.reads == [f'{backing.root}/cmip6/tas_2000.nc']
+
+
+@pytest.mark.parametrize('error_type', [RemoteProtocolError, ReadError, ReadTimeout])
+@pytest.mark.parametrize('failures', [2, 4], ids=['recovers', 'exhausted'])
+def test_cfs2_reanalysis_retries_interrupted_body_without_caching_partial_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    failures: int,
+    grib_content: bytes,
+):
+    remote = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
+    calls = []
+    delays = []
+    monkeypatch.setattr(download.time, 'sleep', delays.append)
+
+    class InterruptedBody(SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield b'GRIB-partial'
+            msg = 'incomplete response body'
+            raise error_type(msg)
+
+    def respond(request: Request) -> Response:
+        calls.append(request.url.path)
+        if len(calls) <= failures:
+            return Response(200, stream=InterruptedBody())
+        return Response(200, content=grib_content)
+
+    with (
+        download_cache(remote, work_dir=tmp_path / 'work') as cache,
+        Client(transport=MockTransport(respond)) as session,
+    ):
+        downloader = download._Cfs2ReanalysisDownloader(session, cache)
+        if failures == 4:
+            with pytest.raises(error_type, match='incomplete response body'):
+                downloader(date(2018, 10, 15))
+            assert len(calls) == 4
+            assert remote.glob('**/*.grib2') == []
+            assert list(cache.root.rglob('*.grib2')) == []
+            assert list(cache.root.rglob('*.part')) == []
+        paths = downloader(date(2018, 10, 15))
+        assert len(paths) == 4
+        assert all(path.read_bytes() == grib_content for path in paths)
+        assert len(remote.glob('**/*.grib2')) == 4
+        assert len(calls) == failures + 4
+        assert delays == ([1, 2] if failures == 2 else [1, 2, 4])
 
 
 @pytest.mark.parametrize('cached', [None, 'local', 'remote'])
