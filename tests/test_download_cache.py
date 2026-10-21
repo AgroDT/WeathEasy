@@ -634,7 +634,8 @@ def test_cfs2_reanalysis_keeps_calendar_and_appends_missing_days(
             return Response(missing_status)
         return Response(200, content=grib_content)
 
-    def read(path: Path, *, kind: str):
+    def read(path: Path, *, kind: str, product: str = 'reanalysis'):
+        assert product == 'reanalysis'
         day, cycle = path.name.split('.cdas1.t')
         when = np.datetime64(f'{day[:4]}-{day[4:6]}-{day[6:]}T{cycle[:2]}:00:00')
         offset = int((when.astype('datetime64[D]') - np.datetime64(begin)).astype(int))

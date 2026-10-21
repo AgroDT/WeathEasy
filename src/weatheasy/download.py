@@ -31,7 +31,7 @@ from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
-    from typing import BinaryIO
+    from typing import BinaryIO, Literal
 
     from httpx2 import Response
     from zarr.abc.store import Store
@@ -260,10 +260,17 @@ def _reanalysis_templates(
     return templates, prefetched
 
 
-def _daily_cfs2(paths: list[Path], kind: str, date_: date, template: xr.Dataset | None = None):
+def _daily_cfs2(
+    paths: list[Path],
+    kind: str,
+    date_: date,
+    template: xr.Dataset | None = None,
+    *,
+    product: Literal['reanalysis', 'forecast'] = 'reanalysis',
+):
     started = time.perf_counter()
     _LOG.info('Processing CFS2 %s %s: %s GRIB files', kind, date_, len(paths))
-    fields = [read_cfs2(path, kind=kind) for path in paths]
+    fields = [read_cfs2(path, kind=kind, product=product) for path in paths]
     bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
     if len(paths) < len(const.CFS2_HHS):
         if fields:
@@ -336,7 +343,7 @@ def _merge_cfs2_forecast(
             paths = [path for path in paths if path.is_file()]
             paths_by_day.append((date_, paths))
             if template is None and paths:
-                template = read_cfs2(paths[0], kind=kind)
+                template = read_cfs2(paths[0], kind=kind, product='forecast')
             date_ += const.ONE_DAY
         if template is None:
             msg = f'No forecast files for {kind}; forecast remains unavailable'
@@ -345,7 +352,10 @@ def _merge_cfs2_forecast(
         write_blocks(
             store,
             group,
-            (_daily_cfs2(paths, kind, date_, template) for date_, paths in paths_by_day),
+            (
+                _daily_cfs2(paths, kind, date_, template, product='forecast')
+                for date_, paths in paths_by_day
+            ),
             work_dir=work_dir,
             time_chunk=64,
         )

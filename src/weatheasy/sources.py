@@ -18,6 +18,7 @@ from weatheasy.storage import StorageError, merge_fields, prepare_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Literal
 
     from rasterio import CRS
 
@@ -56,7 +57,10 @@ def read_grib(
     with xr.open_dataset(path, engine=CfGribBackend, backend_kwargs=backend) as raw:
         if variable is None:
             if len(raw.data_vars) != 1:
-                msg = 'Select one GRIB variable explicitly'
+                msg = (
+                    f'Expected one GRIB variable for {name!r} in {str(path)!r}; '
+                    f'found {list(raw.data_vars)!r} with filter_by_keys={filter_by_keys!r}'
+                )
                 raise StorageError(msg)
             variable = str(next(iter(raw.data_vars)))
         field = raw[variable]
@@ -93,7 +97,8 @@ def read_netcdf(
 
 # NCEP GRIB2 discipline/category/number and fixed surfaces, independently of
 # message ordering. Verified against CDAS pgrbh00 and CFS FLX/PGB inventories.
-# Fluxes/rates use interval averages; CDAS may also contain instantaneous copies.
+# CDAS fluxes/rates use interval averages and may also have instantaneous copies.
+# CFS forecast FLX encodes these fields as instantaneous instead.
 _CFS_FIELDS = {
     'PEVPR': (0, 1, 200, 'surface', 0, 'instant'),
     'DLWRF': (0, 5, 192, 'surface', 0, 'avg'),
@@ -130,21 +135,29 @@ _SOIL_LAYERS = {
 }
 
 
-def read_cfs2(path: str | Path, *, kind: str) -> xr.Dataset:
+def read_cfs2(
+    path: str | Path, *, kind: str, product: Literal['reanalysis', 'forecast'] = 'reanalysis'
+) -> xr.Dataset:
     """Decode a current CFS2 source, preserving provider extrema and original grids.
 
     TMIN/TMAX are the distinct supplied minimum/maximum-temperature parameters,
     not extrema of a shared field. In CDAS pgrbh00 their encoded interval is 0..0
     with missing statistical-processing metadata; no six-hour interval is inferred.
     Daily reduction is performed by the loader using the existing statistics.
+    Product selects the encoded step type: CDAS average fluxes/rates versus
+    instantaneous CFS forecast fields, without changing values or their signs.
     """
     # cfgrib hashes the indexed keys, sharing an index between compatible filters.
     # Keep each file's indexes local to this read, outside the raw-file cache.
     with TemporaryDirectory(prefix='weatheasy-cfs2-grib-') as directory:
-        return _read_cfs2(path, kind=kind, indexpath=f'{directory}/{{short_hash}}.idx')
+        return _read_cfs2(
+            path, kind=kind, product=product, indexpath=f'{directory}/{{short_hash}}.idx'
+        )
 
 
-def _read_cfs2(path: str | Path, *, kind: str, indexpath: str) -> xr.Dataset:
+def _read_cfs2(
+    path: str | Path, *, kind: str, product: Literal['reanalysis', 'forecast'], indexpath: str
+) -> xr.Dataset:
     bands = const.CFS2_FLX_BANDS if kind == 'flx' else const.CFS2_PGB_BANDS
     fields = []
     source_grib = {}
@@ -171,7 +184,7 @@ def _read_cfs2(path: str | Path, *, kind: str, indexpath: str) -> xr.Dataset:
                 'level': level,
             }
             if step:
-                filters['stepType'] = step
+                filters['stepType'] = 'instant' if product == 'forecast' and step == 'avg' else step
         field = read_grib(
             path,
             name=name,
