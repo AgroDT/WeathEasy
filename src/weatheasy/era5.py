@@ -11,6 +11,7 @@ import calendar
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -19,10 +20,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
+from zarr.storage import LocalStore
 
 from weatheasy import const
 from weatheasy.era5_grib import merge_grib_fields, read_grib
-from weatheasy.raw_cache import DownloadCache, download_cache
+from weatheasy.era5_stage import DailyStage
+from weatheasy.raw_cache import DownloadCache, default_work_dir, download_cache
 from weatheasy.storage import (
     StorageError,
     group_attrs,
@@ -31,7 +34,6 @@ from weatheasy.storage import (
     open_dataset,
     prepare_dataset,
     set_group_attrs,
-    write_batches,
 )
 from weatheasy.util import utc_now
 
@@ -132,17 +134,18 @@ def download_era5_data(
     set_group_attrs(store, '', request_bbox=list(bbox))
     path = 'daily'
     previous = last_date(store, path)
-    first = next_month(previous) if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
     latest = utc_now().date() - 5 * const.ONE_DAY
     if previous:
-        marker = [previous.year, previous.month]
+        marker = _month_marker(previous)
         if group_attrs(store, '').get('last_month') != marker:
             # Recover a crash after committing daily data but before journal cleanup.
             set_group_attrs(store, '', last_month=marker)
+    stage, first, count = _resume_stage(store, bbox, work_dir, previous)
     with download_cache(download_dir, 'era5', work_dir=work_dir, target=str(store)) as cache:
         downloader = _Downloader(None, cache, bbox, store, max_pending_requests)
-        downloader.cleanup(first, latest, max_age_days=work_max_age_days)
+        downloader.cleanup(first.replace(day=1), latest, max_age_days=work_max_age_days)
         if next_month(first) > latest:
+            _publish_stage(stage, store)
             set_group_attrs(store, '', era5_requests={})
             return
         try:
@@ -153,21 +156,95 @@ def download_era5_data(
             raise ImportError(msg) from err
         # Keep cdsapi configuration/logging while using its DSS backend's job API.
         downloader.client = cast('Any', cdsapi.Client(wait_until_complete=False)).client
-        while next_month(first) <= latest:
-            following = next_month(first)
-            started = time.monotonic()
-            downloader.plan(first, latest)
-            LOGGER.info('Preparing ERA5-Land %s', first.strftime('%Y-%m'))
-            main, boundary = downloader.retrieve_month(first, latest)
-            try:
-                _validate_boundary(main, boundary)
-                write_batches(store, path, _daily_batches(main, boundary, first, bbox))
-            finally:
-                main.close()
-                boundary.close()
-            downloader.commit(first)
-            LOGGER.info('Prepared ERA5-Land %s in %.1f s', first, time.monotonic() - started)
-            first = following
+        _prepare_months(downloader, stage, first, latest, count)
+        _publish_stage(stage, store)
+
+
+def _resume_stage(
+    store: Store, bbox: tuple, work_dir: str | Path | None, previous: date | None
+) -> tuple[DailyStage, date, int]:
+    first = previous + const.ONE_DAY if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
+    directory = Path(work_dir).expanduser() if work_dir is not None else default_work_dir()
+    filesystem = getattr(store, 'fs', None)
+    identity = json.dumps(
+        {
+            'store': str(store.root.resolve()) if isinstance(store, LocalStore) else str(store),
+            'bbox': [float(value) for value in bbox],
+            'endpoint': getattr(filesystem, 'client_kwargs', {}).get('endpoint_url')
+            or os.environ.get('AWS_ENDPOINT_URL_S3')
+            or os.environ.get('AWS_ENDPOINT_URL'),
+        },
+        sort_keys=True,
+    )
+    namespace = hashlib.sha256(identity.encode()).hexdigest()[:20]
+    stage = DailyStage(directory / 'era5' / 'staging' / namespace)
+    if stage.written:
+        begin, end = stage.dates()
+        if previous and end <= previous:
+            # The remote commit succeeded before local acknowledgement.
+            stage.clear()
+        elif begin != first:
+            msg = 'ERA5 staging does not follow the committed period'
+            raise StorageError(msg)
+        else:
+            first = end + const.ONE_DAY
+    count = int(group_attrs(store, 'daily').get('committed_length', 0)) if previous else 0
+    capacity = 128 - count % 128
+    if stage.written > capacity:
+        msg = 'ERA5 staging exceeds the next time chunk boundary'
+        raise StorageError(msg)
+    if stage.written == capacity:
+        _publish_stage(stage, store)
+        count += capacity
+    return stage, first, count
+
+
+def _month_marker(day: date) -> list[int]:
+    last = (
+        day
+        if day.day == calendar.monthrange(day.year, day.month)[1]
+        else (day.replace(day=1) - const.ONE_DAY)
+    )
+    return [last.year, last.month]
+
+
+def _publish_stage(stage: DailyStage, store: Store) -> None:
+    if not stage.written:
+        return
+    begin, end = stage.dates()
+    started = time.monotonic()
+    LOGGER.info('Writing ERA5-Land block: %s through %s (%s days)', begin, end, stage.written)
+    stage.publish(store)
+    set_group_attrs(store, '', last_month=_month_marker(end))
+    stage.clear()
+    LOGGER.info('Published ERA5-Land through %s in %.1f s', end, time.monotonic() - started)
+
+
+def _prepare_months(
+    downloader: _Downloader, stage: DailyStage, first: date, latest: date, count: int
+) -> None:
+    month = first.replace(day=1)
+    capacity = 128 - count % 128
+    while next_month(month) <= latest:
+        started = time.monotonic()
+        downloader.plan(month, latest)
+        LOGGER.info('Preparing ERA5-Land %s; local staging in %s', month, stage.directory)
+        main, boundary = downloader.retrieve_month(month, latest)
+        try:
+            _validate_boundary(main, boundary)
+            for day in _daily_batches(main, boundary, month, downloader.bbox, begin=first):
+                stage.append(day)
+                if stage.written == capacity:
+                    _publish_stage(stage, downloader.store)
+                    capacity = 128
+        finally:
+            main.close()
+            boundary.close()
+        # Daily reductions are checkpointed locally, so hourly files can be released.
+        downloader.release(month)
+        LOGGER.info('Staged ERA5-Land %s in %.1f s', month, time.monotonic() - started)
+        month = next_month(month)
+        first = month
 
 
 @dataclass(frozen=True)
@@ -327,9 +404,9 @@ class _Downloader:
                 time.sleep(10)
         return [pieces[part.key] for part in parts]
 
-    def commit(self, month: date) -> None:
+    def release(self, month: date) -> None:
         # A full set of next-month midnights belongs to that next month: retain
-        # its local file and journal entry until that month's writes commit.
+        # its local file and journal entry until that month's reductions are staged.
         parts = [
             part
             for part in self.parts.values()
@@ -338,9 +415,7 @@ class _Downloader:
         for part in parts:
             self.requests.pop(part.key, None)
             self.parts.pop(part.key, None)
-        set_group_attrs(
-            self.store, '', last_month=[month.year, month.month], era5_requests=self.requests
-        )
+        set_group_attrs(self.store, '', era5_requests=self.requests)
         self.cache.release(self.cache.root / part.filename for part in parts)
 
     def _part(
@@ -378,12 +453,14 @@ class _Downloader:
         return read_grib(path, part.required)
 
 
-def _daily_batches(main: xr.Dataset, boundary: xr.Dataset, month: date, bbox: tuple):
-    """Keep the entire month uncommitted until all days are processed."""
+def _daily_batches(
+    main: xr.Dataset, boundary: xr.Dataset, month: date, bbox: tuple, *, begin: date | None = None
+):
+    """Reduce only days not already committed or checkpointed locally."""
     days = calendar.monthrange(month.year, month.month)[1]
-    for offset in range(days):
+    for offset in range((begin - month).days if begin else 0, days):
         day = month + offset * const.ONE_DAY
-        LOGGER.info('Reducing and writing ERA5-Land %s (%s/%s)', day, offset + 1, days)
+        LOGGER.info('Reducing and staging ERA5-Land %s (%s/%s)', day, offset + 1, days)
         ds = process_day(main, boundary, day)
         ds.attrs['request_bbox'] = list(bbox)
         yield ds

@@ -142,7 +142,7 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
             '--work-dir',
             type=Path,
             help=(
-                'local directory for remote cache files and CFS2 weather blocks; '
+                'local directory for remote cache files and CFS2/ERA5 weather blocks; '
                 'unset uses the platform state directory'
             ),
         )

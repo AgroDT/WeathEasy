@@ -454,7 +454,7 @@ def write_batches(  # noqa: C901, PLR0912, PLR0915
     sync(store.delete_dir(f'{group}/.append-backup/'))
 
 
-def write_blocks(  # noqa: C901, PLR0912, PLR0915
+def write_blocks(
     store: Store,
     group: str,
     datasets: Iterable[xr.Dataset],
@@ -466,37 +466,14 @@ def write_blocks(  # noqa: C901, PLR0912, PLR0915
     log = logging.getLogger(__name__)
     directory = Path(work_dir).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
-    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
-    target = root.require_group(group)
-    count = int(cast('int', target.attrs.get('committed_length', 0)))
     days = iter(datasets)
     while (first := next(days, None)) is not None:
         if time_chunk < 1 or first.attrs.get('storage_schema') != SCHEMA:
             msg = 'A prepared dataset and positive chunk sizes are required'
             raise StorageError(msg)
         signature = _signature(first)
-        if count:
-            if target.attrs.get('grid_signature') != signature:
-                msg = 'Existing group has a conflicting grid, CRS, variables or units'
-                raise StorageError(msg)
-            time_array = target.get_array('time')
-            last = decode_cf_datetime(
-                time_array[count - 1 : count],
-                cast('str', time_array.attrs['units']),
-                cast('str', time_array.attrs['calendar']),
-            )[0]
-            if first.time.to_numpy()[0] <= last:
-                msg = 'New timestamps must follow all committed timestamps'
-                raise StorageError(msg)
-        attrs = dict(
-            first.attrs,
-            grid_signature=signature,
-            committed_length=count,
-            write_state='writing',
-        )
         with TemporaryDirectory(prefix='weatheasy-weather-', dir=directory) as temporary:
             template = first.isel(time=slice(0, 0)).copy()
-            template.attrs = attrs
             filenames = {
                 name: Path(temporary) / f'{index}.raw'
                 for index, name in enumerate(['time', *(str(name) for name in first.data_vars)])
@@ -523,34 +500,84 @@ def write_blocks(  # noqa: C901, PLR0912, PLR0915
                 previous = day.time.to_numpy()[-1]
             del first, day, values
             log.info('Writing %s: %s days', group, written)
-            root.update_attributes(dict(root.attrs))
-            if count:
-                _restore_append_backup(store, target)
-                _truncate_uncommitted(target, count)
-                _save_append_backup(store, target, count)
-            target.attrs.update(attrs)
-            if not count:
-                _write_time_batch(store, group, template, tile_size=32, time_chunk=time_chunk)
-                target = root.get_group(group)
-            for name, filename in filenames.items():
-                staged = np.memmap(
-                    filename,
-                    mode='r',
-                    dtype=np.int64 if name == 'time' else template[name].dtype,
-                    shape=(written,)
-                    if name == 'time'
-                    else (written, template.sizes['latitude'], template.sizes['longitude']),
-                )
-                try:
-                    _copy_staged(target, {name: staged}, count, written)
-                finally:
-                    cast('mmap', staged.base).close()
-                    del staged
-        count += written
-        target.attrs.put(dict(attrs, committed_length=count, write_state='complete'))
-        zarr.consolidate_metadata(store)
-        sync(store.delete_dir(f'{group}/.append-backup/'))
-        log.info('Saved %s: %s committed days', group, count)
+            write_staged(store, group, template, filenames, written, time_chunk=time_chunk)
+        log.info('Saved %s: %s days', group, written)
+
+
+def write_staged(
+    store: Store,
+    group: str,
+    template: xr.Dataset,
+    filenames: dict[str, Path],
+    written: int,
+    *,
+    time_chunk: int,
+) -> None:
+    """Publish local raw daily fields; retain their files until the caller acknowledges commit."""
+    if template.attrs.get('storage_schema') != SCHEMA or time_chunk < 1:
+        msg = 'A prepared dataset and positive chunk sizes are required'
+        raise StorageError(msg)
+    root = zarr.open_group(store, mode='a', zarr_format=3, use_consolidated=False)
+    target = root.require_group(group)
+    count = int(cast('int', target.attrs.get('committed_length', 0)))
+    signature = _signature(template)
+    if 'storage_schema' in target.attrs and (
+        target.attrs['storage_schema'] != SCHEMA or target.attrs.get('grid_signature') != signature
+    ):
+        msg = 'Existing group has a conflicting grid, CRS, variables or units'
+        raise StorageError(msg)
+    times = np.fromfile(filenames['time'], dtype=np.int64, count=written)
+    if written < 1 or len(times) != written or np.any(np.diff(times) <= 0):
+        msg = 'Staged weather timestamps must be nonempty and increasing'
+        raise StorageError(msg)
+    if count:
+        time_array = target.get_array('time')
+        last = (
+            decode_cf_datetime(
+                time_array[count - 1 : count],
+                cast('str', time_array.attrs['units']),
+                cast('str', time_array.attrs['calendar']),
+            )[0]
+            .astype('datetime64[s]')
+            .astype(np.int64)
+        )
+        if times[0] <= last:
+            msg = 'New timestamps must follow all committed timestamps'
+            raise StorageError(msg)
+        _restore_append_backup(store, target)
+        _truncate_uncommitted(target, count)
+        _save_append_backup(store, target, count)
+    elif 'storage_schema' not in target.attrs and (list(target.keys()) or target.attrs):
+        msg = 'Existing group is not a coordinate-aware weatheasy store'
+        raise StorageError(msg)
+    attrs = dict(
+        template.attrs, grid_signature=signature, committed_length=count, write_state='writing'
+    )
+    target.attrs.update(attrs)
+    if not count:
+        template = template.copy()
+        template.attrs = attrs
+        _write_time_batch(store, group, template, tile_size=32, time_chunk=time_chunk)
+        target = root.get_group(group)
+    for name, filename in filenames.items():
+        staged = np.memmap(
+            filename,
+            mode='r',
+            dtype=np.int64 if name == 'time' else template[name].dtype,
+            shape=(written,)
+            if name == 'time'
+            else (written, template.sizes['latitude'], template.sizes['longitude']),
+        )
+        try:
+            _copy_staged(target, {name: staged}, count, written)
+        finally:
+            cast('mmap', staged.base).close()
+    final_attrs = dict(target.attrs)
+    final_attrs.pop('append_backup', None)
+    final_attrs.update(committed_length=count + written, write_state='complete')
+    target.attrs.put(final_attrs)
+    zarr.consolidate_metadata(store)
+    sync(store.delete_dir(f'{group}/.append-backup/'))
 
 
 def _copy_staged(

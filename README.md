@@ -169,7 +169,8 @@ Local directories are used directly. With S3,
 new files are downloaded locally and uploaded to the cache before processing,
 so a processing failure does not require downloading from the source again.
 Cached files are fetched only when needed. Remote-cache working copies remain on
-local disk across failed runs and are removed after their prepared results commit.
+local disk across failed runs and are removed after their prepared results commit
+(for ERA5, after daily reductions are checkpointed locally).
 Use `--work-dir` to choose this directory. Defaults are
 `$XDG_STATE_HOME/weatheasy/downloads` (otherwise `~/.local/state/weatheasy/downloads`)
 on Linux, `%LOCALAPPDATA%\weatheasy\downloads` (otherwise
@@ -210,12 +211,27 @@ former all-hourly requests; existing prepared months remain usable.
 The loader opens fields lazily through xarray/cfgrib and decodes
 one hourly spatial field at a time, reducing inputs into one day of output. A day spans multiple
 Zarr chunks, `(128, 32, 32)` each; GRIB fields are not repeatedly decoded
-for individual spatial tiles. Daily reductions are staged on local disk and written as aligned time blocks.
+for individual spatial tiles. Daily reductions accumulate across month boundaries
+in a persistent local staging directory, then publish at 128-day chunk boundaries.
+An existing partial chunk is filled first; the final incomplete block is published
+once the loader catches up with the available complete months. Historical loading
+therefore avoids reading, backing up and rewriting a partial chunk every month.
 Memory depends on the requested grid rather than the number of days in a month. NaNs and next-midnight accumulations are preserved.
 Fields may have different time coverage; missing hours remain NaN, making affected
-daily statistics incomplete. The month is published only after every daily write and raw-cache
-upload succeeds; interrupted months are retried without duplicating dates.
+daily statistics incomplete. Each block is published only after all of its daily
+reductions and raw-cache uploads succeed. A committed block may end mid-month;
+restarts continue at the next unprocessed day without duplicating or skipping dates.
 Existing NetCDF cache entries are retained but are not reused by the GRIB loader.
+
+Staging files live in `--work-dir/era5/staging/<target-hash>/`, defaulting to
+`era5/staging/<target-hash>/` under the platform's working-download directory
+(on Linux, `${XDG_STATE_HOME:-~/.local/state}/weatheasy/downloads`). Raw float32
+fields require up to `128 × latitude_count × longitude_count × variable_count × 4`
+bytes, in addition to the downloaded GRIB inputs. Each completed day advances an
+atomic local checkpoint; files are retained after failures and removed after the
+Zarr commit. Keep this directory on a persistent volume to reuse reductions after
+container restarts. If local staging is lost, processing resumes from the last
+Zarr commit using the raw cache or CDS jobs.
 
 The loader keeps up to three outstanding CDS requests by default. Set
 `--max-pending-requests N` to change the window (`1` sends requests sequentially).
@@ -223,15 +239,15 @@ Ready results are downloaded independently of submission order within each
 month, and the window is refilled before raw-cache uploads. Requests
 may be submitted for the current and next month; processing and Zarr writes
 remain sequential. Temporary GRIB working copies are removed after their own month
-commits; prefetched monthly midnights survive the preceding month's commit and
+has been checkpointed locally; prefetched monthly midnights survive that cleanup and
 restarts. A persistent local download cache is retained.
 
 The target Zarr's root attribute `era5_requests` maps request hashes to CDS job
 IDs, saved immediately after submission. Restarts reuse downloaded files or
 resume the saved jobs, including jobs still queued/running. Missing or terminally
 failed jobs are replaced; network/authentication errors retain their IDs. The
-journal drops only the completed month after its data and raw-cache uploads
-commit successfully, preserving jobs submitted for the next month.
+journal drops a completed month after its daily reductions are checkpointed
+locally and raw-cache uploads succeed, preserving jobs submitted for the next month.
 Run one writer per target store.
 
 A full example for CFSv2:

@@ -13,7 +13,7 @@ import xarray as xr
 from weatheasy import const, era5
 from weatheasy.era5_grib import read_grib
 from weatheasy.query import Coords, get_era5_data
-from weatheasy.storage import StorageError, get_store, open_dataset
+from weatheasy.storage import StorageError, get_store, open_dataset, prepare_dataset, write_batches
 from weatheasy.util import get_storage
 
 
@@ -79,6 +79,83 @@ def create_january_store(
     bbox = (55.3, 37.1, 55.2, 37.3)
     era5.download_era5_data(root.store, bbox=bbox)
     return root, bbox, cds_client
+
+
+@pytest.fixture(name='block_days')
+def create_block_days(monkeypatch: pytest.MonkeyPatch):
+    """Supply known daily fields; these tests exercise publication, not hourly reduction."""
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 6, 10, tzinfo=UTC))
+    template = prepare_dataset(
+        xr.Dataset(
+            {
+                'TMP': (
+                    ('time', 'latitude', 'longitude'),
+                    np.zeros((1, 2, 3), 'float32'),
+                    {'units': 'degC'},
+                ),
+                'WIND': (
+                    ('time', 'latitude', 'longitude'),
+                    np.full((1, 2, 3), 5, 'float32'),
+                    {'units': 'm/s'},
+                ),
+                'PRATE': (
+                    ('time', 'latitude', 'longitude'),
+                    np.full((1, 2, 3), 8 / 86400, 'float32'),
+                    {'units': 'kg m-2 s-1'},
+                ),
+            },
+            coords={
+                'time': [np.datetime64('2000-01-01')],
+                'latitude': [55.2, 55.3],
+                'longitude': [37.1, 37.2, 37.3],
+            },
+        ),
+        crs=const.ERA5_CRS,
+    )
+    processed = []
+
+    def reduce_day(_main, _boundary, day):  # noqa: ANN001
+        processed.append(day)
+        result = template.copy(deep=True).assign_coords(time=[np.datetime64(day)])
+        result.TMP[:] = (day - date(2000, 1, 1)).days
+        return result
+
+    monkeypatch.setattr(era5, 'process_day', reduce_day)
+    return processed
+
+
+@pytest.fixture(name='staging_days')
+def create_staging_days():
+    return prepare_dataset(
+        xr.Dataset(
+            {
+                'TMP': (
+                    ('time', 'latitude', 'longitude'),
+                    np.array([[[10, np.nan], [11, 12]], [[20, 21], [22, 23]]], dtype='float32'),
+                    {'units': 'degC'},
+                ),
+            },
+            coords={
+                'time': np.array(['2000-01-01', '2000-01-02'], dtype='datetime64[D]'),
+                'latitude': [50.0, 51.0],
+                'longitude': [30.0, 31.0],
+            },
+        ),
+        crs=const.ERA5_CRS,
+    )
+
+
+def assert_block_result(store, processed: list[date], work: Path):  # noqa: ANN001
+    assert processed == [date(2000, 1, 1) + i * const.ONE_DAY for i in range(152)]
+    with open_dataset(store, 'daily') as saved:
+        np.testing.assert_array_equal(
+            saved.time, np.arange('2000-01-01', '2000-06-01', dtype='datetime64[D]')
+        )
+        np.testing.assert_array_equal(saved.TMP[:, 0, 0], np.arange(152))
+        np.testing.assert_allclose(saved.WIND, 5)
+        np.testing.assert_allclose(saved.PRATE * 86400, 8)
+    assert not list(work.rglob('*.raw'))
 
 
 def source(month: date, *, boundary: bool = False):
@@ -381,10 +458,12 @@ def test_interrupted_month_append_preserves_commit_and_recovers(
 
     original = storage._copy_staged
 
-    def fail_write(*args, **kwargs):
-        original(*args, **kwargs)
-        msg = 'interrupted after appending arrays'
-        raise OSError(msg)
+    def fail_write(target, staged, count, written):  # noqa: ANN001
+        original(target, staged, count, written)
+        if 'TMP' in staged:
+            target.get_array('TMP')[:count] = 999
+            msg = 'interrupted after appending arrays'
+            raise OSError(msg)
 
     with monkeypatch.context() as patch:
         patch.setattr(storage, '_copy_staged', fail_write)
@@ -399,6 +478,9 @@ def test_interrupted_month_append_preserves_commit_and_recovers(
     assert root['daily'].attrs['committed_length'] == 60
     assert len(cds_client.calls) == 8
     assert root[''].attrs['era5_requests'] == {}
+    with open_dataset(root.store, 'daily') as saved:
+        np.testing.assert_allclose(saved.TMP, 20)
+        np.testing.assert_allclose(saved.WIND, 5)
 
 
 def test_cache_includes_bbox(tmp_path: Path, cds_client: FakeCDSClient):
@@ -826,7 +908,7 @@ def test_grib_daily_reduction_is_lazy_and_uses_next_midnight(
     assert result.attrs['source_grib']['main']['t2m'] == {'edition': 2, 'radius': 6367470}
     assert result.attrs['source_grib']['boundary']['tp'] == {'edition': 2, 'radius': 6367470}
     store = get_store(tmp_path / 'daily.zarr')
-    era5.write_batches(store, 'daily', [result])
+    write_batches(store, 'daily', [result])
     with open_dataset(store, 'daily') as stored:
         assert stored.attrs['source_grib'] == result.attrs['source_grib']
         assert stored.rio.crs.to_dict()['R'] == 6371229
@@ -925,10 +1007,10 @@ def test_submission_window_and_restart_keep_next_month_jobs(
     boundary.close()
     assert downloaded == ([1, 2, 3, 4] if limit == 1 else [2, 1, 3, 4])
     assert len(cds_client.calls) == 4 + limit
-    loader.commit(date(2000, 1, 1))
+    loader.release(date(2000, 1, 1))
     saved = era5.group_attrs(store, '')['era5_requests']
     assert set(saved.values()) == {f'job-{i}' for i in range(4, 5 + limit)}
-    # Committing January frees its working copies, retaining all February midnights.
+    # Staging January frees its working copies, retaining all February midnights.
     remaining = list(cache.root.glob('*.grib'))
     assert len(remaining) == 1
     assert remaining[0].name.startswith('200002-')
@@ -949,7 +1031,7 @@ def test_submission_window_and_restart_keep_next_month_jobs(
     boundary.close()
     assert sorted(downloaded) == list(range(1, 8))
     assert len(cds_client.calls) == 7
-    restarted.commit(date(2000, 2, 1))
+    restarted.release(date(2000, 2, 1))
     assert not list(cache.root.glob('*.grib'))
     assert era5.group_attrs(store, '')['era5_requests'] == {}
 
@@ -997,7 +1079,7 @@ def test_rolling_months_reuse_midnights_with_correct_daily_values(
     np.testing.assert_allclose(daily.PRATE * 86400, 12)
     main.close()
     boundary.close()
-    loader.commit(month)
+    loader.release(month)
 
     loader.plan(following, end)
     main, boundary = loader.retrieve_month(following, end)
@@ -1009,7 +1091,7 @@ def test_rolling_months_reuse_midnights_with_correct_daily_values(
     np.testing.assert_allclose(daily.PRATE * 86400, 23)
     main.close()
     boundary.close()
-    loader.commit(following)
+    loader.release(following)
 
     assert len(cds_client.calls) == 7
     midnights = [request for request in cds_client.calls if request['time'] == ['00:00']]
@@ -1047,7 +1129,7 @@ def test_available_next_month_midnights_survive_waiting_for_its_boundary(
     )
     main.close()
     boundary.close()
-    loader.commit(date(2000, 1, 1))
+    loader.release(date(2000, 1, 1))
     remaining = list(cache.root.glob('*.grib'))
     assert len(remaining) == 1
     assert remaining[0].name.startswith('200002-')
@@ -1058,3 +1140,187 @@ def test_available_next_month_midnights_survive_waiting_for_its_boundary(
     restarted.cleanup(date(2000, 2, 1), latest, max_age_days=7)
     assert remaining[0].is_file()
     assert len(cds_client.calls) == 4
+
+
+@pytest.mark.parametrize('existing_month', [False, True], ids=['new-store', 'existing-store'])
+@pytest.mark.usefixtures('cds_client')
+def test_historical_download_writes_aligned_blocks_across_months(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    block_days: list[date],
+    *,
+    existing_month: bool,
+):
+    from weatheasy import storage
+
+    store = get_store(tmp_path / 'store')
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    if existing_month:
+        monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+        era5.download_era5_data(store, tmp_path / 'cache', bbox=bbox)
+    writes = []
+    original = storage._copy_staged
+
+    def record_block(target, staged, count, written):  # noqa: ANN001
+        if 'TMP' in staged:
+            writes.append((count, written))
+        return original(target, staged, count, written)
+
+    monkeypatch.setattr(storage, '_copy_staged', record_block)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 6, 10, tzinfo=UTC))
+    era5.download_era5_data(store, tmp_path / 'cache', bbox=bbox, work_dir=tmp_path / 'work')
+    expected = [(31, 97), (128, 24)] if existing_month else [(0, 128), (128, 24)]
+    assert writes == expected
+    assert era5.group_attrs(store, '')['last_month'] == [2000, 5]
+    assert_block_result(store, block_days, tmp_path / 'work')
+
+
+@pytest.mark.usefixtures('cds_client')
+def test_restart_after_reduction_failure_reuses_local_days(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    block_days: list[date],
+):
+    store = get_store(tmp_path / 'store')
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    work = tmp_path / 'work'
+    reduce_day = era5.process_day
+
+    def fail_reduction(main, boundary, day):  # noqa: ANN001
+        if day == date(2000, 5, 10):
+            msg = 'reduction interrupted'
+            raise OSError(msg)
+        return reduce_day(main, boundary, day)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(era5, 'process_day', fail_reduction)
+        with pytest.raises(OSError, match='reduction interrupted'):
+            era5.download_era5_data(store, tmp_path / 'cache', bbox=bbox, work_dir=work)
+    assert list(work.rglob('state.json'))
+    assert era5.last_date(store, 'daily') == date(2000, 5, 7)
+    era5.download_era5_data(
+        get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox, work_dir=work
+    )
+    assert_block_result(store, block_days, work)
+
+
+@pytest.mark.usefixtures('cds_client')
+def test_restart_after_upload_failure_reuses_complete_local_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_days: list[date]
+):
+    from weatheasy import storage
+
+    store = get_store(tmp_path / 'store')
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    work = tmp_path / 'work'
+    copy = storage._copy_staged
+
+    def fail_upload(target, staged, count, written):  # noqa: ANN001
+        copy(target, staged, count, written)
+        if 'TMP' in staged:
+            msg = 'upload interrupted'
+            raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, '_copy_staged', fail_upload)
+        with pytest.raises(OSError, match='upload interrupted'):
+            era5.download_era5_data(store, tmp_path / 'cache', bbox=bbox, work_dir=work)
+    assert list(work.rglob('state.json'))
+    assert era5.last_date(store, 'daily') is None
+    with pytest.raises(StorageError, match='completed'):
+        open_dataset(store, 'daily')
+    era5.download_era5_data(
+        get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox, work_dir=work
+    )
+    assert_block_result(store, block_days, work)
+
+
+@pytest.mark.usefixtures('cds_client')
+def test_restart_after_commit_discards_already_published_local_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_days: list[date]
+):
+    from weatheasy.era5_stage import DailyStage
+
+    store = get_store(tmp_path / 'store')
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    work = tmp_path / 'work'
+
+    def fail_acknowledgement(_self):  # noqa: ANN001
+        msg = 'acknowledgement interrupted'
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DailyStage, 'clear', fail_acknowledgement)
+        with pytest.raises(OSError, match='acknowledgement interrupted'):
+            era5.download_era5_data(store, tmp_path / 'cache', bbox=bbox, work_dir=work)
+    assert list(work.rglob('state.json'))
+    assert era5.last_date(store, 'daily') == date(2000, 5, 7)
+    with open_dataset(store, 'daily') as saved:
+        np.testing.assert_array_equal(saved.TMP[:, 0, 0], np.arange(128))
+    era5.download_era5_data(
+        get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox, work_dir=work
+    )
+    assert_block_result(store, block_days, work)
+
+
+def test_local_checkpoint_failure_overwrites_only_unacknowledged_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staging_days: xr.Dataset
+):
+    from weatheasy.era5_stage import DailyStage
+
+    days = staging_days
+    directory = tmp_path / 'stage'
+    stage = DailyStage(directory)
+    stage.append(days.isel(time=slice(0, 1)))
+    replace = Path.replace
+
+    def fail_checkpoint(path, destination):  # noqa: ANN001
+        if path.name == 'state.part':
+            msg = 'checkpoint interrupted'
+            raise OSError(msg)
+        return replace(path, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'replace', fail_checkpoint)
+        with pytest.raises(OSError, match='checkpoint interrupted'):
+            stage.append(days.isel(time=slice(1, 2)))
+    recovered = DailyStage(directory)
+    assert recovered.written == 1
+    assert recovered.dates() == (date(2000, 1, 1), date(2000, 1, 1))
+    replacement = days.isel(time=slice(1, 2)).copy(deep=True)
+    replacement.TMP[:] = 40
+    recovered.append(replacement)
+    store = get_store(tmp_path / 'store')
+    recovered.publish(store)
+    with open_dataset(store, 'daily') as saved:
+        np.testing.assert_array_equal(saved.TMP[0], [[10, np.nan], [11, 12]])
+        np.testing.assert_array_equal(saved.TMP[1], [[40, 40], [40, 40]])
+        np.testing.assert_array_equal(saved.time, days.time)
+
+
+def test_staging_metadata_preserves_numpy_numbers(tmp_path: Path, staging_days: xr.Dataset):
+    from weatheasy.era5_stage import DailyStage
+
+    day = staging_days.isel(time=slice(0, 1)).copy()
+    day.attrs['source_grib'] = {'edition': np.int64(2), 'radius': np.float32(6371229)}
+    stage = DailyStage(tmp_path / 'stage')
+    stage.append(day)
+    restarted = DailyStage(tmp_path / 'stage')
+    store = get_store(tmp_path / 'store')
+    restarted.publish(store)
+    with open_dataset(store, 'daily') as saved:
+        assert saved.attrs['source_grib'] == {'edition': 2, 'radius': 6371229}
+
+
+def test_unsupported_staging_metadata_does_not_advance_checkpoint(
+    tmp_path: Path, staging_days: xr.Dataset
+):
+    from weatheasy.era5_stage import DailyStage
+
+    day = staging_days.isel(time=slice(0, 1)).copy()
+    day.attrs['source_grib'] = {'radius': object()}
+    stage = DailyStage(tmp_path / 'stage')
+    with pytest.raises(TypeError, match='Unsupported ERA5 metadata type: object'):
+        stage.append(day)
+    assert stage.written == 0
+    assert not (tmp_path / 'stage' / 'state.json').exists()
