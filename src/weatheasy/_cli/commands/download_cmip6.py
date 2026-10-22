@@ -12,4 +12,5 @@ def run(args: Namespace) -> None:
         cache,
         work_dir=args.work_dir,
         work_max_age_days=args.work_max_age_days,
+        proxy=args.proxy,
     )

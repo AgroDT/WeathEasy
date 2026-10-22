@@ -12,6 +12,7 @@ def run(args: Namespace) -> None:
         cache,
         work_dir=args.work_dir,
         work_max_age_days=args.work_max_age_days,
+        proxy=args.proxy,
         bbox=tuple(args.bbox) if args.bbox else None,
         max_pending_requests=args.max_pending_requests,
     )

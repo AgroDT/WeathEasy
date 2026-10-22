@@ -107,6 +107,7 @@ def download_era5_data(
     work_max_age_days: int = 7,
     bbox: tuple[float, float, float, float] | None = None,
     max_pending_requests: int = 3,
+    proxy: str | None = None,
 ) -> None:
     """Append complete months through the last month with available midnight data.
 
@@ -151,12 +152,20 @@ def download_era5_data(
         try:
             # The CDS client is optional and needed only for a pending download.
             import cdsapi  # noqa: PLC0415
+            import requests  # noqa: PLC0415
         except ImportError as err:
             msg = 'ERA5 preparation requires weatheasy[prepare]'
             raise ImportError(msg) from err
-        # Keep cdsapi configuration/logging while using its DSS backend's job API.
-        downloader.client = cast('Any', cdsapi.Client(wait_until_complete=False)).client
-        _prepare_months(downloader, stage, first, latest, count)
+        with requests.Session() as session:
+            if proxy is not None:
+                # An explicit proxy takes precedence over environment proxy settings.
+                session.trust_env = False
+                session.proxies.update({'http': proxy, 'https': proxy})
+            # Keep cdsapi configuration/logging while using its DSS backend's job API.
+            downloader.client = cast(
+                'Any', cdsapi.Client(wait_until_complete=False, session=session)
+            ).client
+            _prepare_months(downloader, stage, first, latest, count)
         _publish_stage(stage, store)
 
 
@@ -388,6 +397,8 @@ class _Downloader:
                     pending = path.with_name(path.name + '.part')
                     LOGGER.info('Downloading ERA5-Land GRIB: %s', path.name)
                     started = time.monotonic()
+                    # Use the CDS session for file downloads as well as API requests.
+                    remote.download_options['session'] = self.client.session
                     remote.download(str(pending))
                     LOGGER.info('Downloaded %s in %.1f s', path.name, time.monotonic() - started)
                     pending.replace(path)

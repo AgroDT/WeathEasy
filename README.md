@@ -156,6 +156,15 @@ weatheasy download {cfs2,cmip6,era5} --store STORE
 Where `STORE` can be a local path or an S3 link in format
 `s3://<bucket>/<prefix>`.
 
+All three download commands accept `--proxy URL` for weather source requests,
+including CDS API requests and file downloads for ERA5-Land. For example:
+
+```sh
+weatheasy download cfs2 --store ./cfs2.zarr --proxy http://127.0.0.1:8080
+```
+
+This option does not change the proxy configuration for S3 storage or caches.
+
 For S3 you need to export `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. For
 any not-AWS S3 storages you also need to export `AWS_ENDPOINT_URL_S3`. See the
 [Boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables)

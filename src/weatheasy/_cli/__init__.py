@@ -134,6 +134,7 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         )
         sub.set_defaults(handler=f'download_{source}')
         _store(sub, source=source)
+        sub.add_argument('--proxy', metavar='URL', help='proxy URL for weather source requests')
         sub.add_argument(
             '--download-cache',
             help='persistent raw-file cache, local path or s3:// URI; omitted uses temporary files',

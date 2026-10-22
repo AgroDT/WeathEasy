@@ -45,6 +45,7 @@ def download_cfs2_data(
     *,
     work_dir: str | Path | None = None,
     work_max_age_days: int = 7,
+    proxy: str | None = None,
 ) -> None:
     work_dir = Path(work_dir).expanduser() if work_dir is not None else default_work_dir()
     set_group_attrs(store, '')
@@ -101,7 +102,7 @@ def download_cfs2_data(
             _LOG.info('No forecast update required')
             return
         forecast = forecast_cache.child(today.isoformat())
-        session = stack.enter_context(_session())
+        session = stack.enter_context(_session(proxy))
         _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis, work_dir=work_dir)
         _download_cfs2_forecast(forecast_begin, yesterday, session, forecast)
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast)
@@ -116,6 +117,7 @@ def download_cmip6_data(
     *,
     work_dir: str | Path | None = None,
     work_max_age_days: int = 7,
+    proxy: str | None = None,
 ) -> None:
     set_group_attrs(store, '')
     with download_cache(
@@ -131,7 +133,7 @@ def download_cmip6_data(
             for year in range(first, const.CMIP6_LAST_YEAR + 1)
         }
         cache.cleanup(needed.__contains__, max_age_days=work_max_age_days)
-        with _session() as session:
+        with _session(proxy) as session:
             for var, first in first_years.items():
                 for year in range(first, const.CMIP6_LAST_YEAR + 1):
                     source = _load_cmip6_dataset(cache, var, year, session)
@@ -166,8 +168,8 @@ _LOG = logging.getLogger(_MODULE_NAME)
 _CFS2_DOWNLOADED_FILENAME_TEMPLATE = '{}{}{}.grb2'
 
 
-def _session() -> Client:
-    return Client(transport=HTTPTransport(retries=3), follow_redirects=True)
+def _session(proxy: str | None = None) -> Client:
+    return Client(transport=HTTPTransport(retries=3, proxy=proxy), follow_redirects=True)
 
 
 def _download_cfs2_reanalysis(
