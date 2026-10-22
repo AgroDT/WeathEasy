@@ -11,8 +11,11 @@ import pytest
 import xarray as xr
 
 from weatheasy import const, era5
+from weatheasy.era5_download import CdsRequests
 from weatheasy.era5_grib import read_grib
+from weatheasy.era5_requests import EXTRA, needed_files
 from weatheasy.query import Coords, get_era5_data
+from weatheasy.raw_cache import DownloadCache
 from weatheasy.storage import StorageError, get_store, open_dataset, prepare_dataset, write_batches
 from weatheasy.util import get_storage
 
@@ -46,10 +49,15 @@ def create_cds_client(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(era5, 'read_grib', read_response)
     client = FakeCDSClient()
+
+    def create_client(**kwargs):
+        client.session = kwargs['session']
+        return SimpleNamespace(client=client)
+
     monkeypatch.setitem(
         sys.modules,
         'cdsapi',
-        SimpleNamespace(Client=lambda **_kwargs: SimpleNamespace(client=client)),
+        SimpleNamespace(Client=create_client),
     )
     return client
 
@@ -183,7 +191,7 @@ def source(month: date, *, boundary: bool = False):
         'sde': 0.1,
         'sd': 0.02,
     }
-    names = {v.nc_name for v in const.ERA5_VARS.values()} | set(era5.EXTRA)
+    names = {v.nc_name for v in const.ERA5_VARS.values()} | set(EXTRA)
     for name in names:
         val = defaults.get(name, 280 if name.startswith(('stl', 'skt')) else 0.2)
         array = np.full((len(times), 2, 3), val, dtype='float64')
@@ -196,12 +204,13 @@ def source(month: date, *, boundary: bool = False):
 
 
 class FakeCDSClient:
-    __slots__ = ('calls', 'jobs', 'resumed', 'transform')
+    __slots__ = ('calls', 'jobs', 'resumed', 'session', 'transform')
 
     def __init__(self) -> None:
         self.calls = []
         self.jobs = {}
         self.resumed = []
+        self.session = None
         self.transform: Callable[[xr.Dataset, Mapping, int], xr.Dataset] = (
             lambda ds, _request, _call: ds
         )
@@ -217,6 +226,7 @@ class FakeCDSClient:
             request_id=f'job-{call}',
             status='successful',
             results_ready=True,
+            download_options={},
             download=lambda path: self._download(request, call, path),
         )
         self.jobs[remote.request_id] = remote
@@ -230,6 +240,12 @@ class FakeCDSClient:
         month = date(int(request['year']), int(request['month']), 1)
         ds = self.transform(requested_source(month, request), request, call)
         ds.to_netcdf(path, engine='netcdf4')
+
+
+def monthly_inputs(client, cache, bbox, store, limit=3):  # noqa: ANN001
+    cache = DownloadCache(cache) if isinstance(cache, Path) else cache
+    era5.set_group_attrs(store, '')
+    return era5._MonthlyInputs(CdsRequests(client, store, limit), cache, bbox)
 
 
 def test_daily_reduction_preserves_month_dates(hourly_month: tuple):
@@ -348,7 +364,7 @@ def test_boundary_grid_validation():
     main = source(date(2000, 12, 1))
     boundary = source(date(2001, 1, 1), boundary=True)
     with pytest.raises(StorageError, match='coordinates'):
-        era5._validate_boundary(main, boundary.assign_coords(longitude=[38.1, 38.2, 38.3]))
+        era5.validate_boundary(main, boundary.assign_coords(longitude=[38.1, 38.2, 38.3]))
 
 
 def test_public_monthly_download_resume_getter_and_cli(
@@ -486,7 +502,7 @@ def test_interrupted_month_append_preserves_commit_and_recovers(
 def test_cache_includes_bbox(tmp_path: Path, cds_client: FakeCDSClient):
     client = cds_client
     for bbox in [(55.3, 37.1, 55.2, 37.3), (55.3, 38.1, 55.2, 38.3)]:
-        era5._Downloader(client, tmp_path, bbox, get_store(tmp_path / 'store')).retrieve(
+        monthly_inputs(client, tmp_path, bbox, get_store(tmp_path / 'store')).retrieve(
             date(2000, 1, 1), boundary=False
         )
     assert len(client.calls) == 6
@@ -539,9 +555,9 @@ def test_restart_resumes_persisted_job(
     with monkeypatch.context() as patch:
         patch.setattr(FakeCDSClient, '_download', interrupt)
         with pytest.raises(OSError, match='download interrupted'):
-            era5._Downloader(
-                cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1
-            ).retrieve(date(2000, 1, 1), boundary=True)
+            monthly_inputs(cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1).retrieve(
+                date(2000, 1, 1), boundary=True
+            )
         saved = era5.group_attrs(get_store(store_path), '')['era5_requests']
     if isinstance(state, int):
 
@@ -555,7 +571,7 @@ def test_restart_resumes_persisted_job(
     else:
         cds_client.jobs['job-1'].status = state
     # A new downloader/store handle must reconstruct its state from Zarr.
-    restarted = era5._Downloader(cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1)
+    restarted = monthly_inputs(cds_client, tmp_path / 'cache', bbox, get_store(store_path), 1)
     if replacement is None:
         with pytest.raises(HTTPError):
             restarted.retrieve(date(2000, 1, 1), boundary=True)
@@ -746,7 +762,7 @@ def test_download_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def requested_source(month: date, request: Mapping):
     names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values()}
-    names.update({cds: nc for nc, cds in era5.EXTRA.items()})
+    names.update({cds: nc for nc, cds in EXTRA.items()})
     times = [
         np.datetime64(f'{month:%Y-%m}-{day}T{hour}')
         for day in request['day']
@@ -982,21 +998,20 @@ def test_submission_window_and_restart_keep_next_month_jobs(
 
     downloaded = []
 
-    def download(_self, _request, call, path):  # noqa: ANN001
+    download_response = FakeCDSClient._download
+
+    def download(self, request, call, path):  # noqa: ANN001
         downloaded.append(call)
-        Path(path).write_bytes(b'GRIB')
+        download_response(self, request, call, path)
         # The oldest job finishes after a newer result has been downloaded.
         cds_client.jobs['job-1'].results_ready = True
 
     monkeypatch.setattr(FakeCDSClient, '_download', download)
-    monkeypatch.setattr(
-        era5._Downloader, '_read', lambda _self, part: requested_source(part.month, part.request)
-    )
     store = get_store(tmp_path / 'store')
     backing = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
     cache = era5.DownloadCache(tmp_path / 'cache', backing)
     bbox = (55.3, 37.1, 55.2, 37.3)
-    loader = era5._Downloader(cds_client, cache, bbox, store, limit)
+    loader = monthly_inputs(cds_client, cache, bbox, store, limit)
     latest = date(2000, 3, 10)
     loader.plan(date(2000, 1, 1), latest)
     assert len(cds_client.calls) == limit
@@ -1019,8 +1034,8 @@ def test_submission_window_and_restart_keep_next_month_jobs(
     obsolete = cache.root / 'obsolete.grib'
     obsolete.write_bytes(b'obsolete')
     os.utime(obsolete, (old, old))
-    restarted = era5._Downloader(cds_client, cache, bbox, store, limit)
-    restarted.cleanup(date(2000, 2, 1), latest, max_age_days=7)
+    restarted = monthly_inputs(cds_client, cache, bbox, store, limit)
+    cache.cleanup(needed_files(date(2000, 2, 1), latest, bbox).__contains__, max_age_days=7)
     assert remaining[0].is_file()
     assert not obsolete.exists()
     restarted.plan(date(2000, 2, 1), latest)
@@ -1063,7 +1078,7 @@ def test_rolling_months_reuse_midnights_with_correct_daily_values(
         return ds
 
     cds_client.transform = distinguish_midnights
-    loader = era5._Downloader(
+    loader = monthly_inputs(
         cds_client,
         tmp_path / 'cache',
         (55.3, 37.1, 55.2, 37.3),
@@ -1117,7 +1132,7 @@ def test_available_next_month_midnights_survive_waiting_for_its_boundary(
     backing = FileStore(MemoryFileSystem(), f'{tmp_path.name}/raw')
     cache = era5.DownloadCache(tmp_path / 'cache', backing)
     bbox = (55.3, 37.1, 55.2, 37.3)
-    loader = era5._Downloader(cds_client, cache, bbox, store)
+    loader = monthly_inputs(cds_client, cache, bbox, store)
     # All February midnights are available, but March 1 is still unavailable.
     latest = date(2000, 2, 29)
     loader.plan(date(2000, 1, 1), latest)
@@ -1136,8 +1151,7 @@ def test_available_next_month_midnights_survive_waiting_for_its_boundary(
     old = time.time() - 30 * 86400
     os.utime(remaining[0], (old, old))
 
-    restarted = era5._Downloader(cds_client, cache, bbox, store)
-    restarted.cleanup(date(2000, 2, 1), latest, max_age_days=7)
+    cache.cleanup(needed_files(date(2000, 2, 1), latest, bbox).__contains__, max_age_days=7)
     assert remaining[0].is_file()
     assert len(cds_client.calls) == 4
 
@@ -1261,6 +1275,40 @@ def test_restart_after_commit_discards_already_published_local_block(
         get_store(tmp_path / 'store'), tmp_path / 'cache', bbox=bbox, work_dir=work
     )
     assert_block_result(store, block_days, work)
+
+
+def test_restart_rejects_changed_grid_before_appending_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cds_client: FakeCDSClient
+):
+    from weatheasy.era5_stage import DailyStage
+
+    monkeypatch.setattr(const, 'ERA5_FIRST_YEAR', 2000)
+    monkeypatch.setattr(era5, 'utc_now', lambda: datetime(2000, 2, 10, tzinfo=UTC))
+    store = get_store(tmp_path / 'store')
+    work = tmp_path / 'work'
+    bbox = (55.3, 37.1, 55.2, 37.3)
+    reduce_day = era5.process_day
+
+    def interrupt(main, boundary, day):  # noqa: ANN001
+        if day == date(2000, 1, 3):
+            msg = 'reduction interrupted'
+            raise OSError(msg)
+        return reduce_day(main, boundary, day)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(era5, 'process_day', interrupt)
+        with pytest.raises(OSError, match='reduction interrupted'):
+            era5.download_era5_data(store, bbox=bbox, work_dir=work)
+    directory = next(work.rglob('state.json')).parent
+    assert DailyStage(directory).dates() == (date(2000, 1, 1), date(2000, 1, 2))
+    checkpoint = {path.name: path.read_bytes() for path in directory.iterdir()}
+
+    # The temporary raw cache is gone; resumed CDS jobs now return a shifted grid.
+    cds_client.transform = lambda ds, _request, _call: ds.assign_coords(latitude=ds.latitude + 1)
+    with pytest.raises(StorageError, match='staging has a conflicting grid'):
+        era5.download_era5_data(store, bbox=bbox, work_dir=work)
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == checkpoint
+    assert era5.last_date(store, 'daily') is None
 
 
 def test_local_checkpoint_failure_overwrites_only_unacknowledged_day(

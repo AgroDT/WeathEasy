@@ -156,7 +156,7 @@ def test_cmip6_public_download_processes_working_file_and_reuses_cache(
         return SimpleNamespace(is_success=True, content=content)
 
     # A real context manager with only the external HTTP boundary replaced.
-    monkeypatch.setattr(download, '_session', lambda: nullcontext(SimpleNamespace(get=get)))
+    monkeypatch.setattr(download, '_session', lambda _proxy: nullcontext(SimpleNamespace(get=get)))
     original_read = download.read_netcdf
     processed = []
 
@@ -394,7 +394,7 @@ def test_upload_failure_leaves_cmip6_preparation_retryable(
     monkeypatch.setattr(
         download,
         '_session',
-        lambda: nullcontext(
+        lambda _proxy: nullcontext(
             SimpleNamespace(
                 get=lambda *_args, **_kwargs: SimpleNamespace(is_success=True, content=b'input')
             )
@@ -587,7 +587,7 @@ def test_cfs2_cleanup_respects_both_grids_and_current_forecast(
         path.write_bytes(b'GRIB')
         os.utime(path, (old, old))
 
-    def stop_before_network():
+    def stop_before_network(_proxy: str | None):
         msg = 'downloads not started'
         raise OSError(msg)
 

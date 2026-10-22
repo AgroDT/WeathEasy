@@ -1,89 +1,44 @@
-"""ERA5-Land monthly GRIB jobs with bounded, field-at-a-time daily reduction.
-
-Accumulated fields use the following midnight, including at month/year boundaries.
-PEVPR is open-water evaporation, not FAO reference ET0. Evaporation and turbulent
-heat fluxes are positive upwards; source signs are reversed without clipping.
-"""
+"""Orchestrate ERA5-Land cached inputs, daily reductions and restartable publication."""
 
 from __future__ import annotations
 
 import calendar
-import hashlib
-import json
 import logging
-import os
 import time
-from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
-import xarray as xr
-from zarr.storage import LocalStore
 
 from weatheasy import const
+from weatheasy.era5_daily import process_day, validate_boundary
+from weatheasy.era5_download import CdsRequests
 from weatheasy.era5_grib import merge_grib_fields, read_grib
-from weatheasy.era5_stage import DailyStage
-from weatheasy.raw_cache import DownloadCache, default_work_dir, download_cache
+from weatheasy.era5_requests import Part, boundary_part, month_parts, needed_files, next_month
+from weatheasy.era5_stage import DailyStage, month_marker, publish_stage, resume_stage
+from weatheasy.raw_cache import DownloadCache, download_cache
 from weatheasy.storage import (
     StorageError,
     group_attrs,
     group_exists,
     last_date,
     open_dataset,
-    prepare_dataset,
     set_group_attrs,
 )
 from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+    from typing import Any
+
+    import xarray as xr
     from zarr.abc.store import Store
 
     from weatheasy.file_storage import FileStore
 
 
-EXTRA = {
-    'd2m': '2m_dewpoint_temperature',
-    'ssr': 'surface_net_solar_radiation',
-    'str': 'surface_net_thermal_radiation',
-}
 LOGGER = logging.getLogger(__name__)
-UNITS = {
-    'TMP': 'degC',
-    'TMIN': 'degC',
-    'TMAX': 'degC',
-    'UGRD': 'm/s',
-    'VGRD': 'm/s',
-    'PRES': 'hPa',
-    'PRATE': 'kg m-2 s-1',
-    'SNOD': 'm',
-    'WEASD': 'kg m-2',
-    'LHTFL': 'W m-2',
-    'SHTFL': 'W m-2',
-    'DSWRF': 'W m-2',
-    'DLWRF': 'W m-2',
-    'PEVPR': 'mm/day',
-    'WIND': 'm/s',
-    'RH': '%',
-    'SPFH': 'kg/kg',
-    'QMIN': 'kg/kg',
-    'QMAX': 'kg/kg',
-    'USWRF': 'W m-2',
-    'ULWRF': 'W m-2',
-}
-UNITS.update(
-    {
-        name: 'degC' if name.startswith('TMP') else 'm3 m-3'
-        for name in const.ERA5_VARS
-        if name.startswith(('TMP_', 'SOILW_'))
-    }
-)
-
-
-def next_month(value: date) -> date:
-    return date(value.year + (value.month == 12), value.month % 12 + 1, 1)
 
 
 def available_period(store: Store) -> tuple[date, date]:
@@ -137,16 +92,16 @@ def download_era5_data(
     previous = last_date(store, path)
     latest = utc_now().date() - 5 * const.ONE_DAY
     if previous:
-        marker = _month_marker(previous)
+        marker = month_marker(previous)
         if group_attrs(store, '').get('last_month') != marker:
             # Recover a crash after committing daily data but before journal cleanup.
             set_group_attrs(store, '', last_month=marker)
-    stage, first, count = _resume_stage(store, bbox, work_dir, previous)
+    stage, first, count = resume_stage(store, bbox, work_dir, previous)
     with download_cache(download_dir, 'era5', work_dir=work_dir, target=str(store)) as cache:
-        downloader = _Downloader(None, cache, bbox, store, max_pending_requests)
-        downloader.cleanup(first.replace(day=1), latest, max_age_days=work_max_age_days)
+        needed = needed_files(first.replace(day=1), latest, bbox)
+        cache.cleanup(needed.__contains__, max_age_days=work_max_age_days)
         if next_month(first) > latest:
-            _publish_stage(stage, store)
+            publish_stage(stage, store)
             set_group_attrs(store, '', era5_requests={})
             return
         try:
@@ -162,195 +117,58 @@ def download_era5_data(
                 session.trust_env = False
                 session.proxies.update({'http': proxy, 'https': proxy})
             # Keep cdsapi configuration/logging while using its DSS backend's job API.
-            downloader.client = cast(
-                'Any', cdsapi.Client(wait_until_complete=False, session=session)
-            ).client
-            _prepare_months(downloader, stage, first, latest, count)
-        _publish_stage(stage, store)
-
-
-def _resume_stage(
-    store: Store, bbox: tuple, work_dir: str | Path | None, previous: date | None
-) -> tuple[DailyStage, date, int]:
-    first = previous + const.ONE_DAY if previous else date(const.ERA5_FIRST_YEAR, 1, 1)
-    directory = Path(work_dir).expanduser() if work_dir is not None else default_work_dir()
-    filesystem = getattr(store, 'fs', None)
-    identity = json.dumps(
-        {
-            'store': str(store.root.resolve()) if isinstance(store, LocalStore) else str(store),
-            'bbox': [float(value) for value in bbox],
-            'endpoint': getattr(filesystem, 'client_kwargs', {}).get('endpoint_url')
-            or os.environ.get('AWS_ENDPOINT_URL_S3')
-            or os.environ.get('AWS_ENDPOINT_URL'),
-        },
-        sort_keys=True,
-    )
-    namespace = hashlib.sha256(identity.encode()).hexdigest()[:20]
-    stage = DailyStage(directory / 'era5' / 'staging' / namespace)
-    if stage.written:
-        begin, end = stage.dates()
-        if previous and end <= previous:
-            # The remote commit succeeded before local acknowledgement.
-            stage.clear()
-        elif begin != first:
-            msg = 'ERA5 staging does not follow the committed period'
-            raise StorageError(msg)
-        else:
-            first = end + const.ONE_DAY
-    count = int(group_attrs(store, 'daily').get('committed_length', 0)) if previous else 0
-    capacity = 128 - count % 128
-    if stage.written > capacity:
-        msg = 'ERA5 staging exceeds the next time chunk boundary'
-        raise StorageError(msg)
-    if stage.written == capacity:
-        _publish_stage(stage, store)
-        count += capacity
-    return stage, first, count
-
-
-def _month_marker(day: date) -> list[int]:
-    last = (
-        day
-        if day.day == calendar.monthrange(day.year, day.month)[1]
-        else (day.replace(day=1) - const.ONE_DAY)
-    )
-    return [last.year, last.month]
-
-
-def _publish_stage(stage: DailyStage, store: Store) -> None:
-    if not stage.written:
-        return
-    begin, end = stage.dates()
-    started = time.monotonic()
-    LOGGER.info('Writing ERA5-Land block: %s through %s (%s days)', begin, end, stage.written)
-    stage.publish(store)
-    set_group_attrs(store, '', last_month=_month_marker(end))
-    stage.clear()
-    LOGGER.info('Published ERA5-Land through %s in %.1f s', end, time.monotonic() - started)
+            client = cast('Any', cdsapi.Client(wait_until_complete=False, session=session)).client
+            jobs = CdsRequests(client, store, max_pending_requests)
+            inputs = _MonthlyInputs(jobs, cache, bbox)
+            _prepare_months(inputs, stage, store, first, latest, count=count)
+        publish_stage(stage, store)
 
 
 def _prepare_months(
-    downloader: _Downloader, stage: DailyStage, first: date, latest: date, count: int
+    inputs: _MonthlyInputs,
+    stage: DailyStage,
+    store: Store,
+    first: date,
+    latest: date,
+    *,
+    count: int,
 ) -> None:
     month = first.replace(day=1)
     capacity = 128 - count % 128
     while next_month(month) <= latest:
         started = time.monotonic()
-        downloader.plan(month, latest)
+        inputs.plan(month, latest)
         LOGGER.info('Preparing ERA5-Land %s; local staging in %s', month, stage.directory)
-        main, boundary = downloader.retrieve_month(month, latest)
+        main, boundary = inputs.retrieve_month(month, latest)
         try:
-            _validate_boundary(main, boundary)
-            for day in _daily_batches(main, boundary, month, downloader.bbox, begin=first):
+            validate_boundary(main, boundary)
+            for index, day in enumerate(
+                _daily_batches(main, boundary, month, inputs.bbox, begin=first)
+            ):
+                if index == 0:
+                    stage.check_compatible(day)
                 stage.append(day)
                 if stage.written == capacity:
-                    _publish_stage(stage, downloader.store)
+                    publish_stage(stage, store)
                     capacity = 128
         finally:
             main.close()
             boundary.close()
         # Daily reductions are checkpointed locally, so hourly files can be released.
-        downloader.release(month)
+        inputs.release(month)
         LOGGER.info('Staged ERA5-Land %s in %.1f s', month, time.monotonic() - started)
         month = next_month(month)
         first = month
 
 
-@dataclass(frozen=True)
-class _Part:
-    month: date
-    boundary: bool
-    request: dict
-    required: set[str]
-    key: str
+class _MonthlyInputs:
+    """Reuse cached GRIB parts and keep next-month inputs until their reductions finish."""
 
-    @property
-    def filename(self) -> str:
-        return f'{self.month:%Y%m}-{self.key}.grib'
-
-
-class _Downloader:
-    __slots__ = ('bbox', 'cache', 'client', 'limit', 'parts', 'pending', 'requests', 'store')
-
-    def __init__(
-        self,
-        client: Any,
-        cache: DownloadCache | Path,
-        bbox: tuple,
-        store: Store,
-        max_pending_requests: int = 3,
-    ) -> None:
-        self.client = client
-        self.cache = DownloadCache(cache) if isinstance(cache, Path) else cache
+    def __init__(self, jobs: CdsRequests, cache: DownloadCache, bbox: tuple) -> None:
+        self.jobs = jobs
+        self.cache = cache
         self.bbox = bbox
-        self.store = store
-        self.limit = max_pending_requests
-        self.parts: dict[str, _Part] = {}
-        self.pending: dict[str, Any] = {}
-        self.requests: dict[str, str] = (
-            group_attrs(store, '').get('era5_requests', {}) if group_exists(store, '') else {}
-        )
-
-    def _request(self, key: str, request: dict) -> Any:
-        from requests import HTTPError  # noqa: PLC0415
-
-        if request_id := self.requests.get(key):
-            try:
-                remote = self.client.get_remote(request_id)
-            except HTTPError as exc:
-                if exc.response is None or exc.response.status_code not in (404, 410):
-                    raise
-                LOGGER.info('ERA5-Land request %s is no longer available; resubmitting', request_id)
-            else:
-                if remote.status not in ('failed', 'rejected', 'dismissed', 'deleted'):
-                    LOGGER.info('Resuming ERA5-Land request %s', request_id)
-                    return remote
-                LOGGER.info('ERA5-Land request %s has failed or expired; resubmitting', request_id)
-        remote = self.client.submit('reanalysis-era5-land', request)
-        self.requests[key] = remote.request_id
-        # Persist before waiting/downloading, independently of raw-cache publication.
-        set_group_attrs(self.store, '', era5_requests=self.requests)
-        return remote
-
-    def _parts(self, month: date, *, boundary: bool) -> list[_Part]:
-        if boundary:
-            return [self._accumulated_part(month, boundary=True)]
-        names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values() if not v.accumulated}
-        names[EXTRA['d2m']] = 'd2m'
-        variables = sorted(names)
-        return [
-            self._part(month, variables[offset : offset + 8], names, boundary=False)
-            for offset in range(0, len(variables), 8)
-        ] + [self._accumulated_part(month)]
-
-    def _accumulated_part(self, month: date, *, boundary: bool = False) -> _Part:
-        names = {v.cds_name: v.nc_name for v in const.ERA5_VARS.values() if v.accumulated}
-        names.update({EXTRA[name]: name for name in ('ssr', 'str')})
-        return self._part(month, sorted(names), names, boundary=boundary, accumulated=True)
-
-    def _boundary_part(self, month: date, latest: date) -> _Part:
-        following = next_month(month)
-        # Reuse these midnights when processing the following month. Only the
-        # newest available month needs a separate first-midnight request.
-        incomplete = next_month(following) - const.ONE_DAY > latest
-        return self._accumulated_part(following, boundary=incomplete)
-
-    def cleanup(self, first: date, latest: date, *, max_age_days: int) -> None:
-        """Protect every pending month and its boundary before age-based cleanup."""
-        # The first uncommitted month can already have prefetched midnights even
-        # if its own following midnight is not available yet.
-        needed = {part.filename for part in self._parts(first, boundary=False)}
-        month = first
-        while next_month(month) <= latest:
-            needed.update(
-                part.filename
-                for part in [
-                    *self._parts(month, boundary=False),
-                    self._boundary_part(month, latest),
-                ]
-            )
-            month = next_month(month)
-        self.cache.cleanup(needed.__contains__, max_age_days=max_age_days)
+        self.parts: dict[str, Part] = {}
 
     def plan(self, month: date, latest: date) -> None:
         # Prioritize this month's inputs, including the following midnights,
@@ -358,109 +176,58 @@ class _Downloader:
         for owner in (month, next_month(month)):
             if next_month(owner) <= latest:
                 for part in [
-                    *self._parts(owner, boundary=False),
-                    self._boundary_part(owner, latest),
+                    *month_parts(owner, self.bbox),
+                    boundary_part(owner, latest, self.bbox),
                 ]:
                     self.parts[part.key] = part
-        self.requests = {key: value for key, value in self.requests.items() if key in self.parts}
-        set_group_attrs(self.store, '', era5_requests=self.requests)
+        self.jobs.retain(self.parts)
         self._fill()
 
     def _fill(self) -> None:
-        for key, part in self.parts.items():
-            if len(self.pending) >= self.limit:
-                break
-            if key not in self.pending and not self.cache.exists(part.filename):
-                self.pending[key] = self._request(key, part.request)
+        self.jobs.fill(part for part in self.parts.values() if not self.cache.exists(part.filename))
 
     def retrieve_month(self, month: date, latest: date) -> tuple[xr.Dataset, xr.Dataset]:
-        main = self._parts(month, boundary=False)
-        pieces = self._retrieve([*main, self._boundary_part(month, latest)])
-        return (
-            merge_grib_fields(*pieces[: len(main)]),
-            pieces[-1],
-        )
+        main = month_parts(month, self.bbox)
+        pieces = self._retrieve([*main, boundary_part(month, latest, self.bbox)])
+        return merge_grib_fields(*pieces[: len(main)]), pieces[-1]
 
     def retrieve(self, month: date, *, boundary: bool) -> xr.Dataset:
-        return merge_grib_fields(*self._retrieve(self._parts(month, boundary=boundary)))
+        return merge_grib_fields(*self._retrieve(month_parts(month, self.bbox, boundary=boundary)))
 
-    def _retrieve(self, parts: list[_Part]) -> list[xr.Dataset]:
+    def _retrieve(self, parts: list[Part]) -> list[xr.Dataset]:
         self.parts.update((part.key, part) for part in parts)
         self._fill()
         wanted = {part.key for part in parts if not self.cache.exists(part.filename)}
         pieces = {part.key: self._read(part) for part in parts if part.key not in wanted}
         while wanted:
-            for key, remote in self.pending.items():
-                if key in wanted and remote.results_ready:
-                    part = self.parts[key]
-                    path = self.cache.file(part.filename)
-                    pending = path.with_name(path.name + '.part')
-                    LOGGER.info('Downloading ERA5-Land GRIB: %s', path.name)
-                    started = time.monotonic()
-                    # Use the CDS session for file downloads as well as API requests.
-                    remote.download_options['session'] = self.client.session
-                    remote.download(str(pending))
-                    LOGGER.info('Downloaded %s in %.1f s', path.name, time.monotonic() - started)
-                    pending.replace(path)
-                    del self.pending[key]
-                    wanted.remove(key)
-                    # Let CDS work while this file is uploaded and processed.
-                    self._fill()
-                    started = time.monotonic()
-                    self.cache.publish([path])
-                    LOGGER.info('Cached %s in %.1f s', path.name, time.monotonic() - started)
-                    pieces[key] = self._read(part)
-                    break
-            else:
-                time.sleep(10)
+            key = self.jobs.ready(wanted)
+            part = self.parts[key]
+            self.jobs.download(key, self.cache.file(part.filename))
+            wanted.remove(key)
+            # Let CDS work while this file is uploaded and processed.
+            self._fill()
+            pieces[key] = self._read(part)
         return [pieces[part.key] for part in parts]
 
     def release(self, month: date) -> None:
-        # A full set of next-month midnights belongs to that next month: retain
-        # its local file and journal entry until that month's reductions are staged.
+        # Retain full next-month midnight files; release a one-midnight boundary
+        # together with the month that consumed it.
         parts = [
             part
             for part in self.parts.values()
             if part.month == month or (part.boundary and part.month == next_month(month))
         ]
         for part in parts:
-            self.requests.pop(part.key, None)
-            self.parts.pop(part.key, None)
-        set_group_attrs(self.store, '', era5_requests=self.requests)
+            self.parts.pop(part.key)
+        self.jobs.release(part.key for part in parts)
         self.cache.release(self.cache.root / part.filename for part in parts)
 
-    def _part(
-        self,
-        month: date,
-        variables: list[str],
-        names: dict[str, str],
-        *,
-        boundary: bool,
-        accumulated: bool = False,
-    ) -> _Part:
-        if boundary:
-            day = ['01']
-        else:
-            day_count = calendar.monthrange(month.year, month.month)[1]
-            day = [f'{d:02d}' for d in range(1, day_count + 1)]
-        time_ = ['00:00'] if accumulated else [f'{h:02d}:00' for h in range(24)]
-        request = {
-            'variable': variables,
-            'year': str(month.year),
-            'month': f'{month.month:02d}',
-            'day': day,
-            'time': time_,
-            'area': list(self.bbox),
-            'data_format': 'grib',
-            'download_format': 'unarchived',
-        }
-        key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:20]
-        return _Part(month, boundary, request, {names[name] for name in variables}, key)
-
-    def _read(self, part: _Part) -> xr.Dataset:
+    def _read(self, part: Part) -> xr.Dataset:
         path = self.cache.file(part.filename)
         # Also retry a publication that failed after a complete local download.
+        started = time.monotonic()
         self.cache.publish([path])
+        LOGGER.info('Cached %s in %.1f s', path.name, time.monotonic() - started)
         return read_grib(path, part.required)
 
 
@@ -476,154 +243,3 @@ def _daily_batches(
         ds.attrs['request_bbox'] = list(bbox)
         yield ds
         del ds
-
-
-def process_day(main: xr.Dataset, boundary: xr.Dataset, day: date) -> xr.Dataset:
-    """Reduce one spatial field at a time; memory is independent of month length.
-
-    A full field is a natural GRIB decoding block, spanning multiple Zarr chunks
-    (with partial chunks only at grid edges). Daily reductions are collected
-    into bounded time blocks before writing. Shared hourly inputs are decoded
-    once for all derived variables.
-    """
-    start = np.datetime64(day, 'h')
-    following = start + np.timedelta64(24, 'h')
-
-    last = main.time.to_numpy()[-1]
-
-    def read(name: str, stamp: np.datetime64):
-        source = main if stamp <= last else boundary
-        if stamp not in source.time:
-            return np.full((source.sizes['latitude'], source.sizes['longitude']), np.nan)
-        return source[name].sel(time=stamp).to_numpy().astype(np.float64, copy=False)
-
-    def midnight(name: str):
-        return read(name, following)
-
-    values = {}
-    shared = {'t2m', 'd2m', 'sp', 'u10', 'v10'}
-    for name, spec in const.ERA5_VARS.items():
-        if spec.nc_name in shared:
-            continue
-        if spec.accumulated:
-            reduced = midnight(spec.nc_name)
-        else:
-            reduced = _reduce_grib_field(read, spec, start)
-        values[name] = (reduced * spec.scale + spec.offset).astype(np.float32)
-        del reduced
-    values.update(_shared_daily_values(read, start))
-    values['USWRF'] = ((midnight('ssrd') - midnight('ssr')) / 86400).astype(np.float32)
-    values['ULWRF'] = ((midnight('strd') - midnight('str')) / 86400).astype(np.float32)
-    result = _prepare_daily_values(
-        values, np.array([np.datetime64(day)]), main.latitude, main.longitude
-    )
-    source_grib = {
-        label: {
-            name: {
-                'edition': field.attrs.get('GRIB_edition'),
-                'radius': field.attrs.get('GRIB_radius'),
-            }
-            for name, field in source.data_vars.items()
-            if 'GRIB_radius' in field.attrs
-        }
-        for label, source in (('main', main), ('boundary', boundary))
-    }
-    if any(source_grib.values()):
-        result.attrs['source_grib'] = source_grib
-    return result
-
-
-def _reduce_grib_field(read, spec: const.Era5Var, start: np.datetime64):  # noqa: ANN001
-    reduced = read(spec.nc_name, start).copy()
-    for hour in range(1, 24):
-        field = read(spec.nc_name, start + np.timedelta64(hour, 'h'))
-        if spec.daily_stat is np.mean:
-            reduced += field
-        elif spec.daily_stat is np.max:
-            np.maximum(reduced, field, out=reduced)
-        elif spec.daily_stat is np.min:
-            np.minimum(reduced, field, out=reduced)
-        else:
-            msg = 'Instantaneous variable requires daily statistic'
-            raise StorageError(msg)
-        del field
-    return reduced / 24 if spec.daily_stat is np.mean else reduced
-
-
-def _shared_daily_values(read, start: np.datetime64) -> dict:  # noqa: ANN001
-    totals = {}
-    for hour in range(24):
-        stamp = start + np.timedelta64(hour, 'h')
-        t = read('t2m', stamp) - 273.15
-        td = read('d2m', stamp) - 273.15
-        pressure = read('sp', stamp)
-        u = read('u10', stamp)
-        v = read('v10', stamp)
-        es = 611.21 * np.exp((18.678 - t / 234.5) * t / (257.14 + t))
-        ea = 611.21 * np.exp((18.678 - td / 234.5) * td / (257.14 + td))
-        q = 0.622 * ea / np.maximum(pressure - 0.378 * ea, 1.0)
-        hourly = {
-            'TMP': t,
-            'TMIN': t,
-            'TMAX': t,
-            'PRES': pressure * 0.01,
-            'UGRD': u,
-            'VGRD': v,
-            'WIND': np.hypot(u, v),
-            'RH': np.clip(100 * ea / np.maximum(es, 1e-8), 0, 100),
-            'SPFH': q,
-            'QMIN': q,
-            'QMAX': q,
-        }
-        for name, field in hourly.items():
-            if not hour:
-                totals[name] = field.copy()
-            elif name in ('TMIN', 'QMIN'):
-                np.minimum(totals[name], field, out=totals[name])
-            elif name in ('TMAX', 'QMAX'):
-                np.maximum(totals[name], field, out=totals[name])
-            else:
-                totals[name] += field
-        del hourly, field, t, td, pressure, u, v, es, ea, q
-    return {
-        name: (field if name in {'TMIN', 'TMAX', 'QMIN', 'QMAX'} else field / 24).astype(np.float32)
-        for name, field in totals.items()
-    }
-
-
-def _validate_boundary(main: xr.Dataset, boundary: xr.Dataset) -> None:
-    if any(not np.array_equal(main[axis], boundary[axis]) for axis in ('latitude', 'longitude')):
-        msg = 'ERA5 month and following midnight have different coordinates'
-        raise StorageError(msg)
-
-
-def _prepare_daily_values(values: dict, times: np.ndarray, latitudes, longitudes):  # noqa: ANN001
-    fields = {}
-    for name, value in values.items():
-        info = (
-            const.ERA5_VARS[name].info if name in const.ERA5_VARS else const.ERA5_DERIVED_INFO[name]
-        )
-        attrs = {'units': UNITS[name], 'long_name': info.en}
-        attrs['cell_methods'] = 'time: mean'
-        if name in const.ERA5_VARS:
-            spec = const.ERA5_VARS[name]
-            attrs['cell_methods'] = (
-                'time: sum'
-                if name == 'PEVPR'
-                else f'time: {spec.daily_stat.__name__}'
-                if spec.daily_stat
-                else 'time: mean'
-            )
-        array = value.astype(np.float32, copy=False)
-        if array.ndim == 2:
-            array = array[np.newaxis]
-        fields[name] = (('time', 'latitude', 'longitude'), array, attrs)
-    ds = xr.Dataset(
-        fields,
-        coords={
-            'time': times,
-            'latitude': latitudes,
-            'longitude': longitudes,
-        },
-    )
-    return prepare_dataset(ds, crs=const.ERA5_CRS)

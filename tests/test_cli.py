@@ -208,7 +208,7 @@ def test_download_dispatches_prepared_store_and_local_workdir(
 
     def record(store, download_dir, **kwargs):  # noqa: ANN001
         assert isinstance(store, LocalStore)
-        assert kwargs == {'work_dir': tmp_path / 'work', 'work_max_age_days': 3}
+        assert kwargs == {'work_dir': tmp_path / 'work', 'work_max_age_days': 3, 'proxy': None}
         calls.append((store.root, download_dir.root))
 
     monkeypatch.setattr(download, f'download_{source}_data', record)
