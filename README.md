@@ -345,6 +345,13 @@ http://127.0.0.1:8000/docs.
 Alternative API docs are available at
 http://127.0.0.1:8000/redoc.
 
+When a reverse proxy serves the API under a prefix such as `/api`, set
+`WEATHEASY__ROOT_PATH=/api` and configure the proxy to strip `/api` before forwarding.
+Swagger is then available at `/api/docs`, with the schema at `/api/openapi.json`.
+With the Helm chart, set `api.rootPath: /api`: its HTTPRoute configures the prefix
+match and URL rewrite automatically. Internal health probes keep their root paths.
+The default empty prefix preserves direct access at `/docs`, `/cfs2`, etc.
+
 Read the [Uvicorn docs](https://www.uvicorn.org/deployment/)
 for a full list of supported arguments and options.
 

@@ -232,6 +232,7 @@ remain extensible and are validated by Kubernetes.
 | `api.startupProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":5,"timeoutSeconds":1,"failureThreshold":30,"successThreshold":1}` | Startup probe timings and thresholds; endpoint is /startupz. |
 | `api.readinessProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":10,"timeoutSeconds":1,"failureThreshold":3,"successThreshold":1}` | Readiness probe timings and thresholds; endpoint is /readyz. |
 | `api.livenessProbe` | object | `{"initialDelaySeconds":0,"periodSeconds":10,"timeoutSeconds":1,"failureThreshold":3,"successThreshold":1}` | Liveness probe timings and thresholds; endpoint is /livez. |
+| `api.rootPath` | string | `""` | External API prefix without a trailing slash, e.g. /api. HTTPRoute matches this prefix and strips it before forwarding; overrides httpRoute.matches. Other proxies must configure equivalent rewriting. |
 | `service.type` | string | `"ClusterIP"` | ClusterIP, NodePort or LoadBalancer. |
 | `service.annotations` | object | `{}` | Service annotations, including cloud load balancer settings. |
 | `service.port` | integer | `8000` | Service port; containers listen on port 8000. |

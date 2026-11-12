@@ -20,9 +20,22 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
   rules:
-    - {{- with .Values.httpRoute.matches }}
+    - {{- if .Values.api.rootPath }}
+      matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.api.rootPath | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      {{- else }}
+      {{- with .Values.httpRoute.matches }}
       matches:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       backendRefs:
         - name: {{ include "weatheasy.fullname" . }}

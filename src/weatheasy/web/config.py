@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     storage_operation_timeout: PositiveInt = DEFAULT_STORAGE_OPERATION_TIMEOUT
     precision: PositiveInt = 6
     enable_cors: bool = False
+    root_path: Annotated[str, Field(pattern=r'^(?:/[A-Za-z0-9._~-]+)*$')] = ''
 
     @computed_field
     @cached_property

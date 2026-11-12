@@ -31,3 +31,25 @@ def test_health_probes_do_not_access_storage(
     assert response.status_code == 200
     assert response.json() == {'status': 'ok'}
     assert response.headers['content-type'] == 'application/json'
+
+
+@pytest.mark.parametrize('prefix', ['', '/api'])
+def test_proxy_prefix_is_used_in_docs_but_not_health_paths(prefix: str):
+    pytest.importorskip('fastapi')
+    from starlette.testclient import TestClient
+
+    from weatheasy.web import config, create_app
+
+    settings = config.Settings(root_path=prefix, sources=config.SourcesSettings(), _env_file=None)
+    with TestClient(create_app(settings)) as client:
+        docs = client.get('/docs')
+        assert docs.status_code == 200
+        assert f"url: '{prefix}/openapi.json'" in docs.text
+        schema = client.get('/openapi.json')
+        assert schema.status_code == 200
+        assert schema.json().get('servers', []) == ([{'url': '/api'}] if prefix else [])
+        assert '/variables' in schema.json()['paths']
+        for path in ['/startupz', '/readyz', '/livez']:
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.json() == {'status': 'ok'}

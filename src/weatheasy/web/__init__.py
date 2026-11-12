@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title='WeathEasy',
+        root_path=settings.root_path,
         version=__version__ or 'unknown',
         exception_handlers={
             BaseValueError: handle_value_error,

@@ -228,6 +228,12 @@
         },
         "livenessProbe": {
           "$ref": "#/definitions/livenessProbe"
+        },
+        "rootPath": {
+          "type": "string",
+          "pattern": "^(?:/[A-Za-z0-9._~-]+)*$",
+          "default": "",
+          "description": "External API prefix without a trailing slash, e.g. /api. HTTPRoute matches this prefix and strips it before forwarding; overrides httpRoute.matches. Other proxies must configure equivalent rewriting."
         }
       },
       "additionalProperties": false

@@ -176,3 +176,39 @@ def test_working_downloads_use_existing_pvc_without_extra_jobs(tmp_path: Path):
     assert work == {'name': 'work', 'persistentVolumeClaim': {'claimName': 'weather-work'}}
     container = spec['containers'][0]
     assert {'name': 'work', 'mountPath': '/var/lib/weatheasy'} in container['volumeMounts']
+
+
+@pytest.mark.parametrize('prefix', ['', '/api'])
+def test_api_prefix_configures_proxy_and_app_without_changing_probes(tmp_path: Path, prefix: str):
+    result = render(
+        tmp_path,
+        {
+            'api': {'rootPath': prefix},
+            'sources': {'cfs2': {'store': 's3://weather/cfs2.zarr'}},
+            'httpRoute': {'enabled': True, 'parentRefs': [{'name': 'gateway'}]},
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    manifests = list(yaml.safe_load_all(result.stdout))
+    route = next(m for m in manifests if m['kind'] == 'HTTPRoute')
+    rule = route['spec']['rules'][0]
+    assert rule['matches'] == [{'path': {'type': 'PathPrefix', 'value': prefix or '/'}}]
+    assert rule.get('filters', []) == (
+        [
+            {
+                'type': 'URLRewrite',
+                'urlRewrite': {'path': {'type': 'ReplacePrefixMatch', 'replacePrefixMatch': '/'}},
+            }
+        ]
+        if prefix
+        else []
+    )
+    deployment = next(m for m in manifests if m['kind'] == 'Deployment')
+    container = deployment['spec']['template']['spec']['containers'][0]
+    assert {'name': 'WEATHEASY__ROOT_PATH', 'value': prefix} in container['env']
+    for probe, path in [
+        ('startupProbe', '/startupz'),
+        ('readinessProbe', '/readyz'),
+        ('livenessProbe', '/livez'),
+    ]:
+        assert container[probe]['httpGet']['path'] == path

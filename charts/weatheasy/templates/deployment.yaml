@@ -33,6 +33,8 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:
             {{- include "weatheasy.env" . | nindent 12 }}
+            - name: WEATHEASY__ROOT_PATH
+              value: {{ .Values.api.rootPath | quote }}
             - name: WEATHEASY__PRECISION
               value: {{ .Values.api.precision | quote }}
             - name: WEATHEASY__ENABLE_CORS

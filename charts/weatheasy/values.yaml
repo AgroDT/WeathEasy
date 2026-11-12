@@ -111,6 +111,8 @@ api:
     timeoutSeconds: 1
     failureThreshold: 3
     successThreshold: 1
+  # External API prefix without a trailing slash, e.g. /api. HTTPRoute matches this prefix and strips it before forwarding; overrides httpRoute.matches. Other proxies must configure equivalent rewriting.
+  rootPath: ''
 
 service:
   # ClusterIP, NodePort or LoadBalancer.
