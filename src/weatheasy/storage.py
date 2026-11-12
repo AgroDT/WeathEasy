@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 SCHEMA = 'weatheasy-coordinate-v1'
 DIMS = ('time', 'latitude', 'longitude')
+TIME_COORDINATE_CHUNK = 1024
 
 
 class StorageError(ValueError):
@@ -297,7 +298,11 @@ def _restore_append_backup(store: Store, target: zarr.Group) -> None:
         if dimensions and 'time' in dimensions:
             chunk = array.chunks[dimensions.index('time')]
             if count % chunk:
-                sync(store.delete_dir(f'{array.path}/c/{count // chunk}/'))
+                if array.ndim == 1:
+                    key = array.metadata.encode_chunk_key((count // chunk,))
+                    sync(store.delete(f'{array.path}/{key}'))
+                else:
+                    sync(store.delete_dir(f'{array.path}/c/{count // chunk}/'))
     for key in cast('list[str]', target.attrs['append_backup']):
         saved = sync(store.get(f'{target.path}/.append-backup/{key}', default_buffer_prototype()))
         if saved is None:
@@ -316,10 +321,14 @@ def _save_append_backup(store: Store, target: zarr.Group, count: int) -> None:
         chunk = array.chunks[axis]
         if count % chunk == 0:
             continue
-        # Weather time is the leading dimension. Coordinates use time chunks
-        # of one, so their committed objects are never touched by append.
-        prefix = f'{array.path}/c/{count // chunk}/'
-        for key in sync(_keys(store, prefix)):
+        # A one-dimensional coordinate chunk is an object, whereas a weather
+        # time slab is a prefix containing the spatial chunk objects.
+        if array.ndim == 1:
+            chunk_key = array.metadata.encode_chunk_key((count // chunk,))
+            keys_to_save = [f'{array.path}/{chunk_key}']
+        else:
+            keys_to_save = sync(_keys(store, f'{array.path}/c/{count // chunk}/'))
+        for key in keys_to_save:
             value = sync(store.get(key, default_buffer_prototype()))
             if value is not None:
                 sync(store.set(f'{target.path}/.append-backup/{key}', value))
@@ -379,6 +388,8 @@ def write_batches(  # noqa: C901, PLR0912, PLR0915
             msg = 'Existing group has a conflicting grid, CRS, variables or units'
             raise StorageError(msg)
         if count:
+            _restore_append_backup(store, target)
+            _truncate_uncommitted(target, count)
             time_array = target.get_array('time')
             last = decode_cf_datetime(
                 time_array[count - 1 : count],
@@ -424,8 +435,6 @@ def write_batches(  # noqa: C901, PLR0912, PLR0915
             previous = dataset.time.to_numpy()[-1]
             dataset = next(batches, None)
         if count:
-            _restore_append_backup(store, target)
-            _truncate_uncommitted(target, count)
             _save_append_backup(store, target, count)
         else:
             first_dataset.attrs = attrs
@@ -531,6 +540,8 @@ def write_staged(
         msg = 'Staged weather timestamps must be nonempty and increasing'
         raise StorageError(msg)
     if count:
+        _restore_append_backup(store, target)
+        _truncate_uncommitted(target, count)
         time_array = target.get_array('time')
         last = (
             decode_cf_datetime(
@@ -544,8 +555,6 @@ def write_staged(
         if times[0] <= last:
             msg = 'New timestamps must follow all committed timestamps'
             raise StorageError(msg)
-        _restore_append_backup(store, target)
-        _truncate_uncommitted(target, count)
         _save_append_backup(store, target, count)
     elif 'storage_schema' not in target.attrs and (list(target.keys()) or target.attrs):
         msg = 'Existing group is not a coordinate-aware weatheasy store'
@@ -624,7 +633,7 @@ def _write_time_batch(
         for name in ds.data_vars
     }
     encoding['time'] = {
-        'chunks': (1,),
+        'chunks': (TIME_COORDINATE_CHUNK,),
         'dtype': 'int64',
         'units': 'seconds since 1970-01-01',
         'calendar': 'proleptic_gregorian',

@@ -14,6 +14,7 @@ from zarr.storage import FsspecStore, LocalStore, MemoryStore, StoreLike
 
 from weatheasy.storage import (
     StorageError,
+    _copy_staged,
     delete_group,
     get_store,
     open_dataset,
@@ -654,6 +655,47 @@ def test_source_chunk_policy(group: str, expected: int):
     )
     write_batch(store, group, dataset)
     assert zarr.open_group(store).get_group(group).get_array('TMP').chunks == (expected, 32, 32)
+    assert zarr.open_group(store).get_group(group).get_array('time').chunks == (1024,)
+
+
+@pytest.mark.parametrize('staged', [False, True], ids=['batches', 'staged'])
+@pytest.mark.parametrize('committed', [1, 1023], ids=['within-chunk', 'across-chunk'])
+def test_failed_append_restores_committed_time_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, committed: int, *, staged: bool
+):
+    store = MemoryStore()
+    dates = np.arange(
+        np.datetime64('1950-01-01'),
+        np.datetime64('1950-01-01') + np.timedelta64(committed + 2, 'D'),
+    ).astype('datetime64[ns]')
+    history = (
+        field().isel(time=np.zeros(committed, dtype=int)).assign_coords(time=dates[:committed])
+    )
+    addition = field().isel(time=[0, 0]).assign_coords(time=dates[committed:])
+    write_batch(store, 'daily', history)
+    original_copy = _copy_staged
+
+    def append(dataset):  # noqa: ANN001
+        if staged:
+            write_blocks(store, 'daily', [dataset], work_dir=tmp_path)
+        else:
+            write_batch(store, 'daily', dataset)
+
+    def corrupt(target, arrays, count, written):  # noqa: ANN001
+        original_copy(target, arrays, count, written)
+        if 'time' in arrays:
+            target.get_array('time')[0] = 0
+            msg = 'interrupted after coordinate write'
+            raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr('weatheasy.storage._copy_staged', corrupt)
+        with pytest.raises(OSError, match='interrupted after coordinate write'):
+            append(addition)
+    append(addition)
+    with open_dataset(store, 'daily') as result:
+        np.testing.assert_array_equal(result.time, dates)
+        np.testing.assert_array_equal(result.TMP, np.tile(field().TMP, (committed + 2, 1, 1)))
 
 
 def test_failed_append_restores_absent_committed_chunk(monkeypatch: pytest.MonkeyPatch):
@@ -679,9 +721,10 @@ def test_failed_append_restores_absent_committed_chunk(monkeypatch: pytest.Monke
         np.testing.assert_array_equal(result.TMP[1], field().TMP[0])
 
 
-def test_restore_is_retryable(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize('restore_array', ['TMP', 'time'])
+def test_restore_is_retryable(monkeypatch: pytest.MonkeyPatch, restore_array: str):
     store = MemoryStore()
-    write_batch(store, 'grid', field())
+    write_batch(store, 'grid', field(day='1950-01-01'))
 
     def corrupt(_self, *_args, **_kwargs):  # noqa: ANN001
         array = zarr.open_group(store).get_group('grid').get_array('TMP')
@@ -693,11 +736,11 @@ def test_restore_is_retryable(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as patch:
         patch.setattr('weatheasy.storage._copy_staged', corrupt)
         with pytest.raises(OSError, match='interrupted append'):
-            write_batch(store, 'grid', field(day='2026-01-02'))
+            write_batch(store, 'grid', field(day='1950-01-02'))
     original_set = store.set
 
     async def fail_restore(key, value):  # noqa: ANN001
-        if key.startswith('grid/TMP/c/'):
+        if key.startswith(f'grid/{restore_array}/c/'):
             msg = 'interrupted restore'
             raise OSError(msg)
         await original_set(key, value)
@@ -705,13 +748,13 @@ def test_restore_is_retryable(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as patch:
         patch.setattr(store, 'set', fail_restore)
         with pytest.raises(OSError, match='interrupted restore'):
-            write_batch(store, 'grid', field(day='2026-01-02'))
-    write_batch(store, 'grid', field(day='2026-01-02'))
+            write_batch(store, 'grid', field(day='1950-01-02'))
+    write_batch(store, 'grid', field(day='1950-01-02'))
     with open_dataset(store, 'grid') as result:
         np.testing.assert_array_equal(result.TMP[0], field().TMP[0])
         np.testing.assert_array_equal(result.TMP[1], field().TMP[0])
         np.testing.assert_array_equal(
-            result.time, np.array(['2026-01-01', '2026-01-02'], dtype='datetime64[ns]')
+            result.time, np.array(['1950-01-01', '1950-01-02'], dtype='datetime64[ns]')
         )
 
 

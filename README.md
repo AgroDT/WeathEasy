@@ -392,6 +392,11 @@ ERA5-Land and CFS2 GRIB preparation write bounded time blocks. Dask is not requi
 Weather chunks use `(time, latitude, longitude)`: `(128, 32, 32)` for ERA5,
 CFS2 reanalysis and corrections, and CMIP6; CFS2 forecasts use `(64, 32, 32)`.
 Spatial chunks are capped by the grid dimensions. Original source grids are retained.
+The `time` coordinate uses chunks of 1024 dates (8 KiB before compression),
+independently of weather-field chunks. Latitude and longitude each use one chunk.
+The time-coordinate chunk is backed up and restored on interrupted appends just
+like a partially filled weather chunk. Existing coordinates retain their chunk
+sizes until explicitly migrated.
 For the general weather writer, before appending into a partly filled time chunk, existing chunk objects are
 backed up inside the group. Retry restores their committed contents (including
 absent all-NaN chunks) before discarding the uncommitted tail. Backups are retired
