@@ -37,7 +37,8 @@ RUN UV_DYNAMIC_VERSIONING_BYPASS=$UV_DYNAMIC_VERSIONING_BYPASS uv build --wheel
 FROM python:${PYVERSION}-slim-${FLAVOUR}
 ARG VENV_DIR
 ENV PATH="$VENV_DIR/bin:$PATH" \
-    ECCODES_PYTHON_USE_FINDLIBS=1
+    ECCODES_PYTHON_USE_FINDLIBS=1 \
+    PROJ_DATA=/usr/share/proj
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
