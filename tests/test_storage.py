@@ -10,6 +10,7 @@ import pytest
 import xarray as xr
 import zarr
 from rasterio import CRS
+from zarr.core.sync import sync
 from zarr.storage import FsspecStore, LocalStore, MemoryStore, StoreLike
 
 from weatheasy.storage import (
@@ -19,9 +20,12 @@ from weatheasy.storage import (
     get_store,
     open_dataset,
     prepare_dataset,
+    recover_group,
     remove_group_attr,
+    replace_blocks,
     select_point,
     set_group_attrs,
+    truncate_group,
     write_batch,
     write_batches,
     write_blocks,
@@ -80,6 +84,114 @@ def field(
         },
     )
     return prepare_dataset(ds, crs='EPSG:4326')
+
+
+def test_replacement_updates_each_chunk_once_and_preserves_neighbors(
+    tiled_field: xr.Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = MemoryStore()
+    write_batch(store, 'daily', tiled_field, time_chunk=2)
+    written = []
+    original_set = store.set
+
+    async def record(key, value):  # noqa: ANN001
+        if key.startswith(('daily/TMP/c/', 'daily/PRATE/c/')):
+            written.append(key)
+        await original_set(key, value)
+
+    replacement = tiled_field.isel(time=slice(0, 2)).copy(deep=True)
+    replacement.TMP.values += 100
+    replacement.PRATE.values += 100
+    with monkeypatch.context() as patch:
+        patch.setattr(store, 'set', record)
+        replace_blocks(
+            store,
+            'daily',
+            [replacement.isel(time=slice(i, i + 1)) for i in range(2)],
+            work_dir=tmp_path,
+        )
+    assert len(written) == len(set(written)) == 8
+    with open_dataset(store, 'daily') as actual:
+        np.testing.assert_array_equal(actual.time, tiled_field.time)
+        np.testing.assert_array_equal(actual.TMP[:2], replacement.TMP)
+        np.testing.assert_array_equal(actual.PRATE[:2], replacement.PRATE)
+        np.testing.assert_array_equal(actual.TMP[2], tiled_field.TMP[2])
+        np.testing.assert_array_equal(actual.PRATE[2], tiled_field.PRATE[2])
+
+
+@pytest.mark.parametrize('time_chunk', [1, 2])
+def test_replacement_failure_restores_present_and_absent_chunks(
+    tiled_field: xr.Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, time_chunk: int
+):
+    from weatheasy import storage
+
+    store = MemoryStore()
+    original = tiled_field.copy(deep=True)
+    original.TMP.values[1] = np.nan
+    original.PRATE.values[1] = np.nan
+    write_batch(store, 'daily', original, time_chunk=time_chunk)
+    replacement = tiled_field.isel(time=slice(1, 2))
+    original_replace = storage._replace_staged
+
+    def fail(array, values, indices):  # noqa: ANN001
+        original_replace(array, values, indices)
+        msg = 'interrupted replacement'
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, '_replace_staged', fail)
+        with pytest.raises(OSError, match='interrupted replacement'):
+            replace_blocks(store, 'daily', [replacement], work_dir=tmp_path)
+    with pytest.raises(StorageError, match='completed'):
+        open_dataset(store, 'daily')
+    if time_chunk == 2:
+        original_set = store.set
+
+        async def fail_restore(key, value):  # noqa: ANN001
+            if key.startswith('daily/TMP/c/'):
+                msg = 'interrupted restoration'
+                raise OSError(msg)
+            await original_set(key, value)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, 'set', fail_restore)
+            with pytest.raises(OSError, match='interrupted restoration'):
+                recover_group(store, 'daily')
+    recover_group(store, 'daily')
+    with open_dataset(store, 'daily') as restored:
+        np.testing.assert_array_equal(restored.TMP, original.TMP)
+        np.testing.assert_array_equal(restored.PRATE, original.PRATE)
+    replace_blocks(store, 'daily', [replacement], work_dir=tmp_path)
+    with open_dataset(store, 'daily') as repaired:
+        np.testing.assert_array_equal(repaired.TMP, tiled_field.TMP)
+        np.testing.assert_array_equal(repaired.PRATE, tiled_field.PRATE)
+    assert sync(store.is_empty('daily/.replace-backup/'))
+
+
+def test_interrupted_derived_tail_truncation_preserves_retained_rows(
+    tiled_field: xr.Dataset, monkeypatch: pytest.MonkeyPatch
+):
+    from weatheasy import storage
+
+    store = MemoryStore()
+    write_batch(store, 'correction', tiled_field)
+
+    def interrupt(target, count):  # noqa: ANN001
+        array = target.get_array('TMP')
+        array.resize((count, *array.shape[1:]))
+        msg = 'interrupted truncation'
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, '_truncate_uncommitted', interrupt)
+        with pytest.raises(OSError, match='interrupted truncation'):
+            truncate_group(store, 'correction', 2)
+    recover_group(store, 'correction')
+    with open_dataset(store, 'correction') as retained:
+        np.testing.assert_array_equal(retained.time, tiled_field.time[:2])
+        np.testing.assert_array_equal(retained.TMP, tiled_field.TMP[:2])
+        np.testing.assert_array_equal(retained.PRATE, tiled_field.PRATE[:2])
+        assert retained.attrs['committed_length'] == 2
 
 
 def test_round_trip_metadata_nan_and_direct_xarray(tmp_path: Path):

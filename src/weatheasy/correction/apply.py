@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import xarray as xr
+from xarray.coding.times import decode_cf_datetime
 
 from . import features
 from .precip import PrecipCorrector
@@ -26,7 +27,10 @@ from weatheasy.storage import (
     last_date,
     open_dataset,
     prepare_dataset,
+    recover_group,
+    remove_group_attr,
     set_group_attrs,
+    truncate_group,
     write_batch,
     write_batches,
 )
@@ -82,6 +86,7 @@ def correct_store(  # noqa: C901, PLR0912, PLR0915
     lats, lons = source.grid(root)
     temp, precip, artifact_id = load_correctors(source, artifacts, lats, lons)
     path = source.corrected_path(root)
+    _invalidate_changed_tail(root, source)
     if _requires_rebuild(root, source.correction_path, lats, lons, artifact_id):
         _LOG.warning(
             '%s correction grid is incompatible; rebuilding from %s',
@@ -347,6 +352,29 @@ def _corrected_dataset(
         },
         coords={'time': time, 'latitude': lats, 'longitude': lons},
     )
+
+
+def _invalidate_changed_tail(root: zarr.Group, source: Source) -> None:
+    path = source.corrected_path(root)
+    if not group_exists(root.store, path):
+        return
+    attrs = group_attrs(root.store, path)
+    changed = attrs.get('source_changed_from')
+    if changed is None:
+        return
+    recover_group(root.store, path)
+    group = root.get_group(source.correction_path)
+    count = int(cast('int', group.attrs['committed_length']))
+    keep = 0
+    if count:
+        time = group.get_array('time')
+        dates = decode_cf_datetime(
+            time[:count], cast('str', time.attrs['units']), cast('str', time.attrs['calendar'])
+        )
+        keep = int(np.searchsorted(dates, np.datetime64(str(changed))))
+    truncate_group(root.store, path, keep)
+    remove_group_attr(root.store, path, 'source_changed_from')
+    _LOG.info('%s: invalidated correction tail from %s', source.name, changed)
 
 
 def _requires_rebuild(

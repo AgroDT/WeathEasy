@@ -17,6 +17,7 @@ def run(args: Namespace) -> None:
         work_dir=args.work_dir,
         work_max_age_days=args.work_max_age_days,
         proxy=args.proxy,
+        reanalysis_recheck_days=args.reanalysis_recheck_days,
     )
     if args.artifacts is None:
         return

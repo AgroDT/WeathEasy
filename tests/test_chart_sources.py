@@ -79,12 +79,15 @@ def test_update_jobs_use_their_own_stores_and_credentials(tmp_path: Path, cache:
                 )
                 assert args[args.index('--work-dir') + 1] == '/var/lib/weatheasy'
                 if source == 'era5':
+                    assert '--reanalysis-recheck-days' not in args
                     index = args.index('--bbox')
                     assert args[index + 1 : index + 5] == ['56', '37', '55', '38']
                 else:
                     assert '--bbox' not in args
+                    assert args[args.index('--reanalysis-recheck-days') + 1] == '30'
             else:
                 assert '--bbox' not in args
+                assert '--reanalysis-recheck-days' not in args
             assert container.get('envFrom', []) == (
                 [{'secretRef': {'name': 'cds'}}] if source == 'era5' else []
             )
@@ -117,6 +120,42 @@ def test_update_only_chart_needs_no_other_sources(tmp_path: Path):
     manifests = list(yaml.safe_load_all(result.stdout))
     assert not any(m['kind'] == 'Deployment' for m in manifests)
     assert len([m for m in manifests if m['kind'] == 'CronJob']) == 1
+
+
+@pytest.mark.parametrize('days', [0, 45])
+@pytest.mark.parametrize('correction', [False, True])
+def test_cfs2_recheck_window_is_passed_only_to_download(
+    tmp_path: Path, days: int, *, correction: bool
+):
+    result = render(
+        tmp_path,
+        {
+            'sources': {
+                'cfs2': {
+                    'store': 's3://weather/cfs2.zarr',
+                    'update': {
+                        'enabled': True,
+                        'reanalysisRecheckDays': days,
+                        'correction': {
+                            'enabled': correction,
+                            'dem': 's3://weather/terrain.zarr',
+                            'artifacts': 's3://weather/models',
+                        },
+                    },
+                }
+            },
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    job = next(m for m in yaml.safe_load_all(result.stdout) if m['kind'] == 'CronJob')
+    spec = job['spec']['jobTemplate']['spec']['template']['spec']
+    containers = spec.get('initContainers', []) + spec['containers']
+    download = next(c for c in containers if c['name'] == 'download')
+    args = download['args']
+    assert args[args.index('--reanalysis-recheck-days') + 1] == str(days)
+    for container in containers:
+        if container['name'] == 'correction':
+            assert '--reanalysis-recheck-days' not in container['args']
 
 
 def test_working_downloads_use_existing_pvc_without_extra_jobs(tmp_path: Path):

@@ -20,9 +20,12 @@ from weatheasy.sources import read_cfs2, read_netcdf
 from weatheasy.storage import (
     delete_group,
     group_attrs,
+    group_exists,
     last_date,
     prepare_dataset,
+    recover_group,
     remove_group_attr,
+    replace_blocks,
     set_group_attrs,
     write_batches,
     write_blocks,
@@ -31,6 +34,7 @@ from weatheasy.util import utc_now
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import BinaryIO, Literal
 
     from httpx2 import Response
@@ -46,7 +50,11 @@ def download_cfs2_data(
     work_dir: str | Path | None = None,
     work_max_age_days: int = 7,
     proxy: str | None = None,
+    reanalysis_recheck_days: int = 30,
 ) -> None:
+    if reanalysis_recheck_days < 0:
+        msg = 'reanalysis_recheck_days must be non-negative'
+        raise ValueError(msg)
     work_dir = Path(work_dir).expanduser() if work_dir is not None else default_work_dir()
     set_group_attrs(store, '')
     today = utc_now().date()
@@ -55,6 +63,14 @@ def download_cfs2_data(
     yesterday = today - const.ONE_DAY
     forecast_begin = today - const.CFS2_REANALYSIS_LAST_DATE_OFFSET
     forecast_end = yesterday + const.CFS2_FORECAST_DAYS
+    for kind in ('flx', 'pgb'):
+        path = f'reanalysis/{kind}'
+        if group_exists(store, path):
+            recover_group(store, path)
+    retry_days = _cfs2_retry_days(
+        store, today - reanalysis_recheck_days * const.ONE_DAY, forecast_begin
+    )
+    retries = set().union(*retry_days.values())
 
     with ExitStack() as stack:
         reanalysis = stack.enter_context(
@@ -82,7 +98,7 @@ def download_cfs2_data(
                 day = date.fromisoformat(name.rsplit('/', 1)[-1].split('.', maxsplit=1)[0])
             except ValueError:
                 return False
-            return pending and first <= day < forecast_begin
+            return (pending and first <= day < forecast_begin) or day in retries
 
         reanalysis.cleanup(needed_reanalysis, max_age_days=work_max_age_days)
         forecast_names = (
@@ -98,12 +114,17 @@ def download_cfs2_data(
             else set()
         )
         forecast_cache.cleanup(forecast_names.__contains__, max_age_days=work_max_age_days)
+        if not pending and not retries:
+            _LOG.info('No forecast update required')
+            return
+        session = stack.enter_context(_session(proxy))
+        _download_cfs2_reanalysis(
+            store, forecast_begin, session, reanalysis, work_dir=work_dir, retry_days=retry_days
+        )
         if not pending:
             _LOG.info('No forecast update required')
             return
         forecast = forecast_cache.child(today.isoformat())
-        session = stack.enter_context(_session(proxy))
-        _download_cfs2_reanalysis(store, forecast_begin, session, reanalysis, work_dir=work_dir)
         _download_cfs2_forecast(forecast_begin, yesterday, session, forecast)
         _download_cfs2_forecast(yesterday, forecast_end, session, forecast)
         _merge_cfs2_forecast(store, forecast_begin, forecast_end, forecast.root, work_dir=work_dir)
@@ -173,7 +194,13 @@ def _session(proxy: str | None = None) -> Client:
 
 
 def _download_cfs2_reanalysis(
-    store: Store, end: date, session: Client, download_dir: DownloadCache, *, work_dir: Path
+    store: Store,
+    end: date,
+    session: Client,
+    download_dir: DownloadCache,
+    *,
+    work_dir: Path,
+    retry_days: dict[str, list[date]] | None = None,
 ):
     download = _Cfs2ReanalysisDownloader(session, download_dir)
     groups = {kind: f'{const.CFS2_REANALYSIS_DIR}/{kind}' for kind in ('flx', 'pgb')}
@@ -185,6 +212,7 @@ def _download_cfs2_reanalysis(
         for last in previous.values()
     )
     if date_ >= end:
+        _repair_cfs2_reanalysis(store, retry_days or {}, download, download_dir, work_dir=work_dir)
         return
     templates, prefetched = _reanalysis_templates(
         store, groups, previous, date_, end, download=download
@@ -205,6 +233,15 @@ def _download_cfs2_reanalysis(
             date_ += const.ONE_DAY
         for kind, path in groups.items():
             last = previous[kind]
+            _cfs2_incomplete_days(
+                store,
+                path,
+                add=[
+                    day
+                    for day, paths in paths_by_day
+                    if (last is None or day > last) and len(paths) < len(const.CFS2_HHS)
+                ],
+            )
             _LOG.info(
                 'Processing %s: %s calendar days; writing in 128-day blocks',
                 path,
@@ -221,9 +258,93 @@ def _download_cfs2_reanalysis(
                 work_dir=work_dir,
             )
             previous[kind] = last_date(store, path)
+            _cfs2_incomplete_days(
+                store,
+                path,
+                remove=[
+                    day
+                    for day, paths in paths_by_day
+                    if (last is None or day > last) and len(paths) == len(const.CFS2_HHS)
+                ],
+            )
             _LOG.info('Saved %s through %s', path, previous[kind])
         for _, paths in paths_by_day:
-            download_dir.release(paths)
+            if len(paths) == len(const.CFS2_HHS):
+                download_dir.release(paths)
+    if retry_days:
+        _repair_cfs2_reanalysis(store, retry_days, download, download_dir, work_dir=work_dir)
+
+
+def _cfs2_incomplete_days(
+    store: Store, path: str, *, add: Iterable[date] = (), remove: Iterable[date] = ()
+) -> None:
+    kind = path.rsplit('/', 1)[-1]
+    tracked = dict(group_attrs(store, '').get('cfs2_incomplete_days', {}))
+    before = tracked.get(kind, [])
+    days = sorted((set(before) | {str(day) for day in add}) - {str(day) for day in remove})
+    if days != before:
+        tracked[kind] = days
+        set_group_attrs(store, '', cfs2_incomplete_days=tracked)
+
+
+def _cfs2_retry_days(store: Store, begin: date, end: date) -> dict[str, list[date]]:
+    result = {'flx': [], 'pgb': []}
+    begin = max(begin, const.CFS2_REANALYSIS_FIRST_DATE)
+    if begin >= end:
+        return result
+    tracked = group_attrs(store, '').get('cfs2_incomplete_days', {})
+    for kind in ('flx', 'pgb'):
+        path = f'reanalysis/{kind}'
+        if group_exists(store, path) and (last := last_date(store, path)) is not None:
+            result[kind] = sorted(
+                day
+                for value in tracked.get(kind, [])
+                if begin <= (day := date.fromisoformat(value)) < end and day <= last
+            )
+            _LOG.info('CFS2 %s: %s incomplete days in recheck window', kind, len(result[kind]))
+    return result
+
+
+def _repair_cfs2_reanalysis(
+    store: Store,
+    retry_days: dict[str, list[date]],
+    download: _Cfs2ReanalysisDownloader,
+    download_dir: DownloadCache,
+    *,
+    work_dir: Path,
+) -> None:
+    available = {}
+    for day in sorted(set().union(*retry_days.values())):
+        paths = download(day)
+        if len(paths) == len(const.CFS2_HHS):
+            available[day] = paths
+        else:
+            _LOG.info('CFS2 %s: still incomplete (%s/4 files)', day, len(paths))
+    for kind, days in retry_days.items():
+        ready = [day for day in days if day in available]
+        if not ready:
+            continue
+        # Raw changes invalidate an already published correction before mutation.
+        if kind == 'flx' and group_exists(store, 'reanalysis/correction'):
+            attrs = group_attrs(store, 'reanalysis/correction')
+            if attrs.get('committed_length'):
+                earliest = min(str(ready[0]), str(attrs.get('source_changed_from', ready[0])))
+                set_group_attrs(
+                    store,
+                    'reanalysis/correction',
+                    source_changed_from=earliest,
+                    write_state='writing',
+                )
+        replace_blocks(
+            store,
+            f'reanalysis/{kind}',
+            (_daily_cfs2(available[day], kind, day) for day in ready),
+            work_dir=work_dir,
+        )
+        _cfs2_incomplete_days(store, f'reanalysis/{kind}', remove=ready)
+        _LOG.info('CFS2 %s: repaired %s previously incomplete days', kind, len(ready))
+    for paths in available.values():
+        download_dir.release(paths)
 
 
 def _reanalysis_templates(

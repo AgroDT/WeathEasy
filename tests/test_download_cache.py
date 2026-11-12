@@ -25,7 +25,15 @@ from httpx2 import (
 from weatheasy import const, download, raw_cache
 from weatheasy.file_storage import FileStore
 from weatheasy.raw_cache import download_cache
-from weatheasy.storage import get_store, open_dataset, prepare_dataset, set_group_attrs, write_batch
+from weatheasy.storage import (
+    get_store,
+    group_attrs,
+    open_dataset,
+    prepare_dataset,
+    set_group_attrs,
+    write_batch,
+    write_blocks,
+)
 
 
 @pytest.fixture(name='isolated_work_dir', autouse=True)
@@ -684,6 +692,131 @@ def test_cfs2_reanalysis_keeps_calendar_and_appends_missing_days(
             np.testing.assert_array_equal(saved.time, expected_time)
             np.testing.assert_allclose(saved[name][:, 0, 0], expected_values, rtol=0, atol=0)
             assert saved.attrs['committed_length'] == leading_missing + 3
+            assert group_attrs(store, '')['cfs2_incomplete_days'][kind] == [
+                str(value.astype('datetime64[D]'))
+                for value in expected_time[np.isnan(expected_values)]
+            ]
+
+
+def test_cfs2_recheck_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(download, 'utc_now', lambda: datetime(2026, 1, 10, tzinfo=UTC))
+    store = get_store(tmp_path / 'prepared')
+    for kind, variable in (('flx', 'TMP'), ('pgb', 'RH')):
+        dataset = xr.Dataset(
+            {
+                variable: (
+                    ('time', 'latitude', 'longitude'),
+                    np.full((1, 2, 2), np.nan),
+                    {'units': 'K'},
+                )
+            },
+            coords={'time': [np.datetime64('2026-01-05')], 'latitude': [0, 1], 'longitude': [0, 1]},
+        )
+        write_batch(store, f'reanalysis/{kind}', prepare_dataset(dataset, crs='EPSG:4326'))
+    set_group_attrs(
+        store,
+        '',
+        updated='2026-01-10',
+        cfs2_incomplete_days={'flx': ['2026-01-05'], 'pgb': ['2026-01-05']},
+    )
+
+    def no_network(_proxy):  # noqa: ANN001
+        pytest.fail('disabled recheck attempted a source download')
+
+    monkeypatch.setattr(download, '_session', no_network)
+    download.download_cfs2_data(store, work_dir=tmp_path, reanalysis_recheck_days=0)
+    with open_dataset(store, 'reanalysis/flx') as result:
+        assert np.isnan(result.TMP).all()
+
+
+def test_cfs2_rechecks_only_marked_days_and_waits_for_complete_day(  # noqa: C901
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grib_content: bytes
+):
+    begin = date(2026, 1, 1)
+    today = datetime(2026, 1, 10, tzinfo=UTC)
+    monkeypatch.setattr(download, 'utc_now', lambda: today)
+    monkeypatch.setattr(const, 'CFS2_FLX_BANDS', {'TMP': const.CFS2_FLX_BANDS['TMP']})
+    store = get_store(tmp_path / 'prepared')
+    requests = []
+    complete = False
+
+    def respond(request: Request):
+        day = date.fromisoformat(request.url.path.split('/')[-2])
+        hour = int(request.url.path.split('.t')[1][:2])
+        requests.append((day, hour))
+        assert day == date(2026, 1, 5)
+        if hour == 6 and not complete:
+            return Response(404)
+        return Response(200, content=grib_content)
+
+    def read(path: Path, *, kind: str, product: str = 'reanalysis'):
+        assert product == 'reanalysis'
+        stamp, cycle = path.name.split('.cdas1.t')
+        day = date(int(stamp[:4]), int(stamp[4:6]), int(stamp[6:8]))
+        hour = int(cycle[:2])
+        variable, units = ('TMP', 'degC') if kind == 'flx' else ('RH', '%')
+        return xr.Dataset(
+            {
+                variable: (
+                    ('time', 'latitude', 'longitude'),
+                    np.full((1, 2, 2), (day - begin).days * 10 + hour, np.float32),
+                    {'units': units},
+                )
+            },
+            coords={
+                'time': [np.datetime64(day) + np.timedelta64(hour, 'h')],
+                'latitude': [0, 1],
+                'longitude': [0, 1],
+            },
+        )
+
+    monkeypatch.setattr(download, 'read_cfs2', read)
+    for kind in ('flx', 'pgb'):
+        days = []
+        for offset in range(6):
+            day = begin + offset * const.ONE_DAY
+            paths = [
+                Path(f'{day:%Y%m%d}.cdas1.t{hour:02}z.pgrbh00.grib2') for hour in (0, 6, 12, 18)
+            ]
+            daily = download._daily_cfs2(paths, kind, day)
+            if offset in (1, 3, 4):
+                for variable in daily.data_vars.values():
+                    variable.values[:] = np.nan
+            if offset == 5:
+                for variable in daily.data_vars.values():
+                    variable.values[0, 0, 0] = np.nan
+            days.append(daily)
+        write_blocks(store, f'reanalysis/{kind}', days, work_dir=tmp_path / 'work')
+    set_group_attrs(
+        store,
+        '',
+        updated='2026-01-10',
+        cfs2_incomplete_days={kind: ['2026-01-02', '2026-01-05'] for kind in ('flx', 'pgb')},
+    )
+    monkeypatch.setattr(
+        download, '_session', lambda _proxy: Client(transport=MockTransport(respond))
+    )
+    # Today's forecast is already published: retries must still run.
+    download.download_cfs2_data(
+        store, tmp_path / 'raw', work_dir=tmp_path / 'work', reanalysis_recheck_days=5
+    )
+    for kind, variable in (('flx', 'TMP'), ('pgb', 'RH')):
+        with open_dataset(store, f'reanalysis/{kind}') as saved:
+            assert np.isnan(saved[variable][4]).all()
+    complete = True
+    download.download_cfs2_data(
+        store, tmp_path / 'raw', work_dir=tmp_path / 'work', reanalysis_recheck_days=5
+    )
+    assert requests == [(date(2026, 1, 5), hour) for hour in (0, 6, 12, 18, 6)]
+    for kind, variable in (('flx', 'TMP'), ('pgb', 'RH')):
+        with open_dataset(store, f'reanalysis/{kind}') as saved:
+            assert np.isnan(saved[variable][1]).all()  # Outside the recheck window.
+            assert np.isnan(saved[variable][3]).all()  # Unmarked legacy gap inside the window.
+            np.testing.assert_array_equal(saved[variable][4], 49)
+            assert np.isnan(saved[variable][5, 0, 0])  # Preserve partial spatial gaps.
+            assert saved[variable][5, 1, 1] == 59
+            assert saved.sizes['time'] == 6
+            assert group_attrs(store, '')['cfs2_incomplete_days'][kind] == ['2026-01-02']
 
 
 @pytest.mark.parametrize(

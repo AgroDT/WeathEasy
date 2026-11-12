@@ -25,6 +25,10 @@
     - {{ $root.Values.downloadCache | quote }}
     - --work-dir
     - /var/lib/weatheasy
+    {{- if eq .source "cfs2" }}
+    - --reanalysis-recheck-days
+    - {{ $job.reanalysisRecheckDays | quote }}
+    {{- end }}
     {{- if and (eq .source "era5") $job.bbox }}
     - --bbox
     {{- range $job.bbox }}

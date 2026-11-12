@@ -127,6 +127,8 @@ sources:
     update:
       # Create the source CronJob.
       enabled: false
+      # Recheck explicitly marked incomplete reanalysis days within this many past days; 0 disables rechecking.
+      reanalysisRecheckDays: 30
       # Cron schedule.
       schedule: 0 5 * * *
       # Schedule time zone.

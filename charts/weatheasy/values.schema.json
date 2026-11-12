@@ -283,6 +283,12 @@
                   "description": "Create the source CronJob.",
                   "default": false
                 },
+                "reanalysisRecheckDays": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Recheck explicitly marked incomplete reanalysis days within this many past days; 0 disables rechecking.",
+                  "default": 30
+                },
                 "schedule": {
                   "type": "string",
                   "minLength": 1,

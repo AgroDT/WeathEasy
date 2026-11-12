@@ -237,6 +237,7 @@ remain extensible and are validated by Kubernetes.
 | `service.port` | integer | `8000` | Service port; containers listen on port 8000. |
 | `sources.cfs2.store` | string | `""` | Independent CFS2 Zarr store URI; empty disables this source. |
 | `sources.cfs2.update.enabled` | boolean | `false` | Create the source CronJob. |
+| `sources.cfs2.update.reanalysisRecheckDays` | integer | `30` | Recheck explicitly marked incomplete reanalysis days within this many past days; 0 disables rechecking. |
 | `sources.cfs2.update.schedule` | string | `"0 5 * * *"` | Cron schedule. |
 | `sources.cfs2.update.timeZone` | string | `"Etc/UTC"` | Schedule time zone. |
 | `sources.cfs2.update.suspend` | boolean | `false` | Pause scheduled runs; does not stop active Jobs. |

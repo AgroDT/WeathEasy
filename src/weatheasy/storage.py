@@ -22,7 +22,7 @@ import hashlib
 import json
 import logging
 from datetime import date
-from itertools import chain, islice
+from itertools import chain, islice, product
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, cast
@@ -289,6 +289,7 @@ async def _keys(store: Store, prefix: str) -> list[str]:
 
 
 def _restore_append_backup(store: Store, target: zarr.Group) -> None:
+    _restore_replace_backup(store, target)
     # The marker is retained until commit, so restoration itself is retryable.
     if 'append_backup' not in target.attrs:
         return
@@ -335,6 +336,174 @@ def _save_append_backup(store: Store, target: zarr.Group, count: int) -> None:
                 keys.append(key)
     # Publish the manifest only after every backup is durable, before mutation.
     target.attrs['append_backup'] = keys
+
+
+def _restore_replace_backup(store: Store, target: zarr.Group) -> None:
+    if 'replace_backup' not in target.attrs:
+        return
+    backup = cast('dict[str, list[str]]', target.attrs['replace_backup'])
+    for prefix in backup['prefixes']:
+        sync(store.delete_dir(prefix))
+    for key in backup['keys']:
+        saved = sync(store.get(f'{target.path}/.replace-backup/{key}', default_buffer_prototype()))
+        if saved is None:
+            msg = f'Missing replacement chunk backup: {key}'
+            raise StorageError(msg)
+        sync(store.set(key, saved))
+    attrs = dict(target.attrs)
+    attrs.pop('replace_backup')
+    attrs['write_state'] = 'complete'
+    target.attrs.put(attrs)
+    zarr.consolidate_metadata(store)
+    sync(store.delete_dir(f'{target.path}/.replace-backup/'))
+
+
+def recover_group(store: Store, group: str) -> None:
+    """Restore published data before inspecting a group interrupted during writing."""
+    root = zarr.open_group(store, mode='r+', zarr_format=3, use_consolidated=False)
+    target = root.get_group(group)
+    count = int(cast('int', target.attrs.get('committed_length', 0)))
+    if not count or (
+        target.attrs.get('write_state') == 'complete'
+        and 'append_backup' not in target.attrs
+        and 'replace_backup' not in target.attrs
+    ):
+        return
+    _restore_append_backup(store, target)
+    _truncate_uncommitted(target, count)
+    attrs = dict(target.attrs)
+    attrs.pop('append_backup', None)
+    attrs['write_state'] = 'complete'
+    target.attrs.put(attrs)
+    zarr.consolidate_metadata(store)
+    sync(store.delete_dir(f'{group}/.append-backup/'))
+
+
+def truncate_group(store: Store, group: str, count: int) -> None:
+    """Discard derived tail rows; interrupted truncation resumes at the new frontier."""
+    recover_group(store, group)
+    root = zarr.open_group(store, mode='r+', zarr_format=3, use_consolidated=False)
+    target = root.get_group(group)
+    if not 0 <= count <= int(cast('int', target.attrs['committed_length'])):
+        msg = 'Truncation must retain a prefix of committed data'
+        raise StorageError(msg)
+    root.update_attributes(dict(root.attrs))
+    # Publish the shorter frontier before removing anything beyond it. A retry
+    # can finish shrinking the arrays without losing any still-committed row.
+    target.attrs.update(committed_length=count, write_state='writing')
+    _truncate_uncommitted(target, count)
+    target.attrs['write_state'] = 'complete'
+    zarr.consolidate_metadata(store)
+
+
+def replace_blocks(
+    store: Store, group: str, datasets: Iterable[xr.Dataset], *, work_dir: Path
+) -> None:
+    """Stage corrected existing dates and replace each destination chunk once."""
+    blocks = iter(datasets)
+    first = next(blocks, None)
+    if first is None:
+        return
+    recover_group(store, group)
+    root = zarr.open_group(store, mode='r+', zarr_format=3, use_consolidated=False)
+    target = root.get_group(group)
+    signature = target.attrs.get('grid_signature')
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix='weatheasy-replace-', dir=work_dir) as directory:
+        filenames = {
+            name: Path(directory) / f'{index}.raw'
+            for index, name in enumerate(['time', *(str(name) for name in first.data_vars)])
+        }
+        written = 0
+        for dataset in chain((first,), blocks):
+            if _signature(dataset) != signature:
+                msg = 'Replacement has a conflicting grid, CRS, variables or units'
+                raise StorageError(msg)
+            for name, filename in filenames.items():
+                values = (
+                    dataset.time.to_numpy().astype('datetime64[s]').astype(np.int64)
+                    if name == 'time'
+                    else dataset[name].to_numpy()
+                )
+                with filename.open('ab') as stream:
+                    values.tofile(stream)
+            written += dataset.sizes['time']
+        requested = np.fromfile(filenames['time'], dtype=np.int64).astype('datetime64[s]')
+        times = target.get_array('time')
+        existing = decode_cf_datetime(
+            times[:], cast('str', times.attrs['units']), cast('str', times.attrs['calendar'])
+        )
+        indices = np.searchsorted(existing, requested)
+        if (
+            len(indices) == 0
+            or np.any(np.diff(indices) <= 0)
+            or np.any(indices >= len(existing))
+            or not np.array_equal(existing[indices], requested)
+        ):
+            msg = 'Replacement dates must be distinct existing committed dates'
+            raise StorageError(msg)
+        _save_replace_backup(store, root, target, filenames, indices)
+        for name, filename in filenames.items():
+            if name == 'time':
+                continue
+            staged = np.memmap(
+                filename,
+                mode='r',
+                dtype=first[name].dtype,
+                shape=(written, first.sizes['latitude'], first.sizes['longitude']),
+            )
+            try:
+                _replace_staged(target.get_array(name), staged, indices)
+            finally:
+                cast('mmap', staged.base).close()
+    attrs = dict(target.attrs)
+    attrs.pop('replace_backup')
+    attrs['write_state'] = 'complete'
+    target.attrs.put(attrs)
+    zarr.consolidate_metadata(store)
+    sync(store.delete_dir(f'{group}/.replace-backup/'))
+
+
+def _save_replace_backup(
+    store: Store,
+    root: zarr.Group,
+    target: zarr.Group,
+    filenames: dict[str, Path],
+    indices: np.ndarray,
+) -> None:
+    prefixes = []
+    for name in filenames:
+        if name != 'time':
+            array = target.get_array(name)
+            prefixes.extend(
+                f'{array.path}/c/{chunk}/' for chunk in np.unique(indices // array.chunks[0])
+            )
+    keys = []
+    for prefix in prefixes:
+        for key in sync(_keys(store, prefix)):
+            value = sync(store.get(key, default_buffer_prototype()))
+            if value is None:
+                msg = f'Chunk disappeared while preparing replacement: {key}'
+                raise StorageError(msg)
+            sync(store.set(f'{target.path}/.replace-backup/{key}', value))
+            keys.append(key)
+    root.update_attributes(dict(root.attrs))
+    target.attrs.update(write_state='writing', replace_backup={'prefixes': prefixes, 'keys': keys})
+
+
+def _replace_staged(array: zarr.Array, values: np.memmap, indices: np.ndarray) -> None:
+    time_step, lat_step, lon_step = array.chunks
+    for chunk in np.unique(indices // time_step):
+        selected = np.flatnonzero(indices // time_step == chunk)
+        start, stop = int(chunk * time_step), min(int((chunk + 1) * time_step), array.shape[0])
+        for lat, lon in product(
+            range(0, array.shape[1], lat_step), range(0, array.shape[2], lon_step)
+        ):
+            spatial = (slice(lat, lat + lat_step), slice(lon, lon + lon_step))
+            selection = (slice(start, stop), *spatial)
+            block = np.asarray(array[selection])
+            block[indices[selected] - start] = values[(selected, *spatial)]
+            array[selection] = block
 
 
 def write_batch(

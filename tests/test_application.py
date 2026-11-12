@@ -177,7 +177,10 @@ def test_cfs2_public_download_extrema_missing_and_resume(
     root = get_storage(str(tmp_path / 'data'))
     download.download_cfs2_data(get_store(tmp_path / 'data'), work_dir=tmp_path / 'work')
     download.download_cfs2_data(root.store, work_dir=tmp_path / 'work')
-    assert calls == [date(2026, 9, 17), date(2026, 9, 18)]
+    expected_calls = [date(2026, 9, 17), date(2026, 9, 18)]
+    if missing_reanalysis:
+        expected_calls.append(date(2026, 9, 18))
+    assert calls == expected_calls
     result = get_cfs2_data(
         store=root.store,
         begin=date(2026, 9, 18),

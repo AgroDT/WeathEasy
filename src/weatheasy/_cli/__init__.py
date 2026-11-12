@@ -155,6 +155,12 @@ def _add_download(groups: _SubParsersAction[ArgumentParser]) -> None:
         )
         if source == 'cfs2':
             sub.add_argument(
+                '--reanalysis-recheck-days',
+                type=int,
+                default=30,
+                help='recheck incomplete reanalysis days within this many past days; 0 disables',
+            )
+            sub.add_argument(
                 '--artifacts',
                 help='correction model directory or s3:// URI; '
                 'when set, the downloaded forecast is bias-corrected (requires --dem)',

@@ -686,6 +686,25 @@ def test_separate_training_and_apply_commands(tmp_path: Path, monkeypatch: pytes
         assert ds.sizes['time'] == 2  # Rebuilt from the first day with the new model pair.
 
 
+@pytest.mark.usefixtures('stubbed_models')
+def test_correction_rebuilds_after_reanalysis_repair(tmp_path: Path):
+    root, first = raw_store(tmp_path, CFS2, days=3)
+    args = (CFS2, root, get_file_store(tmp_path / 'artifacts'), get_store(tmp_path / 'dem.zarr'))
+    assert apply.correct_store(*args) == 3
+    root[CFS2.group_path]['TMP'][1] = 20
+    correction = root[CFS2.correction_path]
+    correction.attrs.update(
+        source_changed_from=str(first + timedelta(days=1)), write_state='writing'
+    )
+    assert apply.correct_store(*args) == 2
+    with open_dataset(root.store, CFS2.corrected_path(root)) as result:
+        np.testing.assert_array_equal(result.TMP_corr[0], 8)
+        np.testing.assert_array_equal(result.TMP_corr[1], 18)
+        np.testing.assert_array_equal(result.TMP_corr[2], 8)
+    assert 'source_changed_from' not in root[CFS2.correction_path].attrs
+    assert apply.correct_store(*args) == 0
+
+
 def test_old_artifacts_are_rejected_before_correction_is_deleted(tmp_path: Path):
     root, first = raw_store(tmp_path)
     artifacts = tmp_path / 'artifacts'

@@ -265,6 +265,20 @@ A full example for CFSv2:
 weatheasy download cfs2 --store s3://weatheasy/cfs2.zarr --download-cache s3://weatheasy/downloads
 ```
 
+CFS2 also rechecks existing incomplete reanalysis days within the last 30 days,
+including on a repeated run after today's forecast has already been published.
+Set `--reanalysis-recheck-days N` to change the window, or `0` to disable it.
+The loader records newly incomplete dates per grid in the root
+`cfs2_incomplete_days` attribute before writing their NaN rows. Only marked dates are
+eligible for recheck, and the marker is removed after successful publication.
+There is no scan or automatic repair of unmarked gaps written by older versions.
+Those require a separate, explicitly run one-off repair. Dates absent from the
+time coordinate also require a separate repair; the loader replaces existing
+days rather than inserting new timestamps.
+Only a complete set of four valid six-hourly source files is used for repair.
+Older gaps remain unchanged. Reanalysis and forecast stores and API selection
+rules remain separate and unchanged.
+
 To display the full help message, run:
 
 ```sh
@@ -412,6 +426,13 @@ the same backup and retry mechanism as other weather writes. Missing CFS2
 reanalysis days remain on the calendar axis. If any of the four six-hourly
 files is missing, all daily fields are NaN; daily values are computed only
 when all four files are available.
+Repaired reanalysis days are staged in `--work-dir` and applied together to each
+affected destination chunk, preserving neighboring days. Original chunk objects
+are backed up under `<group>/.replace-backup/` before the group is marked as
+writing. A failed replacement is restored before retrying or appending; successful
+publication removes the backup. Repaired temperature/flux data mark any existing
+reanalysis correction as stale; the next `correction apply cfs2` recomputes its
+tail from the earliest repaired date, preserving the preceding history.
 Correction reads source time chunks in spatial tiles into temporary memory-mapped
 files, runs the existing daily models, and writes the resulting time block.
 Temporary disk holds both raw and corrected fields for the current source block.
