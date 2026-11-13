@@ -1,0 +1,8 @@
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: public
+      namespace: gateway
+      sectionName: https
+  hostnames:
+    - weatheasy.example.org

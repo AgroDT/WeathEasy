@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
     from rasterio.coords import BoundingBox
 
-    from weatheasy import Coords
+    from weatheasy.query import Coords
 
 
 class S3ImportError(ImportError):
@@ -37,3 +37,8 @@ class DateRangeError(BaseValueError):
 class CMIP6DateRangeError(BaseValueError):
     def __init__(self, date_: date, first: date, last: date) -> None:
         super().__init__(f'date {date_} is out of range [{first}; {last}]')
+
+
+class ERA5DateRangeError(BaseValueError):
+    def __init__(self, date_: date, first: date, last: date) -> None:
+        super().__init__(f'date {date_} is out of ERA5 range [{first}; {last}]')

@@ -1,65 +1,72 @@
 from __future__ import annotations
 
+from contextlib import aclosing
 from io import StringIO
 from typing import TYPE_CHECKING
 
-from anyio import to_thread
+import numpy as np
 from fastapi.responses import StreamingResponse
 
-from .config import get_config
-from .models import DataQuery, Variables, VarInfo
-from weatheasy.const import CFS2_BANDS, CMIP6_VARS, ONE_DAY
+from weatheasy.const import ONE_DAY
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
     from datetime import date
 
-    import numpy as np
-    import zarr
     from numpy.typing import NDArray
 
+    from .config import Settings
+    from .models import DataQuery
+    from .repository import WeatherRepository
     from weatheasy.util import FormatFloat
 
-    type Getter = Callable[..., NDArray[np.float32]]
 
-
-def get_variables() -> Variables:
-    return Variables(
-        cfs2={k: VarInfo(en=v.info.en, ru=v.info.ru) for k, v in CFS2_BANDS.items()},
-        cmip6={k: VarInfo(en=v.en, ru=v.ru) for k, v in CMIP6_VARS.items()},
-    )
-
-
-async def get_data(getter: Getter, query: DataQuery) -> StreamingResponse:
-    cfg = get_config()
-    data = await to_thread.run_sync(_exec_getter, getter, query, cfg.storage)
-    content = _stream_data(data, query, cfg.format_float)
+async def data_response(
+    repository: WeatherRepository,
+    query: DataQuery,
+    settings: Settings,
+) -> StreamingResponse:
+    batches = repository.stream(query)
+    first = await anext(batches)
+    content = _stream_data(first, batches, query, settings.format_float)
     return StreamingResponse(content, media_type='application/json')
 
 
-def _exec_getter(getter: Getter, query: DataQuery, root: zarr.Group):
-    data = getter(**query, root=root)
-    return data.transpose()
-
-
-def _stream_data(data: NDArray[np.float32], query: DataQuery, format_float: FormatFloat):
+async def _stream_data(
+    first: NDArray[np.float32],
+    batches: AsyncGenerator[NDArray[np.float32]],
+    query: DataQuery,
+    format_float: FormatFloat,
+) -> AsyncIterator[str]:
     sio = StringIO()
     format_row = _row_formatter_factory(sio, query['variables'], format_float)
     date_ = query['begin']
-    buf_size = 10240
+    first_row = True
+    data = first
     sio.write('[')
-    format_row(date_, data[0])
-    for row in data[1:]:
-        date_ += ONE_DAY
-        sio.write(',')
-        format_row(date_, row)
-        pos = sio.tell()
-        if pos >= buf_size:
-            yield sio.getvalue()[:pos]
-            sio.seek(0)
-    sio.write(']')
-    yield sio.getvalue()[: sio.tell()]
+    async with aclosing(batches):
+        while True:
+            for row in data.transpose():
+                if not first_row:
+                    sio.write(',')
+                format_row(date_, row)
+                first_row = False
+                if date_ < query['end']:
+                    date_ += ONE_DAY
+                if sio.tell() >= 10240:
+                    yield sio.getvalue()
+                    sio.seek(0)
+                    sio.truncate()
+            if sio.tell():
+                # Flush each storage batch before starting the next read.
+                yield sio.getvalue()
+                sio.seek(0)
+                sio.truncate()
+            data = await anext(batches, None)
+            if data is None:
+                break
+    yield ']'
 
 
 def _row_formatter_factory(sio: StringIO, variables: Sequence[str], format_float: FormatFloat):
@@ -67,7 +74,7 @@ def _row_formatter_factory(sio: StringIO, variables: Sequence[str], format_float
         sio.write('{')
         for var, val in zip(variables, row, strict=False):
             sio.write(f'"{var}":')
-            sio.write(format_float(val))
+            sio.write(format_float(np.float32(val)))
             sio.write(',')
         sio.write(f'"date":"{date_}"}}')
 

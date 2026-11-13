@@ -1,0 +1,13 @@
+apiVersion: v2
+name: weatheasy
+description: Weather API and scheduled updates through the WeathEasy CLI
+type: application
+version: 0.1.0
+appVersion: "0.3.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/AgroDT/WeathEasy
+sources:
+  - https://github.com/AgroDT/WeathEasy
+maintainers:
+  - name: Petr Tsymbarovich
+    email: petr@tsymbarovich.ru

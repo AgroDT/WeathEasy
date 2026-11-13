@@ -5,11 +5,13 @@ from typing import Annotated, TypedDict
 from fastapi import Depends, Query
 from pydantic import BaseModel, Field, create_model
 
-from weatheasy import Coords, const
+from weatheasy import const
+from weatheasy.query import Coords
 
 
-CFS2Var = Enum('CFS2Var', {k: k for k in const.CFS2_BANDS})  # type: ignore[misc]
-CMIP6Var = Enum('CMIP6Var', {k: k for k in const.CMIP6_VARS})  # type: ignore[misc]
+CFS2Var = Enum('CFS2Var', {k: k for k in (*const.CFS2_BANDS, *const.CORRECTION_INFO)})
+CMIP6Var = Enum('CMIP6Var', {k: k for k in const.CMIP6_VARS})
+ERA5Var = Enum('ERA5Var', {k: k for k in (*const.ERA5_ALL_VARS, *const.CORRECTION_INFO)})
 
 
 class VarInfo(BaseModel):
@@ -18,8 +20,9 @@ class VarInfo(BaseModel):
 
 
 class Variables(BaseModel):
-    cfs2: dict[str, VarInfo]
-    cmip6: dict[str, VarInfo]
+    cfs2: dict[str, VarInfo] | None = None
+    cmip6: dict[str, VarInfo] | None = None
+    era5: dict[str, VarInfo] | None = None
 
 
 class DataQuery(TypedDict):
@@ -29,9 +32,9 @@ class DataQuery(TypedDict):
     variables: list[str]
 
 
-def _query_base(
-    lat: Annotated[float, Query(description='EPSG:4326', ge=-180, le=180, example=55.75222)],
-    lon: Annotated[float, Query(description='EPSG:4326', ge=-90, le=90, example=37.61556)],
+async def _query_base(
+    lat: Annotated[float, Query(description='EPSG:4326', ge=-90, le=90, examples=[55.75222])],
+    lon: Annotated[float, Query(description='EPSG:4326', ge=-180, le=180, examples=[37.61556])],
     begin: Annotated[date, Query()],
     end: Annotated[date, Query()],
 ):
@@ -45,7 +48,7 @@ def _query_base(
 _QueryBase = Annotated[dict, Depends(_query_base)]
 
 
-def _cfs2_query(
+async def _cfs2_query(
     query: _QueryBase,
     variables: Annotated[set[CFS2Var], Query(alias='var')],
 ):
@@ -53,9 +56,17 @@ def _cfs2_query(
     return query
 
 
-def _cmip6_query(
+async def _cmip6_query(
     query: _QueryBase,
     variables: Annotated[set[CMIP6Var], Query(alias='var')],
+):
+    query['variables'] = [v.value for v in variables]
+    return query
+
+
+async def _era5_query(
+    query: _QueryBase,
+    variables: Annotated[set[ERA5Var], Query(alias='var')],
 ):
     query['variables'] = [v.value for v in variables]
     return query
@@ -69,7 +80,9 @@ def _data_item(name: str, variables: type[Enum]):
 
 SFS2Query = Annotated[DataQuery, Depends(_cfs2_query)]
 CMIP6Query = Annotated[DataQuery, Depends(_cmip6_query)]
+ERA5Query = Annotated[DataQuery, Depends(_era5_query)]
 DateField = Annotated[date, Field(alias='date')]
 DecimalField = Annotated[float | None, Field()]
 CFS2DataItem = _data_item('CFS2DataItem', CFS2Var)
 CMIP6DataItem = _data_item('CMIP6DataItem', CMIP6Var)
+ERA5DataItem = _data_item('ERA5DataItem', ERA5Var)

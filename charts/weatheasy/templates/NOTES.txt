@@ -1,0 +1,40 @@
+WeathEasy {{ .Chart.AppVersion }}
+
+{{ if .Values.api.enabled -}}
+{{ if .Values.ingress.enabled -}}
+API routes through Ingress:
+{{ range .Values.ingress.hosts -}}
+  Host: {{ .host }}
+{{ range .paths -}}
+  Path: {{ .path }}
+{{ end -}}
+{{ end }}
+{{ end -}}
+{{ if .Values.httpRoute.enabled -}}
+API routes through Gateway API:
+{{ range .Values.httpRoute.hostnames -}}
+  Host: {{ . }}
+{{ end -}}
+  HTTPRoute: {{ .Release.Namespace }}/{{ include "weatheasy.fullname" . }}
+  TLS and external addresses are configured on the parent Gateway.
+
+{{ end -}}
+Access the API locally:
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "weatheasy.fullname" . }} 8000:{{ .Values.service.port }}
+  http://localhost:8000/docs
+
+{{ if eq .Values.service.type "LoadBalancer" -}}
+Find the load balancer address:
+  kubectl --namespace {{ .Release.Namespace }} get service {{ include "weatheasy.fullname" . }}
+
+{{ end -}}
+{{ else -}}
+The API is disabled.
+
+{{ end -}}
+{{ range $source, $job := .Values.updates -}}
+{{ if $job.enabled -}}
+Scheduled {{ $source }} updates: {{ $job.schedule }} ({{ $job.timeZone }}); suspended={{ $job.suspend }}
+  kubectl --namespace {{ $.Release.Namespace }} get cronjob {{ include "weatheasy.fullname" $ }}-{{ $source }}
+{{ end -}}
+{{ end }}
